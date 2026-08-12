@@ -1,0 +1,12 @@
+[package]
+name = "prping"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smol = "2"
+bpaf = "0.9"
+anyhow = "1"
+termcolor = "1"
+socket2 = { version = "0.6", features = ["all"] }
+rust-i18n = "3"

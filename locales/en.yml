@@ -1,0 +1,139 @@
+_version: 1
+
+icmp:
+  pinging: "Pinging %{addr} with %{size} bytes of data:"
+  iterations: "%{total} iterations (warmup %{warmup}) ping test:"
+
+tcp:
+  connect_to: "TCP connect to %{addr}:%{port}:"
+  iterations: "%{total} iterations (warmup %{warmup}) ping test:"
+
+common:
+  resolving: "Resolving %{host} -> %{ip}"
+  reply_from: "Reply from "
+  bytes: "bytes="
+  time: "time="
+  ttl: "TTL="
+  warmup: "(warmup)"
+  connecting_to: "Connecting to "
+  from: "from "
+  timeout: "Request timed out."
+  connect_failed: "connect failed: %{error}"
+
+stats:
+  sent_received: "Sent = %{sent}, Received = %{received}, Lost = %{lost} (%{pct}% loss),"
+  min_max_avg: "Minimum = %{min}ms, Maximum = %{max}ms, Average = %{avg}ms, StdDev = %{stddev}ms"
+  percentiles: "P50 = %{p50}ms, P95 = %{p95}ms, P99 = %{p99}ms"
+  latency_dist: "Latency distribution:"
+
+bandwidth:
+  warmup_complete: "warmup complete: %{count} sends"
+  tcp_test: "TCP Bandwidth test:"
+  udp_test: "UDP Bandwidth test:"
+  sent_bytes: "Sent = %{bytes} bytes in %{secs}s"
+  bandwidth: "Bandwidth = %{mbps} Mbps"
+
+server:
+  latency_listening: "Latency server listening on %{addr}"
+  bandwidth_listening: "Bandwidth server listening on %{addr}"
+  received: "received %{bytes} bytes from %{peer}, %{secs}s, %{mbps} Mbps"
+
+errors:
+  raw_socket: "cannot create raw socket: %{error}. Requires root or cap_net_raw"
+  cannot_resolve: "cannot resolve host: %{host}"
+  invalid_bind: "invalid bind address: %{addr}. Format: host:port"
+  host_port_required: "HOST[:PORT] required, or -s ADDR:PORT for server mode"
+  udp_requires_port: "UDP requires a port: HOST:PORT"
+  latency_requires_port: "latency requires HOST:PORT"
+  bandwidth_requires_port: "bandwidth requires HOST:PORT"
+  ipv6_format: "IPv6 format: [::1]:port"
+  host_port_format: "Format: host:port, IPv6: [host]:port"
+  invalid_ipv6: "invalid IPv6 format: [host] or [host]:port"
+
+help:
+  options:
+    server: "Server listening address and port"
+    bandwidth: "Bandwidth test mode"
+    count: "Number of sends/receives (default: infinite). Append 's' for seconds e.g. '10s'"
+    interval: "Interval in seconds (0 = fast ping)"
+    size: "Request/payload size (e.g. 64, 8k, 1m). Triggers latency test when port present."
+    lang: "Set language (e.g. en, zh-CN). Default: auto-detect from system."
+    udp: "UDP mode (default is TCP)"
+    quiet: "Suppress per-ping output"
+    histogram: "Print histogram (default 20 buckets)"
+    warmup: "Warmup iterations (default 4)"
+    parallel: "Number of parallel connections"
+    v4: "Force IPv4"
+    v6: "Force IPv6"
+
+  overview: |-
+    prping — ping, latency, bandwidth measurement utility
+
+    Implements ICMP ping, TCP ping, UDP ping, UDP/TCP latency,
+    and UDP/TCP bandwidth measurement.
+
+  usage_line: "Help: prping -h | --help [--help-icmp|--help-tcp|--help-latency|--help-bandwidth]\n   -h, --help            Show all options.\n   --help-icmp           ICMP ping usage.\n   --help-tcp            TCP ping usage.\n   --help-latency        Latency test usage.\n   --help-bandwidth      Bandwidth test usage."
+
+  icmp: |-
+    ICMP ping:
+      prping [-n count] [-i interval] [-l size] [-q] [-w warmup] [--histogram buckets] [-4] [-6] host
+
+      -n           Number of pings. Append 's' for seconds e.g. '10s'.
+      -i           Interval in seconds (0 = fast ping).
+      -l           Request size. Append 'k' for KB, 'm' for MB.
+      -q           Suppress per-ping output.
+      -w           Warmup iterations (default 4).
+      --histogram  Print histogram (default 20 buckets) or custom thresholds.
+      -4           Force IPv4.
+      -6           Force IPv6.
+
+  tcp: |-
+    TCP ping:
+      prping [-n count] [-i interval] [-q] [-w warmup] [--histogram buckets] [-4] [-6] host:port
+
+      Tests TCP port connectivity and measures connection latency.
+      Same options as ICMP ping, but requires a destination port.
+
+  latency: |-
+    TCP/UDP latency test:
+      server: prping [-4] [-6] -s address:port
+      client: prping -l size[k|m] -n count[s] [-u] [-w warmup] [--histogram buckets] [-4] [-6] host:port
+
+      -l           Request size (required). Append 'k' for KB, 'm' for MB.
+      -n           Number of sends/receives. Append 's' for seconds e.g. '10s'.
+      -u           UDP mode (default is TCP).
+      -w           Warmup iterations (default 5).
+      --histogram  Print histogram (default 20 buckets).
+      -4           Force IPv4.
+      -6           Force IPv6.
+      -s           Server listening address and port.
+
+      Server handles both latency and bandwidth tests. Ctrl+C to stop.
+
+  bandwidth: |-
+    TCP/UDP bandwidth test:
+      server: prping [-4] [-6] -s address:port
+      client: prping -b -l size[k|m] -n count[s] [-u] [-P parallel] [-w warmup] [--histogram buckets]
+                    [-4] [-6] host:port
+
+      -b           Enable bandwidth test mode.
+      -l           Request size. Append 'k' for KB, 'm' for MB.
+      -n           Number of sends/receives. Append 's' for seconds e.g. '10s'.
+      -u           UDP mode (default is TCP).
+      -P           Number of parallel connections (default 4).
+      -w           Warmup iterations (default 2x CPU cores).
+      --histogram  Print histogram (default 20 buckets).
+      -4           Force IPv4.
+      -6           Force IPv6.
+      -s           Server listening address and port.
+
+      Server handles both latency and bandwidth tests. Ctrl+C to stop.
+
+  examples: |-
+    Examples:
+      prping 8.8.8.8                      ICMP ping
+      prping www.example.com:80            TCP ping
+      prping -u 8.8.8.8:53                 UDP ping
+      prping -l 64 -n 100 server:8080       Latency test (TCP, 64 bytes)
+      prping -b -l 8k -n 10000 server:8080  Bandwidth test (TCP, 8KB)
+      prping -s 0.0.0.0:8080               Start server for latency/bandwidth
