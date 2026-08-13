@@ -79,10 +79,12 @@ async fn ping_async(target: SocketAddr, count: u64, interval: f64, size: usize, 
 
 fn print_reply(w: &mut StandardStream, src: SocketAddr, size: usize, rtt: Duration, warmup: bool) -> anyhow::Result<()> {
     output::print_green(w, t!("common.reply_from"))?;
-    output::print_cyan(w, format!("{}:{}", src.ip(), src.port()))?;
+    output::print_cyan(w, src.ip().to_string())?;
+    write!(w, ":")?;
+    output::print_magenta(w, src.port().to_string())?;
     write!(w, ": {}{size} ", t!("common.bytes"))?;
     output::print_yellow(w, format!("{}{:.2}ms", t!("common.time"), rtt.as_secs_f64() * 1000.0))?;
-    if warmup { output::print_yellow(w, format!(" {}", t!("common.warmup")))?; }
+    if warmup { output::print_dim(w, format!(" {}", t!("common.warmup")))?; }
     writeln!(w)?;
     Ok(())
 }

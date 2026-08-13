@@ -48,3 +48,17 @@ pub fn writeln_red<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()
     print_red(w, text)?;
     writeln!(w)
 }
+
+/// 打印品红文本（端口号）。
+pub fn print_magenta<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> {
+    w.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)))?;
+    write!(w, "{}", text.as_ref())?;
+    w.reset()
+}
+
+/// 打印暗淡文本（次要信息）。
+pub fn print_dim<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> {
+    w.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(245))).set_intense(false))?;
+    write!(w, "{}", text.as_ref())?;
+    w.reset()
+}

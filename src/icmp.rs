@@ -95,7 +95,7 @@ fn print_reply(w: &mut StandardStream, addr: IpAddr, size: usize, rtt: Duration,
     write!(w, ": {}={size} ", t!("common.bytes"))?;
     output::print_yellow(w, format!("{}={:.2}ms", t!("common.time"), rtt.as_secs_f64() * 1000.0))?;
     write!(w, " {}={ttl}", t!("common.ttl"))?;
-    if warmup { output::print_yellow(w, format!(" {}", t!("common.warmup")))?; }
+    if warmup { output::print_dim(w, format!(" {}", t!("common.warmup")))?; }
     writeln!(w)?;
     Ok(())
 }

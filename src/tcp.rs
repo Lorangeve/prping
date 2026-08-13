@@ -69,10 +69,16 @@ async fn ping_async(addr: SocketAddr, count: u64, interval: f64, quiet: bool, hi
 
 fn print_connected(w: &mut StandardStream, addr: SocketAddr, local: Option<SocketAddr>, rtt: Duration, warmup: bool) -> anyhow::Result<()> {
     output::print_green(w, &t!("common.connecting_to"))?;
-    output::print_cyan(w, format!("{}:{}", addr.ip(), addr.port()))?;
-    if warmup { output::print_yellow(w, format!(" {}", t!("common.warmup")))?; }
+    output::print_cyan(w, addr.ip().to_string())?;
+    write!(w, ":")?;
+    output::print_magenta(w, addr.port().to_string())?;
+    if warmup { output::print_dim(w, format!(" {}", t!("common.warmup")))?; }
     write!(w, ": ")?;
-    if let Some(l) = local { write!(w, "{} {}:{}: ", t!("common.from"), l.ip(), l.port())?; }
+    if let Some(l) = local {
+        output::print_dim(w, format!("{} {}:", t!("common.from"), l.ip()))?;
+        output::print_dim(w, l.port().to_string())?;
+        write!(w, ": ")?;
+    }
     output::print_yellow(w, format!("{:.2}ms", rtt.as_secs_f64() * 1000.0))?;
     writeln!(w)?;
     Ok(())

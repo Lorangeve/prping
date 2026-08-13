@@ -115,10 +115,12 @@ async fn run_udp_client(addr: SocketAddr, count: u64, size: usize, _receive: boo
 
 fn print_latency(w: &mut StandardStream, addr: SocketAddr, rtt: Duration, size: usize, warmup: bool) -> anyhow::Result<()> {
     output::print_green(w, t!("common.reply_from"))?;
-    output::print_cyan(w, format!("{}:{}", addr.ip(), addr.port()))?;
+    output::print_cyan(w, addr.ip().to_string())?;
+    write!(w, ":")?;
+    output::print_magenta(w, addr.port().to_string())?;
     write!(w, ": {}{size} ", t!("common.bytes"))?;
     output::print_yellow(w, format!("{}{:.2}ms", t!("common.time"), rtt.as_secs_f64() * 1000.0))?;
-    if warmup { output::print_yellow(w, format!(" {}", t!("common.warmup")))?; }
+    if warmup { output::print_dim(w, format!(" {}", t!("common.warmup")))?; }
     writeln!(w)?;
     Ok(())
 }

@@ -73,9 +73,15 @@ impl Stats {
 }
 
 pub fn print_summary(w: &mut StandardStream, stats: &Stats) -> Result<()> {
-    writeln!(w, "  {}", t!("stats.sent_received",
+    let loss = stats.loss_pct();
+    let line = t!("stats.sent_received",
         sent = stats.sent, received = stats.received,
-        lost = stats.sent - stats.received, pct = format!("{:.0}", stats.loss_pct())))?;
+        lost = stats.sent - stats.received, pct = format!("{:.0}", loss));
+    // 丢包率着色：0% 绿，<10% 黄，≥10% 红
+    if loss == 0.0 { output::print_green(w, format!("  {line}"))?; }
+    else if loss < 10.0 { output::print_yellow(w, format!("  {line}"))?; }
+    else { output::print_red(w, format!("  {line}"))?; }
+    writeln!(w)?;
 
     if stats.received > 0 {
         let min = stats.min.unwrap().as_secs_f64() * 1000.0;
