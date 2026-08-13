@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use termcolor::StandardStream;
 
 #[allow(clippy::too_many_arguments)]
-pub fn run_client(host: &str, port: u16, count: u64, size: usize, udp: bool, histogram: Option<usize>, warmup: u64, v4: bool, v6: bool) -> anyhow::Result<()> {
+pub fn run_client(host: &str, port: u16, count: u64, size: usize, udp: bool, receive: bool, histogram: Option<usize>, warmup: u64, v4: bool, v6: bool) -> anyhow::Result<()> {
     let addr = resolve(host, port, v4, v6)?;
     if host.parse::<IpAddr>().is_err() {
         let stripped = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
@@ -20,7 +20,7 @@ pub fn run_client(host: &str, port: u16, count: u64, size: usize, udp: bool, his
             writeln!(&mut w, "{}", t!("common.resolving", host = host, ip = addr.ip().to_string()))?;
         }
     }
-    smol::block_on(run_client_async(addr, count, size, udp, histogram, warmup))
+    smol::block_on(run_client_async(addr, count, size, udp, receive, histogram, warmup))
 }
 
 fn resolve(host: &str, port: u16, force_v4: bool, force_v6: bool) -> anyhow::Result<SocketAddr> {
@@ -37,16 +37,15 @@ fn resolve(host: &str, port: u16, force_v4: bool, force_v6: bool) -> anyhow::Res
     })?)
 }
 
-async fn run_client_async(addr: SocketAddr, count: u64, size: usize, udp: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
-    if udp { run_udp_client(addr, count, size, histogram, warmup).await }
-    else { run_tcp_client(addr, count, size, histogram, warmup).await }
+async fn run_client_async(addr: SocketAddr, count: u64, size: usize, udp: bool, receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+    if udp { run_udp_client(addr, count, size, receive, histogram, warmup).await }
+    else { run_tcp_client(addr, count, size, receive, histogram, warmup).await }
 }
 
-async fn run_tcp_client(addr: SocketAddr, count: u64, size: usize, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+async fn run_tcp_client(addr: SocketAddr, count: u64, size: usize, receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
     let mut stats = Stats::default();
     let mut w = output::stdout();
     let total = warmup + count;
-    let payload = vec![0x42u8; size];
 
     for seq in 0..total {
         if seq > 0 { smol::Timer::after(Duration::from_secs(1)).await; }
@@ -56,6 +55,22 @@ async fn run_tcp_client(addr: SocketAddr, count: u64, size: usize, histogram: Op
             Err(e) => { if seq >= warmup { stats.record_loss(); output::writeln_red(&mut w, &t!("common.connect_failed", error = e))?; } continue; }
         };
         stream.set_nodelay(true)?;
+
+        if receive {
+            // Send trigger byte, server responds with size bytes
+            stream.write_all(&[0xFF]).await?;
+            let mut buf = vec![0u8; size + 1];
+            match smol::future::or(
+                async { stream.read_exact(&mut buf[..1]).await?; stream.read_exact(&mut buf[1..]).await.map(|_| size + 1) },
+                async { smol::Timer::after(Duration::from_secs(10)).await; Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout")) },
+            ).await {
+                Ok(_) => { let rtt = start.elapsed(); let is_warmup = seq < warmup; if !is_warmup { stats.record(rtt); } print_latency(&mut w, addr, rtt, size, is_warmup)?; }
+                Err(_) => { if seq >= warmup { stats.record_loss(); } output::writeln_red(&mut w, t!("common.timeout"))?; }
+            }
+            continue;
+        }
+
+        let payload = vec![0x42u8; size];
         if stream.write_all(&payload).await.is_err() { continue; }
 
         let mut buf = vec![0u8; size];
@@ -71,7 +86,9 @@ async fn run_tcp_client(addr: SocketAddr, count: u64, size: usize, histogram: Op
     Ok(())
 }
 
-async fn run_udp_client(addr: SocketAddr, count: u64, size: usize, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+async fn run_udp_client(addr: SocketAddr, count: u64, size: usize, _receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+    // UDP receive mode not implemented
+    let _ = _receive;
     let bind_addr: SocketAddr = if addr.is_ipv4() { "0.0.0.0:0".parse()? } else { "[::]:0".parse()? };
     let sock = UdpSocket::bind(bind_addr).await?;
     let mut stats = Stats::default();

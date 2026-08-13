@@ -71,6 +71,7 @@ fn cmd() -> impl Parser<Command> {
         .help(t!("help.options.lang").as_ref())
         .optional();
 
+    let receive = long("receive").short('r').switch().help("Receive from server instead of sending");
     let udp = long("udp").short('u').switch().help(t!("help.options.udp").as_ref());
     let quiet = long("quiet").short('q').switch().help(t!("help.options.quiet").as_ref());
     let histogram = long("histogram").short('H').argument::<String>("N").help(t!("help.options.histogram").as_ref()).optional();
@@ -83,7 +84,7 @@ fn cmd() -> impl Parser<Command> {
 
     construct!(Command {
         help_icmp, help_tcp, help_latency, help_bandwidth,
-        server, bandwidth, count, interval, req_size, lang, udp, quiet, histogram,
+        server, bandwidth, count, interval, req_size, lang, receive, udp, quiet, histogram,
         warmup, parallel, v4, v6, pretty, target,
     })
 }
@@ -130,6 +131,7 @@ struct Command {
     v4: bool,
     v6: bool,
     pretty: bool,
+    receive: bool,
     target: Option<String>,
 }
 
@@ -192,13 +194,13 @@ fn main() -> anyhow::Result<()> {
         let size = parse_size(cmd.req_size.as_deref().unwrap_or("8192"))?;
         let cnt_str = cmd.count.as_deref().unwrap_or("10000");
         let (cnt, _) = parse_count(cnt_str)?;
-        bandwidth::run_client(&host, p, cnt.max(1000), size, cmd.parallel, cmd.udp, hist, cmd.warmup, cmd.v4, cmd.v6)
+        bandwidth::run_client(&host, p, cnt.max(1000), size, cmd.parallel, cmd.udp, cmd.receive, hist, cmd.warmup, cmd.v4, cmd.v6)
     } else if cmd.req_size.is_some() {
         let p = port.ok_or_else(|| anyhow::anyhow!("latency requires HOST:PORT"))?;
         let size = parse_size(cmd.req_size.as_deref().unwrap())?;
         let cnt_str = cmd.count.as_deref().unwrap_or("100");
         let (cnt, _) = parse_count(cnt_str)?;
-        latency::run_client(&host, p, cnt.max(1), size, cmd.udp, hist, cmd.warmup, cmd.v4, cmd.v6)
+        latency::run_client(&host, p, cnt.max(1), size, cmd.udp, cmd.receive, hist, cmd.warmup, cmd.v4, cmd.v6)
     } else if let Some(p) = port {
         let cnt = cmd.count.as_deref().map(|s| s.parse().unwrap_or(0)).unwrap_or(0);
         if cmd.udp {
@@ -222,14 +224,25 @@ fn print_summary_help() {
     println!("{}", t!("help.examples"));
 }
 
-/// Server handles both latency and bandwidth client connections.
+/// Server handles both latency and bandwidth client connections (TCP + UDP).
 async fn serve_both(addr: String) -> anyhow::Result<()> {
     use smol::io::{AsyncReadExt, AsyncWriteExt};
-    use smol::net::TcpListener;
+    use smol::net::{TcpListener, UdpSocket};
     let addr: std::net::SocketAddr = addr.parse()
         .map_err(|_| anyhow::anyhow!(t!("errors.invalid_bind", addr = addr)))?;
     println!("{}", t!("server.bandwidth_listening", addr = addr));
     let listener = TcpListener::bind(addr).await?;
+
+    // UDP echo server (latency/bandwidth UDP mode)
+    let udp_socket = UdpSocket::bind(addr).await?;
+    smol::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        loop {
+            if let Ok((n, src)) = udp_socket.recv_from(&mut buf).await {
+                let _ = udp_socket.send_to(&buf[..n], src).await;
+            }
+        }
+    }).detach();
 
     loop {
         let (mut stream, peer) = listener.accept().await?;
@@ -244,6 +257,15 @@ async fn serve_both(addr: String) -> anyhow::Result<()> {
                     Ok(0) => break,
                     Ok(n) => {
                         total += n as u64;
+                        // Detect receive-mode trigger (0xFF byte)
+                        if n == 1 && buf[0] == 0xFF && total == 1 {
+                            // Receive mode: generate and send data continuously
+                            let dummy = vec![0u8; 65536];
+                            loop {
+                                if stream.write_all(&dummy).await.is_err() { break; }
+                            }
+                            break;
+                        }
                         if echo_ok {
                             let echo = smol::future::or(
                                 stream.write_all(&buf[..n]),

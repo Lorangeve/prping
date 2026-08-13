@@ -2,14 +2,14 @@
 
 use crate::output;
 use rust_i18n::t;
-use smol::io::AsyncWriteExt;
+use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::net::{TcpStream, UdpSocket};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 #[allow(clippy::too_many_arguments)]
-pub fn run_client(host: &str, port: u16, count: u64, size: usize, parallel: u32, udp: bool, histogram: Option<usize>, warmup: u64, v4: bool, v6: bool) -> anyhow::Result<()> {
+pub fn run_client(host: &str, port: u16, count: u64, size: usize, parallel: u32, udp: bool, receive: bool, histogram: Option<usize>, warmup: u64, v4: bool, v6: bool) -> anyhow::Result<()> {
     let addr = resolve(host, port, v4, v6)?;
     if host.parse::<IpAddr>().is_err() {
         let stripped = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
@@ -18,7 +18,7 @@ pub fn run_client(host: &str, port: u16, count: u64, size: usize, parallel: u32,
             writeln!(&mut w, "{}", t!("common.resolving", host = host, ip = addr.ip().to_string()))?;
         }
     }
-    smol::block_on(run_client_async(addr, count, size, parallel, udp, histogram, warmup))
+    smol::block_on(run_client_async(addr, count, size, parallel, udp, receive, histogram, warmup))
 }
 
 fn resolve(host: &str, port: u16, force_v4: bool, force_v6: bool) -> anyhow::Result<SocketAddr> {
@@ -35,18 +35,37 @@ fn resolve(host: &str, port: u16, force_v4: bool, force_v6: bool) -> anyhow::Res
     })?)
 }
 
-async fn run_client_async(addr: SocketAddr, count: u64, size: usize, parallel: u32, udp: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
-    if udp { run_udp(addr, count, size, histogram, warmup).await }
-    else { run_tcp(addr, count, size, parallel, histogram, warmup).await }
+#[allow(clippy::too_many_arguments)]
+async fn run_client_async(addr: SocketAddr, count: u64, size: usize, parallel: u32, udp: bool, receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+    if udp { run_udp(addr, count, size, receive, histogram, warmup).await }
+    else { run_tcp(addr, count, size, parallel, receive, histogram, warmup).await }
 }
 
-async fn run_tcp(addr: SocketAddr, count: u64, size: usize, parallel: u32, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
-    if warmup > 0 {
+async fn run_tcp(addr: SocketAddr, count: u64, size: usize, parallel: u32, receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+    if warmup > 0 && !receive {
         let mut stream = connect_timeout(addr).await?;
         stream.set_nodelay(true)?;
         let payload = vec![0u8; size];
         for _ in 0..warmup { stream.write_all(&payload).await?; }
         println!("{}", t!("bandwidth.warmup_complete", count = warmup));
+    }
+
+    if receive {
+        let mut stream = connect_timeout(addr).await?;
+        stream.set_nodelay(true)?;
+        stream.write_all(&[0xFF]).await?;
+        let target_bytes = count * size as u64;
+        let mut buf = vec![0u8; 65536];
+        let mut total: u64 = 0;
+        let start = Instant::now();
+        while total < target_bytes {
+            let n = stream.read(&mut buf).await?;
+            if n == 0 { break; }
+            total += n as u64;
+        }
+        let times = vec![start.elapsed()];
+        report(t!("bandwidth.tcp_test"), size, count, start.elapsed(), histogram, &times)?;
+        return Ok(());
     }
 
     if parallel <= 1 {
@@ -92,7 +111,9 @@ async fn connect_timeout(addr: SocketAddr) -> anyhow::Result<TcpStream> {
     ).await.map_err(Into::into)
 }
 
-async fn run_udp(addr: SocketAddr, count: u64, size: usize, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+async fn run_udp(addr: SocketAddr, count: u64, size: usize, _receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+    // UDP receive mode not implemented; falls back to send
+    let _ = _receive;
     let bind_addr: SocketAddr = if addr.is_ipv4() { "0.0.0.0:0".parse()? } else { "[::]:0".parse()? };
     let sock = UdpSocket::bind(bind_addr).await?;
     if warmup > 0 {
