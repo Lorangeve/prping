@@ -466,12 +466,10 @@ pub fn print_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
             write!(w, "        │")?;
         }
         for (_x, y) in &sampled {
-            let norm = ((*y - min_y) / y_range * height as f64) as usize;
-            let idx = if (norm as isize - row as isize).abs() <= 0 {
-                7
-            } else {
-                0
-            };
+            // 用 height-1 做乘数：max_y → norm=15（最顶行），min_y → 0，
+            // 避免 norm=16 越界导致最高延迟点丢失
+            let norm = ((*y - min_y) / y_range * (height - 1) as f64).round() as usize;
+            let idx = if norm == row { 7 } else { 0 };
             write!(w, "{}", bar_char[idx])?;
         }
         writeln!(w)?;
