@@ -10,3 +10,4 @@ anyhow = "1"
 termcolor = "1"
 socket2 = { version = "0.6", features = ["all"] }
 rust-i18n = "3"
+libc = "0.2"

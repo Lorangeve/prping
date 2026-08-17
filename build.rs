@@ -14,18 +14,26 @@ fn main() {
     let runner = config_dir.join("run-with-cap.sh");
     let script = "#!/bin/sh\nBIN=\"$1\"; shift\nsudo -n setcap cap_net_raw+ep \"$BIN\" 2>/dev/null\nexec \"$BIN\" \"$@\"\n";
     let _ = std::fs::write(&runner, script);
-    let _ = std::process::Command::new("chmod").arg("+x").arg(&runner).status();
+    let _ = std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&runner)
+        .status();
 
     // .cargo/config.toml
     let config = config_dir.join("config.toml");
     if !config.exists() {
-        let content = "[target.'cfg(target_os = \"linux\")']\nrunner = \".cargo/run-with-cap.sh\"\n";
+        let content =
+            "[target.'cfg(target_os = \"linux\")']\nrunner = \".cargo/run-with-cap.sh\"\n";
         let _ = std::fs::write(&config, content);
     }
 
     // 预授权提示
-    let Ok(out_dir) = std::env::var("OUT_DIR") else { return };
-    let Ok(profile) = std::env::var("PROFILE") else { return };
+    let Ok(out_dir) = std::env::var("OUT_DIR") else {
+        return;
+    };
+    let Ok(profile) = std::env::var("PROFILE") else {
+        return;
+    };
     let target_dir = std::path::Path::new(&out_dir).ancestors().nth(3).unwrap();
     let binary = target_dir.join(&profile).join("prping");
 

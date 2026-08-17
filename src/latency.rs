@@ -2,143 +2,256 @@
 
 use crate::output;
 use crate::stats::{self, Stats};
+use crate::util::{self, PingConfig, Run};
 use rust_i18n::t;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
-use smol::net::{TcpStream, UdpSocket};
 use std::io::Write;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::mem::MaybeUninit;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use termcolor::StandardStream;
 
-#[allow(clippy::too_many_arguments)]
-pub fn run_client(host: &str, port: u16, count: u64, size: usize, udp: bool, receive: bool, histogram: Option<usize>, warmup: u64, v4: bool, v6: bool) -> anyhow::Result<()> {
-    let addr = resolve(host, port, v4, v6)?;
-    if host.parse::<IpAddr>().is_err() {
-        let stripped = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
-        if stripped.parse::<IpAddr>().is_err() {
+/// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
+pub fn run_client(cfg: &PingConfig) -> anyhow::Result<bool> {
+    let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
+    if cfg.host.parse::<IpAddr>().is_err() {
+        let stripped = cfg
+            .host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(&cfg.host);
+        if stripped.parse::<IpAddr>().is_err() && !stats::json() {
             let mut w = output::stdout();
-            writeln!(&mut w, "{}", t!("common.resolving", host = host, ip = addr.ip().to_string()))?;
+            writeln!(
+                &mut w,
+                "{}",
+                t!(
+                    "common.resolving",
+                    host = cfg.host,
+                    ip = addr.ip().to_string()
+                )
+            )?;
         }
     }
-    smol::block_on(run_client_async(addr, count, size, udp, receive, histogram, warmup))
+    smol::block_on(run_client_async(addr, cfg))
 }
 
-fn resolve(host: &str, port: u16, force_v4: bool, force_v6: bool) -> anyhow::Result<SocketAddr> {
-    let raw = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
-    if let Ok(ip) = raw.parse::<IpAddr>() { return Ok(SocketAddr::new(ip, port)); }
-    let host = raw.to_string();
-    Ok(smol::block_on(async {
-        smol::unblock(move || {
-            let mut addrs: Vec<SocketAddr> = (host.as_str(), port).to_socket_addrs()?.collect();
-            if force_v4 { addrs.retain(|a| a.is_ipv4()); }
-            else if force_v6 { addrs.retain(|a| a.is_ipv6()); }
-            addrs.into_iter().next().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, t!("errors.cannot_resolve", host = host)))
-        }).await
-    })?)
+async fn run_client_async(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
+    if cfg.udp {
+        run_udp_client(addr, cfg).await
+    } else {
+        run_tcp_client(addr, cfg).await
+    }
 }
 
-async fn run_client_async(addr: SocketAddr, count: u64, size: usize, udp: bool, receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
-    if udp { run_udp_client(addr, count, size, receive, histogram, warmup).await }
-    else { run_tcp_client(addr, count, size, receive, histogram, warmup).await }
-}
-
-async fn run_tcp_client(addr: SocketAddr, count: u64, size: usize, receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
+async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
     let mut stats = Stats::default();
     let mut w = output::stdout();
-    let total = warmup + count;
+    let payload = vec![0x42u8; cfg.size];
+    let mut buf = vec![0u8; cfg.size + 1];
+    let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
 
-    for seq in 0..total {
-        if seq > 0 { smol::Timer::after(Duration::from_secs(1)).await; }
+    loop {
+        if run.seq() > 0 {
+            smol::Timer::after(Duration::from_secs(1)).await;
+        }
+        if run.done() {
+            break;
+        }
+        let is_warmup = run.is_warmup();
         let start = Instant::now();
-        let mut stream = match connect_timeout(addr).await {
+        let mut stream = match util::connect_timeout(addr).await {
             Ok(s) => s,
-            Err(e) => { if seq >= warmup { stats.record_loss(); output::writeln_red(&mut w, &t!("common.connect_failed", error = e))?; } continue; }
+            Err(e) => {
+                if !is_warmup {
+                    stats.record_loss();
+                    if !stats::json() {
+                        output::writeln_red(&mut w, &t!("common.connect_failed", error = e))?;
+                    }
+                }
+                run.advance();
+                continue;
+            }
         };
         stream.set_nodelay(true)?;
 
-        if receive {
-            // Send trigger byte, server responds with size bytes
+        if cfg.receive {
+            // 发送触发字节，服务器回送 size 字节
             stream.write_all(&[0xFF]).await?;
-            let mut buf = vec![0u8; size + 1];
             match smol::future::or(
-                async { stream.read_exact(&mut buf[..1]).await?; stream.read_exact(&mut buf[1..]).await.map(|_| size + 1) },
-                async { smol::Timer::after(Duration::from_secs(10)).await; Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout")) },
-            ).await {
-                Ok(_) => { let rtt = start.elapsed(); let is_warmup = seq < warmup; if !is_warmup { stats.record(rtt); } print_latency(&mut w, addr, rtt, size, is_warmup)?; }
-                Err(_) => { if seq >= warmup { stats.record_loss(); } output::writeln_red(&mut w, t!("common.timeout"))?; }
+                async {
+                    stream.read_exact(&mut buf[..1]).await?;
+                    stream.read_exact(&mut buf[1..]).await.map(|_| cfg.size + 1)
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
+                },
+            )
+            .await
+            {
+                Ok(_) => {
+                    let rtt = start.elapsed();
+                    if !is_warmup {
+                        stats.record(rtt);
+                    }
+                    if !stats::json() {
+                        print_latency(&mut w, addr, rtt, cfg.size, is_warmup)?;
+                    }
+                }
+                Err(_) => {
+                    if !is_warmup {
+                        stats.record_loss();
+                    }
+                    if !stats::json() {
+                        output::writeln_red(&mut w, t!("common.timeout"))?;
+                    }
+                }
             }
+            run.advance();
             continue;
         }
 
-        let payload = vec![0x42u8; size];
-        if stream.write_all(&payload).await.is_err() { continue; }
-
-        let mut buf = vec![0u8; size];
-        match smol::future::or(
-            async { stream.read_exact(&mut buf).await },
-            async { smol::Timer::after(Duration::from_secs(10)).await; Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout")) },
-        ).await {
-            Ok(_) => { let rtt = start.elapsed(); let is_warmup = seq < warmup; if !is_warmup { stats.record(rtt); } print_latency(&mut w, addr, rtt, size, is_warmup)?; }
-            Err(_) => { let is_warmup = seq < warmup; if !is_warmup { stats.record_loss(); } output::writeln_red(&mut w, t!("common.timeout"))?; }
+        if stream.write_all(&payload).await.is_err() {
+            run.advance();
+            continue;
         }
+        match smol::future::or(
+            async { stream.read_exact(&mut buf[..cfg.size]).await },
+            async {
+                smol::Timer::after(Duration::from_secs(10)).await;
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
+            },
+        )
+        .await
+        {
+            Ok(_) => {
+                let rtt = start.elapsed();
+                if !is_warmup {
+                    stats.record(rtt);
+                }
+                if !stats::json() {
+                    print_latency(&mut w, addr, rtt, cfg.size, is_warmup)?;
+                }
+            }
+            Err(_) => {
+                if !is_warmup {
+                    stats.record_loss();
+                }
+                if !stats::json() {
+                    output::writeln_red(&mut w, t!("common.timeout"))?;
+                }
+            }
+        }
+        run.advance();
     }
-    print_result(&mut w, &stats, histogram)?;
-    Ok(())
+    print_result(&mut w, &stats, cfg)?;
+    Ok(stats.loss_pct() > 0.0)
 }
 
-async fn run_udp_client(addr: SocketAddr, count: u64, size: usize, _receive: bool, histogram: Option<usize>, warmup: u64) -> anyhow::Result<()> {
-    // UDP receive mode not implemented
-    let _ = _receive;
-    let bind_addr: SocketAddr = if addr.is_ipv4() { "0.0.0.0:0".parse()? } else { "[::]:0".parse()? };
-    let sock = UdpSocket::bind(bind_addr).await?;
+async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
+    let bind_addr: SocketAddr = if addr.is_ipv4() {
+        "0.0.0.0:0".parse()?
+    } else {
+        "[::]:0".parse()?
+    };
+    let sock = util::bind_udp(bind_addr)?;
     let mut stats = Stats::default();
     let mut w = output::stdout();
-    let total = warmup + count;
-    let payload = vec![0x42u8; size];
+    let payload = vec![0x42u8; cfg.size];
+    let trigger = util::udp_receive_trigger(cfg.size, 1);
+    let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size + 512];
+    let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
 
-    for seq in 0..total {
-        if seq > 0 { smol::Timer::after(Duration::from_secs(1)).await; }
-        let start = Instant::now();
-        if sock.send_to(&payload, addr).await.is_err() { continue; }
-        let mut buf = vec![0u8; size + 512];
-        match smol::future::or(
-            async { Some(sock.recv_from(&mut buf).await) },
-            async { smol::Timer::after(Duration::from_secs(10)).await; None },
-        ).await {
-            Some(Ok((n, _))) => { let rtt = start.elapsed(); let is_warmup = seq < warmup; if !is_warmup { stats.record(rtt); } print_latency(&mut w, addr, rtt, n, is_warmup)?; }
-            _ => { let is_warmup = seq < warmup; if !is_warmup { stats.record_loss(); } output::writeln_red(&mut w, t!("common.timeout"))?; }
+    loop {
+        if run.seq() > 0 {
+            smol::Timer::after(Duration::from_secs(1)).await;
         }
+        if run.done() {
+            break;
+        }
+        let is_warmup = run.is_warmup();
+        let start = Instant::now();
+        // 接收模式：发送触发包，服务器回送 size 字节；否则发送 size 字节负载
+        let sent = if cfg.receive {
+            util::udp_send(&sock, &trigger, &addr).await
+        } else {
+            util::udp_send(&sock, &payload, &addr).await
+        };
+        if sent.is_err() {
+            run.advance();
+            continue;
+        }
+
+        match smol::future::or(
+            async { Some(util::udp_recv(&sock, &mut buf).await) },
+            async {
+                smol::Timer::after(Duration::from_secs(10)).await;
+                None
+            },
+        )
+        .await
+        {
+            Some(Ok((n, _))) => {
+                let rtt = start.elapsed();
+                if !is_warmup {
+                    stats.record(rtt);
+                }
+                if !stats::json() {
+                    print_latency(&mut w, addr, rtt, n, is_warmup)?;
+                }
+            }
+            _ => {
+                if !is_warmup {
+                    stats.record_loss();
+                }
+                if !stats::json() {
+                    output::writeln_red(&mut w, t!("common.timeout"))?;
+                }
+            }
+        }
+        run.advance();
     }
-    print_result(&mut w, &stats, histogram)?;
-    Ok(())
+    print_result(&mut w, &stats, cfg)?;
+    Ok(stats.loss_pct() > 0.0)
 }
 
-fn print_latency(w: &mut StandardStream, addr: SocketAddr, rtt: Duration, size: usize, warmup: bool) -> anyhow::Result<()> {
+fn print_latency(
+    w: &mut StandardStream,
+    addr: SocketAddr,
+    rtt: Duration,
+    size: usize,
+    warmup: bool,
+) -> anyhow::Result<()> {
     output::print_green(w, t!("common.reply_from"))?;
     output::print_cyan(w, addr.ip().to_string())?;
     write!(w, ":")?;
     output::print_magenta(w, addr.port().to_string())?;
     write!(w, ": {}{size} ", t!("common.bytes"))?;
-    output::print_yellow(w, format!("{}{:.2}ms", t!("common.time"), rtt.as_secs_f64() * 1000.0))?;
-    if warmup { output::print_dim(w, format!(" {}", t!("common.warmup")))?; }
+    output::print_yellow(
+        w,
+        format!("{}{:.2}ms", t!("common.time"), rtt.as_secs_f64() * 1000.0),
+    )?;
+    if warmup {
+        output::print_dim(w, format!(" {}", t!("common.warmup")))?;
+    }
     writeln!(w)?;
     Ok(())
 }
 
-async fn connect_timeout(addr: SocketAddr) -> Result<TcpStream, std::io::Error> {
-    smol::future::or(
-        TcpStream::connect(addr),
-        async {
-            smol::Timer::after(Duration::from_secs(5)).await;
-            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))
-        },
-    ).await
-}
-
-fn print_result(w: &mut StandardStream, stats: &Stats, histogram: Option<usize>) -> anyhow::Result<()> { println!(); stats::print_summary(w, stats)?; if histogram.is_some() && stats.received > 0 { stats::print_histogram(w, stats, histogram)?; } stats::print_timeline(w, stats)?; Ok(()) }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test] fn test_resolve_ipv6_brackets() { let a = resolve("[::1]", 9999, false, false).unwrap(); assert_eq!(a.ip().to_string(), "::1"); assert_eq!(a.port(), 9999); }
+fn print_result(w: &mut StandardStream, stats: &Stats, cfg: &PingConfig) -> anyhow::Result<()> {
+    if !stats::json() {
+        println!();
+    }
+    stats::print_summary(w, stats, "latency")?;
+    if !stats::json()
+        && stats.received > 0
+        && let Some(spec) = &cfg.histogram
+    {
+        stats::print_histogram(w, stats, spec)?;
+    }
+    if !stats::json() {
+        stats::print_timeline(w, stats)?;
+    }
+    Ok(())
 }

@@ -58,7 +58,11 @@ pub fn print_magenta<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<
 
 /// 打印暗淡文本（次要信息）。
 pub fn print_dim<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> {
-    w.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(245))).set_intense(false))?;
+    w.set_color(
+        ColorSpec::new()
+            .set_fg(Some(Color::Ansi256(245)))
+            .set_intense(false),
+    )?;
     write!(w, "{}", text.as_ref())?;
     w.reset()
 }
