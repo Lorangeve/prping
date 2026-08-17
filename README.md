@@ -148,10 +148,13 @@ Latency timeline (Y: 0.12~0.17ms, X: 0~2.0s):
 ## 开发
 
 ```bash
-cargo test          # 单元 34 + 集成 16 = 50 tests
-cargo clippy        # 零警告
-cargo fmt           # rustfmt 统一格式
+cargo test --all-targets   # 单元 34 + 协议 9 + CLI 5 + doc = 49 tests
+cargo clippy               # 零警告
+cargo fmt                  # rustfmt 统一格式
+bash scripts/bench.sh      # 本地回环吞吐/延迟基准（阈值断言）
 ```
+
+贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## License
 

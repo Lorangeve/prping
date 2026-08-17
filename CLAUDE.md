@@ -7,8 +7,8 @@
 - **异步运行时**: [smol](https://github.com/smol-rs/smol) — 轻量级，组件化
 - **ICMP**: 手写 raw socket (socket2) + smol::Async，无第三方 ICMP 依赖
 - **CLI**: [bpaf](https://github.com/pacak/bpaf) — 轻量级，编译快
-- **错误处理**: anyhow（单 bin crate，无 lib）
-- **代码结构**: 单 crate — `main.rs`, `util.rs`, `icmp.rs`, `tcp.rs`, `udp.rs`, `latency.rs`, `bandwidth.rs`, `stats.rs`, `output.rs`
+- **错误处理**: lib 层用 thiserror（`PrpingError` 分派层枚举 + IO/anyhow 透传），bin 层用 anyhow 做胶水
+- **代码结构**: 单 crate 双 target — `src/lib.rs`（协议/统一入口 `run`/`serve`，公开面最小化）+ `src/main.rs`（CLI 解析/渲染/退出码/信号安装）+ `src/{util,stats,output,icmp,tcp,udp,latency,bandwidth}.rs`（lib 内部）
 - **终端颜色**: [termcolor](https://github.com/BurntSushi/termcolor)，颜色函数统一在 `output.rs`（客户端与服务端一致）
 - **直方图**: 默认 ASCII `#`，`-p`/`--pretty` 用 Unicode `█`（内置实现，无外部依赖）；`-H` 支持桶数或逗号分隔阈值（ms）
 - **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en.yml` + `locales/zh-CN.yml`，自动检测 `$LANG` 或 `--lang`
@@ -20,7 +20,7 @@
 - **UDP**: socket2 大收发缓冲（4MB）+ smol::Async 包装（`util::bind_udp`），避免突发丢包
 - **UDP 接收模式**: 触发包协议 `[0xFF, 0xFF, size(2B), count(4B)]`，服务端回送 count 个 size 字节数据报
 - **JSON 输出**: `--json` 输出机器可读统计（`stats::set_json`），抑制人读输出
-- **退出码**: 测试函数返回 `bool`（是否有丢包），main 据此返回 1
+- **退出码**: `run()` 返回 `OutcomeKind`（Ping(Stats)/Bandwidth(report)），bin 依据 `Stats::has_loss()` 返回 1
 - **IPv6**: `-4`/`-6` 全支持
 - **TCP_NODELAY**: 默认关闭 Nagle
 
@@ -51,13 +51,14 @@ prping -s ADDR:PORT         Server（同时服务 latency/bandwidth）
 ## 编码约定
 
 - Rust edition 2024
-- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test` 全通过（单元 34 + 集成 16 = 50 tests）
+- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --all-targets` 全通过（单元 34 + 协议 9 + CLI 5 + doc = 49 tests）
 - 用户可见输出英文，注释中文
 - 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端不使用内联 ANSI）
 - 共享逻辑（DNS 解析、运行循环、UDP socket、测试参数 `PingConfig`）收敛在 `util.rs`，不重复实现
+- lib 公开面最小化：只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告，其余 `pub(crate)`
 - 不引入不必要的抽象
 - 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner 设置 cap_net_raw
-- CI: `.github/workflows/ci.yml` — fmt/clippy/单元/集成 × Linux/macOS/Windows
+- CI: `.github/workflows/ci.yml` — fmt/clippy/doc/全部测试 × Linux/macOS/Windows + 非门禁基准 job
 - 跨平台编译检查: `cargo check --target x86_64-pc-windows-msvc`（Windows 路径需本机验证时用临时 CARGO_HOME）
 
 ## 版本控制
