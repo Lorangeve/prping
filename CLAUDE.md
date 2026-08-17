@@ -59,7 +59,7 @@ prping -g HOST:PORT        TCP ping + 时间线图（-gp 用 ploot 渲染）
 - 共享逻辑（DNS 解析、运行循环、UDP socket、测试参数 `PingConfig`）收敛在 `util.rs`，不重复实现
 - lib 公开面最小化：只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告，其余 `pub(crate)`
 - 不引入不必要的抽象
-- 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner 设置 cap_net_raw
+- 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner 设置 cap_net_raw；各平台产物配方在 `justfile`（`just build-release` / `build-win7` / `build-windows` / `test` / `lint` 等）
 - CI: `.github/workflows/ci.yml` — fmt/clippy/doc/全部测试 × Linux/macOS/Windows + 非门禁基准 job
 - 跨平台编译检查: `cargo check --target x86_64-pc-windows-msvc`（Windows 路径需本机验证时用临时 CARGO_HOME）
 

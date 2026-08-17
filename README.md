@@ -166,11 +166,15 @@ Latency timeline (Y: 0.12~0.17ms, X: 0~2.0s):
 ## 开发
 
 ```bash
-cargo test --all-targets   # 单元 34 + 协议 9 + CLI 5 + doc = 49 tests
-cargo clippy               # 零警告
-cargo fmt                  # rustfmt 统一格式
-bash scripts/bench.sh      # 本地回环吞吐/延迟基准（阈值断言）
+just test                  # 全部测试（49）
+just lint                  # clippy 零警告
+just fmt-check             # 格式检查
+just bench                 # 本地回环基准（阈值断言）
+just build-win7            # Windows 7 兼容版
+just build-windows         # 全部 Windows 产物
 ```
+
+> 各平台产物构建配方统一在 `justfile`（需安装 [just](https://github.com/casey/just)）；不用 just 时等价命令见上。
 
 贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
