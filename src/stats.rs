@@ -481,10 +481,10 @@ pub fn print_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
         write!(w, "─")?;
     }
     writeln!(w)?;
-    // X 轴标签：从 "0s" 到末端，label 与 "0s" 之间至少一个空格
+    // X 轴标签：右端对齐轴尾（"0s" 2 字符 + pad + label 顶到末个 "─"）
     write!(w, "       0s")?;
     let label = format!("{:.1}s", max_x);
-    let pad = sampled.len().saturating_sub(label.len() + 3).max(1);
+    let pad = sampled.len().saturating_sub(label.len() + 1).max(1);
     for _ in 0..pad {
         write!(w, " ")?;
     }
