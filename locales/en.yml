@@ -3,10 +3,12 @@ _version: 1
 icmp:
   pinging: "Pinging %{addr} with %{size} bytes of data:"
   iterations: "%{total} iterations (warmup %{warmup}) ping test:"
+  duration: "%{secs}s duration (warmup %{warmup}) ping test:"
 
 tcp:
   connect_to: "TCP connect to %{addr}:%{port}:"
   iterations: "%{total} iterations (warmup %{warmup}) ping test:"
+  duration: "%{secs}s duration (warmup %{warmup}) ping test:"
 
 common:
   resolving: "Resolving %{host} -> %{ip}"
@@ -19,6 +21,8 @@ common:
   from: "from "
   timeout: "Request timed out."
   connect_failed: "connect failed: %{error}"
+  dest_unreachable: "Destination Host Unreachable."
+  ttl_expired: "TTL expired in transit."
 
 stats:
   sent_received: "Sent = %{sent}, Received = %{received}, Lost = %{lost} (%{pct}% loss),"
@@ -34,9 +38,10 @@ bandwidth:
   bandwidth: "Bandwidth = %{mbps} Mbps"
 
 server:
-  latency_listening: "Latency server listening on %{addr}"
   bandwidth_listening: "Bandwidth server listening on %{addr}"
-  received: "received %{bytes} bytes from %{peer}, %{secs}s, %{mbps} Mbps"
+  connect_tag: "connect "
+  recv_tag: "recv "
+  summary: "server summary: %{conns} connections, %{bytes} bytes in %{secs}s (avg %{mbps} Mbps)"
 
 errors:
   raw_socket: "cannot create raw socket: %{error}. Requires root or cap_net_raw"
@@ -44,10 +49,12 @@ errors:
   invalid_bind: "invalid bind address: %{addr}. Format: host:port"
   host_port_required: "HOST[:PORT] required, or -s ADDR:PORT for server mode"
   udp_requires_port: "UDP requires a port: HOST:PORT"
-  latency_requires_port: "latency requires HOST:PORT"
   bandwidth_requires_port: "bandwidth requires HOST:PORT"
-  ipv6_format: "IPv6 format: [::1]:port"
-  host_port_format: "Format: host:port, IPv6: [host]:port"
+  invalid_count: "invalid count value: %{value} (use N or Ns)"
+  udp_size_clamped: "UDP payload clamped to %{max} bytes (requested %{size})"
+  interval_min: "interval clamped to minimum 1ms (requested %{value}s)"
+  parallel_udp_ignored: "-P ignored in UDP mode (UDP bandwidth is single-connection)"
+  receive_ignored_ping: "-r ignored for plain ping (use -l for latency or -b for bandwidth)"
   invalid_ipv6: "invalid IPv6 format: [host] or [host]:port"
 
 help:
@@ -60,11 +67,16 @@ help:
     lang: "Set language (e.g. en, zh-CN). Default: auto-detect from system."
     udp: "UDP mode (default is TCP)"
     quiet: "Suppress per-ping output"
-    histogram: "Print histogram (default 20 buckets)"
+    histogram: "Histogram: bucket count (e.g. 20) or comma-separated thresholds in ms (e.g. 1,5,10,50)"
     warmup: "Warmup iterations (default 4)"
     parallel: "Number of parallel connections"
     v4: "Force IPv4"
     v6: "Force IPv6"
+    json: "Output machine-readable JSON statistics"
+    help_icmp: "ICMP ping usage"
+    help_tcp: "TCP ping usage"
+    help_latency: "Latency test usage"
+    help_bandwidth: "Bandwidth test usage"
 
   overview: |-
     prping — ping, latency, bandwidth measurement utility

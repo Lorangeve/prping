@@ -3,10 +3,12 @@ _version: 1
 icmp:
   pinging: "正在 Ping %{addr}，数据大小 %{size} 字节:"
   iterations: "%{total} 次迭代 (预热 %{warmup}) ping 测试:"
+  duration: "%{secs} 秒时长 (预热 %{warmup}) ping 测试:"
 
 tcp:
   connect_to: "TCP 连接到 %{addr}:%{port}:"
   iterations: "%{total} 次迭代 (预热 %{warmup}) ping 测试:"
+  duration: "%{secs} 秒时长 (预热 %{warmup}) ping 测试:"
 
 common:
   resolving: "解析 %{host} -> %{ip}"
@@ -19,6 +21,8 @@ common:
   from: "从"
   timeout: "请求超时。"
   connect_failed: "连接失败: %{error}"
+  dest_unreachable: "目标主机不可达。"
+  ttl_expired: "传输中 TTL 超时。"
 
 stats:
   sent_received: "发送 = %{sent}，接收 = %{received}，丢失 = %{lost} (%{pct}% 丢失),"
@@ -34,9 +38,10 @@ bandwidth:
   bandwidth: "带宽 = %{mbps} Mbps"
 
 server:
-  latency_listening: "延迟测试服务端正在监听 %{addr}"
   bandwidth_listening: "带宽测试服务端正在监听 %{addr}"
-  received: "从 %{peer} 接收 %{bytes} 字节，%{secs}秒，%{mbps} Mbps"
+  connect_tag: "连接 "
+  recv_tag: "接收 "
+  summary: "服务端汇总: %{conns} 个连接，共 %{bytes} 字节，耗时 %{secs}秒（平均 %{mbps} Mbps）"
 
 errors:
   raw_socket: "无法创建 raw socket: %{error}。需要 root 权限或 cap_net_raw"
@@ -44,10 +49,12 @@ errors:
   invalid_bind: "无效的绑定地址: %{addr}。格式: host:port"
   host_port_required: "需要 HOST[:PORT]，或 -s ADDR:PORT 启动服务端"
   udp_requires_port: "UDP 模式需要端口: HOST:PORT"
-  latency_requires_port: "延迟测试需要 HOST:PORT"
   bandwidth_requires_port: "带宽测试需要 HOST:PORT"
-  ipv6_format: "IPv6 格式: [::1]:port"
-  host_port_format: "格式: host:port，IPv6: [host]:port"
+  invalid_count: "无效的次数: %{value}（使用 N 或 Ns）"
+  udp_size_clamped: "UDP 负载已截断为 %{max} 字节（请求 %{size}）"
+  interval_min: "间隔已截断为最小 1ms（请求 %{value}s）"
+  parallel_udp_ignored: "UDP 模式忽略 -P（UDP 带宽为单连接）"
+  receive_ignored_ping: "普通 ping 模式忽略 -r（延迟/带宽测试请用 -l/-b）"
   invalid_ipv6: "无效的 IPv6 格式: [host] 或 [host]:port"
 
 help:
@@ -60,11 +67,16 @@ help:
     lang: "设置语言（如 en, zh-CN）。默认从系统自动检测。"
     udp: "UDP 模式（默认 TCP）"
     quiet: "不输出每次测试结果"
-    histogram: "打印直方图（默认 20 个桶）"
+    histogram: "直方图: 桶数（如 20）或逗号分隔的毫秒阈值（如 1,5,10,50）"
     warmup: "预热迭代次数（默认 4）"
     parallel: "并发连接数"
     v4: "强制使用 IPv4"
     v6: "强制使用 IPv6"
+    json: "输出机器可读的 JSON 统计"
+    help_icmp: "ICMP ping 用法"
+    help_tcp: "TCP ping 用法"
+    help_latency: "延迟测试用法"
+    help_bandwidth: "带宽测试用法"
 
   overview: |-
     prping — ping, 延迟, 带宽测量工具

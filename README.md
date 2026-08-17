@@ -5,13 +5,17 @@
 ## 特性
 
 - **四种 ping 模式**：ICMP / TCP / UDP，自动识别（有端口=TCP，`-u`=UDP，无端口=ICMP）
+- **次数或时长**：`-n 10` 固定次数，`-n 10s` 按秒运行
 - **延迟测试**：client/server 架构，TCP/UDP 双模式，`-r` 接收模式测反向
 - **带宽测试**：多连接并发（`-P`），直方图，`-r` 测下载方向
 - **IPv4/IPv6 双栈**：`[::1]:80` 括号格式自动识别
 - **统计输出**：min/max/avg/stddev + P50/P95/P99 + 丢包率
-- **可视化**：直方图（`-H`）、延迟时间线、Unicode 渲染（`-p`）
+- **可视化**：直方图（`-H`，支持自定义阈值）、延迟时间线、Unicode 渲染（`-p`）
+- **JSON 输出**：`--json` 机器可读统计，适合脚本/监控
+- **退出码**：有丢包时返回 1，脚本可据此判断成败
 - **i18n**：英文/中文自动检测（`--lang` 切换）
 - **彩色输出**：语义化配色（IP 青、端口品红、延迟黄、错误红）
+- **Ctrl+C 优雅退出**：首次按下停止并输出统计，再次按下强制退出
 
 ## 安装
 
@@ -36,9 +40,9 @@ prping -s ADDR:PORT            # 服务端（同时支持延迟/带宽/接收模
 | 选项 | 说明 |
 |------|------|
 | `-n N` / `-n 10s` | 次数（默认无限）或时长 |
-| `-i S` | 间隔秒数（0=快速） |
+| `-i S` | 间隔秒数（0=快速，下限 1ms） |
 | `-l SIZE` | 请求大小，`k`/`m` 后缀 |
-| `-H N` | 直方图桶数 |
+| `-H N` 或 `-H t1,t2,...` | 直方图桶数，或逗号分隔的毫秒阈值（如 `1,5,10,50`） |
 | `-w N` | 预热次数（默认 4） |
 | `-q` | 静默模式 |
 | `-r` | 接收模式（测下载） |
@@ -46,6 +50,8 @@ prping -s ADDR:PORT            # 服务端（同时支持延迟/带宽/接收模
 | `-P N` | 并发连接数 |
 | `-p` | Unicode 渲染 |
 | `-4` / `-6` | 强制 IPv4/IPv6 |
+| `--json` | 输出 JSON 统计 |
+| `-V` / `--version` | 版本号 |
 | `--lang en\|zh-CN` | 语言 |
 | `--help-icmp` 等 | 各模式详细帮助 |
 
@@ -64,9 +70,19 @@ prping -l 64 -n 100 -r server:8080
 # 带宽测试，8KB 包，4 并发
 prping -b -l 8k -n 10000 -P 4 server:8080
 
-# 服务端
+# 自定义阈值直方图（1/5/10/50ms 分档）
+prping -n 100 -H "1,5,10,50" server:8080
+
+# JSON 输出（脚本/监控）
+prping -n 100 --json server:8080
+
+# 服务端（Ctrl+C 退出时打印聚合统计）
 prping -s 0.0.0.0:8080
 ```
+
+> 说明：测试出现丢包时进程以退出码 1 结束（可用于脚本判断）；
+> 带宽/延迟并发场景可通过 `SMOL_THREADS=N` 环境变量启用多线程执行器（默认按 CPU 核数）。
+> 服务端并发 TCP 连接上限 1024，超出直接拒绝；`-i` 下限 1ms 防误打网络。
 
 ## 输出示例
 
@@ -101,12 +117,14 @@ Latency timeline (Y: 0.12~0.17ms, X: 0~2.0s):
 | UDP ping | ✓ | ✓ | psping 无独立 UDP ping，prping 有 |
 | 延迟测试 | ✓ | ✓ | TCP/UDP |
 | 带宽测试 | ✓ | ✓ | TCP/UDP |
-| 接收模式 `-r` | ✓ | ✓ | 0xFF 触发协议 |
-| 直方图 | `-h` | `-H` | psping 支持自定义阈值，prping 仅桶数 |
+| 接收模式 `-r` | ✓ | ✓ | TCP：0xFF 触发；UDP：`[0xFF,0xFF,size,cnt]` 触发协议 |
+| 直方图 | `-h` | `-H` | 桶数或自定义阈值（ms） |
 | 0.01ms 精度 | ✓ | ✓ | |
 | IPv4/IPv6 | ✓ | ✓ | |
-| `-n 10s` 时长模式 | ✓ | 部分 | 解析了但未实现 |
-| Ctrl+C 优雅退出 | ✓ | ✗ | 打印中间统计待实现 |
+| `-n 10s` 时长模式 | ✓ | ✓ | |
+| Ctrl+C 优雅退出 | ✓ | ✓ | 首次停止并输出统计，再次强制退出 |
+| JSON 输出 | ✗ | ✓ | prping 独有 |
+| 退出码 | 部分 | ✓ | 有丢包时返回 1 |
 | `-t` 持续 ping | ✓ | 默认 | prping 默认即无限 |
 | 默认次数 | 4 | 无限 | |
 | 预热默认 | ICMP/TCP=1, 延迟=5, 带宽=2×CPU | 全部=4 | |
@@ -116,7 +134,7 @@ Latency timeline (Y: 0.12~0.17ms, X: 0~2.0s):
 | 时间线图 | ✗ | ✓ | prping 独有 |
 | P50/P95/P99 | ✗ | ✓ | prping 独有 |
 | 跨平台 | Windows | Linux/macOS/Windows | |
-| 二进制体积 | ~500KB | ~1.4MB | |
+| 二进制体积 | ~500KB | ~1.9MB（debug 48MB） | |
 
 ## 技术栈
 
@@ -125,12 +143,14 @@ Latency timeline (Y: 0.12~0.17ms, X: 0~2.0s):
 - [rust-i18n](https://github.com/longfangsong/rust-i18n) — 国际化
 - [termcolor](https://github.com/BurntSushi/termcolor) — 跨平台终端颜色
 - [socket2](https://github.com/rust-lang/socket2) — raw socket
+- libc — Unix Ctrl+C 信号处理
 
 ## 开发
 
 ```bash
-cargo test        # 24 tests
-cargo clippy      # 零警告
+cargo test          # 单元 34 + 集成 16 = 50 tests
+cargo clippy        # 零警告
+cargo fmt           # rustfmt 统一格式
 ```
 
 ## License
