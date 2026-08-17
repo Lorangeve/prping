@@ -43,8 +43,12 @@ build-windows-gnu-32:
     CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER=i686-w64-mingw32-gcc \
         cargo build --target i686-pc-windows-gnu --release
 
-# Windows 7（官方 Win7 基线目标，Tier 3，MSVCRT 链接）
+# Windows 7（官方 Win7 基线目标 MSVC；Linux 需 xwin，首次自动下载 SDK）
 build-win7:
+    cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
+
+# Windows 7 GNU 备选（无 xwin 时用 mingw-w64，MSVCRT 链接）
+build-win7-gnu:
     cargo +nightly build -Z build-std --target x86_64-win7-windows-gnu --release
 
 # 全部 Windows 产物

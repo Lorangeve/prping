@@ -27,18 +27,24 @@ sudo setcap cap_net_raw+ep target/release/prping  # ICMP 需要（Linux）
 ## Windows 7
 
 Rust 1.78 起官方将 `*-pc-windows-*` 目标最低支持提升到 **Windows 10**；Win7 需用官方的
-Win7 基线目标（Tier 3）构建：
+Win7 基线目标（Tier 3）构建，**MSVC 版为首选**：
 
 ```bash
 rustup toolchain install nightly --profile minimal
 rustup component add rust-src --toolchain nightly
-# Debian/Ubuntu: sudo apt install gcc-mingw-w64-x86-64
-cargo +nightly build -Z build-std --target x86_64-win7-windows-gnu --release
-# → target/x86_64-win7-windows-gnu/release/prping.exe
+cargo install cargo-xwin                        # 自动下载 Windows SDK
+cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
+# → target/x86_64-win7-windows-msvc/release/prping.exe
 ```
 
-> 说明：产物为 PE32+ x86-64，链接 MSVCRT（Win7 原生自带，无需 UCRT/KB2999226）；
-> Win7 基线目标为 Tier 3（官方不自动构建测试），已验证主流程（TCP/UDP ping、接收模式）可用。
+无 xwin 的环境（如 CI 用 mingw）可退而求其次构建 GNU 备选版（MSVCRT 链接）：
+
+```bash
+cargo +nightly build -Z build-std --target x86_64-win7-windows-gnu --release
+```
+
+> 说明：Win7 基线目标为 Tier 3（官方不自动构建测试）；GNU 备选版已验证主流程
+> （TCP/UDP ping、接收模式）可用，MSVC 版由 CI `win7-build` job 产出。
 
 ## 用法
 

@@ -13,7 +13,7 @@
 - **直方图**: 默认 ASCII `#`（内置）；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图与 Braille 散点时间线（非 tty 自动剥离 ANSI 颜色）；`-H` 支持桶数或逗号分隔阈值（ms）
 - **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en.yml` + `locales/zh-CN.yml`，自动检测 `$LANG` 或 `--lang`
 - **信号处理**: Ctrl+C 优雅退出 — Unix 用 `libc::signal`，Windows 用 `kernel32::SetConsoleCtrlHandler`（首次停止并输出统计，再次强制退出）
-- **Windows 7**: 官方 Win7 基线目标 `x86_64-win7-windows-gnu`（Tier 3）+ nightly `-Z build-std`，MSVCRT 链接
+- **Windows 7**: 官方 Win7 基线目标（Tier 3）+ nightly `-Z build-std`；首选 `x86_64-win7-windows-msvc`（xwin 链接），GNU 版 `x86_64-win7-windows-gnu`（MSVCRT）为无 xwin 备选
 - **DNS 解析**: `smol::unblock` + `std::net::ToSocketAddrs`，统一在 `util.rs`
 - **次数/时长**: `-n 10` 固定次数，`-n 10s` 按秒运行（`util::Run` 统一控制循环）
 - **带宽测试并发**: 多连接 `-P`，smol::Task 池 + 全局配额（总量精确等于 count）
