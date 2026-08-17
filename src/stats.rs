@@ -459,9 +459,10 @@ pub fn print_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
 
     for row in (0..height).rev() {
         if row == height - 1 {
-            write!(w, "  {max_y:6.1} │")?;
+            // 5 宽标签 + 空格后 │ 落在位置 8，与中间行/└ 对齐
+            write!(w, "  {max_y:5.1} │")?;
         } else if row == 0 {
-            write!(w, "  {min_y:6.1} │")?;
+            write!(w, "  {min_y:5.1} │")?;
         } else {
             write!(w, "        │")?;
         }
