@@ -1,0 +1,392 @@
+//! 共享工具：DNS 解析、运行循环控制、Ctrl+C 中断、UDP 触发协议、测试参数。
+
+use rust_i18n::t;
+use std::mem::MaybeUninit;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::{Duration, Instant};
+
+/// 一次测试的全部参数（收敛各模块的长参数列表）。
+pub struct PingConfig {
+    pub host: String,
+    pub port: u16,
+    pub count: u64,
+    pub duration: Option<f64>,
+    pub interval: f64,
+    pub size: usize,
+    pub quiet: bool,
+    pub histogram: Option<crate::stats::HistogramSpec>,
+    pub warmup: u64,
+    pub v4: bool,
+    pub v6: bool,
+    pub parallel: u32,
+    pub udp: bool,
+    pub receive: bool,
+}
+
+/// 创建带大收发缓冲的 UDP socket（socket2 设置后包成 smol::Async）。
+///
+/// 内核默认 UDP 缓冲（~212KB）在带宽测试突发下会溢出丢包，这里放大到 4MB。
+pub fn bind_udp(bind: SocketAddr) -> anyhow::Result<smol::Async<socket2::Socket>> {
+    let domain = if bind.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    sock.set_recv_buffer_size(4 * 1024 * 1024)?;
+    sock.set_send_buffer_size(4 * 1024 * 1024)?;
+    sock.bind(&socket2::SockAddr::from(bind))?;
+    sock.set_nonblocking(true)?;
+    Ok(smol::Async::new(sock)?)
+}
+
+/// 异步 UDP 发送。
+pub async fn udp_send(
+    sock: &smol::Async<socket2::Socket>,
+    payload: &[u8],
+    addr: &SocketAddr,
+) -> std::io::Result<usize> {
+    sock.write_with(|s| s.send_to(payload, &socket2::SockAddr::from(*addr)))
+        .await
+}
+
+/// 异步 UDP 接收，返回（字节数, 来源地址）。
+pub async fn udp_recv(
+    sock: &smol::Async<socket2::Socket>,
+    buf: &mut [MaybeUninit<u8>],
+) -> std::io::Result<(usize, SocketAddr)> {
+    sock.read_with(|s| s.recv_from(buf))
+        .await
+        .map(|(n, a)| (n, a.as_socket().expect("UDP socket 地址必为 INET")))
+}
+
+/// 把已初始化的接收前缀转成 `&[u8]`（配合 `udp_recv`/`recv_from` 的 MaybeUninit 缓冲）。
+pub fn init_slice(buf: &[MaybeUninit<u8>], n: usize) -> &[u8] {
+    // SAFETY: 所有字节均以 0 初始化（调用方用 MaybeUninit::new(0) 构造），
+    // 且 MaybeUninit<u8> 与 u8 布局一致。
+    unsafe { std::mem::transmute(&buf[..n]) }
+}
+
+/// 配置多线程 executor：smol 全局 executor 默认单线程，`-P` 并发与服务端连接
+/// 无法真正并行。在首次 `smol::spawn` 之前设置 `SMOL_THREADS`（spawn 时才惰性初始化）。
+pub fn configure_executor_threads() {
+    if std::env::var_os("SMOL_THREADS").is_none() {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(2);
+        // SAFETY: 进程启动早期、无并发线程竞争时调用；edition 2024 要求显式 unsafe。
+        unsafe { std::env::set_var("SMOL_THREADS", n.to_string()) };
+    }
+}
+
+/// 解析主机名（支持 `[IPv6]` 括号格式与 -4/-6 强制），返回单个地址。
+pub fn resolve(
+    host: &str,
+    port: u16,
+    force_v4: bool,
+    force_v6: bool,
+) -> anyhow::Result<SocketAddr> {
+    let raw = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = raw.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    let host = raw.to_string();
+    Ok(smol::block_on(async {
+        smol::unblock(move || {
+            let mut addrs: Vec<SocketAddr> = (host.as_str(), port).to_socket_addrs()?.collect();
+            if force_v4 {
+                addrs.retain(|a| a.is_ipv4());
+            } else if force_v6 {
+                addrs.retain(|a| a.is_ipv6());
+            }
+            addrs.into_iter().next().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    t!("errors.cannot_resolve", host = host),
+                )
+            })
+        })
+        .await
+    })?)
+}
+
+/// 解析主机名，返回全部匹配地址（ICMP 模式使用）。
+pub fn resolve_all(host: &str, force_v4: bool, force_v6: bool) -> anyhow::Result<Vec<SocketAddr>> {
+    let raw = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = raw.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, 0)]);
+    }
+    let host = raw.to_string();
+    Ok(smol::block_on(async {
+        smol::unblock(move || {
+            let mut addrs: Vec<SocketAddr> = (host.as_str(), 0).to_socket_addrs()?.collect();
+            if force_v4 {
+                addrs.retain(|a| a.is_ipv4());
+            } else if force_v6 {
+                addrs.retain(|a| a.is_ipv6());
+            }
+            Ok::<_, std::io::Error>(addrs)
+        })
+        .await
+    })?)
+}
+
+/// 运行循环控制：按次数、按时长或 Ctrl+C 中断决定何时停止。
+///
+/// 循环写法（seq 由 `advance()` 推进，禁止直接改字段）：
+/// ```text
+/// loop {
+///     if run.seq() > 0 { /* 间隔 */ }
+///     if run.done() { break; }
+///     let seq = run.seq();
+///     /* 测量主体 */
+///     run.advance();
+/// }
+/// ```
+pub struct Run {
+    /// 有效测量次数（0 = 无限，除非给了时长）。
+    count: u64,
+    /// 预热次数（不计入统计）。
+    warmup: u64,
+    /// 时长模式截止时间。
+    deadline: Option<Instant>,
+    /// 当前迭代序号（含预热）。
+    seq: u64,
+}
+
+impl Run {
+    /// `count` 为有效测量次数，`duration` 为秒数（`-n 10s`）。
+    pub fn new(count: u64, warmup: u64, duration: Option<f64>) -> Self {
+        let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
+        Self {
+            count,
+            warmup,
+            deadline,
+            seq: 0,
+        }
+    }
+
+    /// 当前迭代序号（含预热）。
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// 推进到下一次迭代。
+    pub fn advance(&mut self) {
+        self.seq += 1;
+    }
+
+    /// 当前迭代是否为预热。
+    pub fn is_warmup(&self) -> bool {
+        self.seq < self.warmup
+    }
+
+    /// 是否应停止（Ctrl+C、时长到期、次数达到上限）。
+    pub fn done(&self) -> bool {
+        if interrupted() {
+            return true;
+        }
+        if let Some(dl) = self.deadline {
+            return Instant::now() >= dl;
+        }
+        self.count != 0 && self.seq >= self.warmup + self.count
+    }
+}
+
+/// 带 5 秒超时的 TCP 连接（黑洞地址不会挂死 OS 超时）。
+pub async fn connect_timeout(addr: SocketAddr) -> std::io::Result<smol::net::TcpStream> {
+    smol::future::or(smol::net::TcpStream::connect(addr), async {
+        smol::Timer::after(Duration::from_secs(5)).await;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "connect timeout",
+        ))
+    })
+    .await
+}
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static INTERRUPT_COUNT: AtomicU8 = AtomicU8::new(0);
+
+/// 是否收到过 Ctrl+C。
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
+
+/// 安装 Ctrl+C 处理器：首次按下置位中断标志（优雅停止并输出统计），再次按下立即退出。
+///
+/// Unix 用 `libc::signal`；Windows 暂保持系统默认行为（直接退出）。
+#[cfg(unix)]
+pub fn install_interrupt_handler() -> anyhow::Result<()> {
+    extern "C" fn on_sigint(_: libc::c_int) {
+        if INTERRUPT_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
+            INTERRUPTED.store(true, Ordering::SeqCst);
+        } else {
+            // 第二次 Ctrl+C：立即退出（_exit 为异步信号安全）
+            unsafe { libc::_exit(130) };
+        }
+    }
+    // SAFETY: 安装 SIGINT 处理器；处理器内只做原子操作与 _exit，均异步信号安全。
+    unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn install_interrupt_handler() -> anyhow::Result<()> {
+    use std::os::raw::{c_int, c_uint};
+
+    // Windows 控制台事件处理器（BOOL CALLBACK HandlerRoutine(DWORD dwCtrlType)）。
+    // 运行在专用线程而非信号上下文，可安全调用原子操作与 ExitProcess。
+    unsafe extern "system" fn on_ctrl(_ctrl_type: c_uint) -> c_int {
+        if INTERRUPT_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
+            INTERRUPTED.store(true, Ordering::SeqCst);
+        } else {
+            // 第二次 Ctrl+C：立即退出（ExitProcess 不跑 atexit，处理器线程内安全）
+            unsafe { ExitProcess(130) };
+        }
+        1 // TRUE：事件已处理，阻止默认终止
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(c_uint) -> c_int>,
+            add: c_int,
+        ) -> c_int;
+        fn ExitProcess(code: c_uint) -> !;
+    }
+
+    // SAFETY: 注册控制台事件处理器；处理器内只做原子操作与 ExitProcess。
+    let ok = unsafe { SetConsoleCtrlHandler(Some(on_ctrl), 1) };
+    if ok == 0 {
+        anyhow::bail!("SetConsoleCtrlHandler failed");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn install_interrupt_handler() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// 构造 UDP 接收模式触发包：`[0xFF, 0xFF, size(2B BE), count(4B BE)]`。
+///
+/// 服务端收到后向来源地址回送 `count` 个 `size` 字节的数据报。
+pub fn udp_receive_trigger(size: usize, count: u32) -> Vec<u8> {
+    let size = size.clamp(1, 65507) as u16;
+    let mut b = vec![0u8; 8];
+    b[0] = 0xFF;
+    b[1] = 0xFF;
+    b[2..4].copy_from_slice(&size.to_be_bytes());
+    b[4..8].copy_from_slice(&count.to_be_bytes());
+    b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_ip_direct() {
+        let a = resolve("127.0.0.1", 80, false, false).unwrap();
+        assert_eq!(a.ip().to_string(), "127.0.0.1");
+        assert_eq!(a.port(), 80);
+    }
+    #[test]
+    fn test_resolve_ipv6() {
+        let a = resolve("::1", 8080, false, false).unwrap();
+        assert_eq!(a.ip().to_string(), "::1");
+        assert_eq!(a.port(), 8080);
+    }
+    #[test]
+    fn test_resolve_ipv6_brackets() {
+        let a = resolve("[::1]", 9999, false, false).unwrap();
+        assert_eq!(a.ip().to_string(), "::1");
+        assert_eq!(a.port(), 9999);
+    }
+    #[test]
+    fn test_resolve_all_ip_direct() {
+        let a = resolve_all("127.0.0.1", false, false).unwrap();
+        assert_eq!(a[0].ip().to_string(), "127.0.0.1");
+    }
+    #[test]
+    fn test_resolve_all_ipv6() {
+        let a = resolve_all("::1", false, false).unwrap();
+        assert_eq!(a[0].ip().to_string(), "::1");
+    }
+    #[test]
+    fn test_resolve_invalid_host() {
+        let _ = resolve("invalid.host.name.xyzzy", 80, false, false);
+    }
+    #[test]
+    fn test_run_count_limited() {
+        let mut r = Run::new(3, 2, None);
+        let mut n = 0;
+        while !r.done() {
+            r.advance();
+            n += 1;
+        }
+        assert_eq!(n, 5); // 2 预热 + 3 有效
+    }
+    #[test]
+    fn test_run_infinite() {
+        let r = Run::new(0, 4, None);
+        assert!(!r.done());
+    }
+    #[test]
+    fn test_run_duration() {
+        // 时长模式忽略 count，由截止时间驱动（1ms 内应能跑出若干次迭代并终止）
+        let mut r = Run::new(0, 0, Some(0.001));
+        let mut n = 0;
+        while !r.done() && n < 1_000_000 {
+            r.advance();
+            n += 1;
+        }
+        assert!(n > 0, "should run at least once");
+        assert!(r.done());
+    }
+    #[test]
+    fn test_run_warmup_flag() {
+        let mut r = Run::new(1, 2, None);
+        assert!(r.is_warmup());
+        r.advance();
+        assert!(r.is_warmup());
+        r.advance();
+        assert!(!r.is_warmup());
+    }
+    #[test]
+    fn test_udp_receive_trigger() {
+        let b = udp_receive_trigger(1024, 7);
+        assert_eq!(b.len(), 8);
+        assert_eq!(&b[..2], &[0xFF, 0xFF]);
+        assert_eq!(u16::from_be_bytes([b[2], b[3]]), 1024);
+        assert_eq!(u32::from_be_bytes([b[4], b[5], b[6], b[7]]), 7);
+    }
+    #[test]
+    fn test_udp_receive_trigger_clamp() {
+        let b = udp_receive_trigger(1_000_000, 1);
+        assert_eq!(u16::from_be_bytes([b[2], b[3]]), 65507);
+    }
+    #[test]
+    fn test_init_slice() {
+        let buf: [MaybeUninit<u8>; 4] = [MaybeUninit::new(0xAB); 4];
+        let s = init_slice(&buf, 4);
+        assert_eq!(s, &[0xAB, 0xAB, 0xAB, 0xAB]);
+    }
+    #[test]
+    fn test_bind_udp() {
+        smol::block_on(async {
+            let sock = bind_udp("127.0.0.1:0".parse().unwrap()).unwrap();
+            let local: SocketAddr = sock.get_ref().local_addr().unwrap().as_socket().unwrap();
+            assert!(local.port() != 0);
+        });
+    }
+}
