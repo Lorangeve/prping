@@ -2,7 +2,7 @@
 
 use crate::output;
 use rust_i18n::t;
-use std::io::{Result, Write};
+use std::io::{IsTerminal, Result, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use termcolor::StandardStream;
@@ -223,10 +223,95 @@ pub fn print_summary(w: &mut StandardStream, stats: &Stats, mode: &str) -> Resul
 }
 
 pub fn print_histogram(w: &mut StandardStream, stats: &Stats, spec: &HistogramSpec) -> Result<()> {
+    // -p/--pretty：用 ploot 渲染 Unicode 柱状图
+    if PRETTY.load(Ordering::Relaxed) {
+        return print_ploot_histogram(w, stats, spec);
+    }
     match spec {
         HistogramSpec::Buckets(n) => print_bucket_histogram(w, stats, *n),
         HistogramSpec::Thresholds(ts) => print_threshold_histogram(w, stats, ts),
     }
+}
+
+/// 计算直方图桶（x = 下界 ms，y = 计数），供 ploot 渲染。
+fn histogram_xy(stats: &Stats, spec: &HistogramSpec) -> Option<(Vec<f64>, Vec<f64>)> {
+    let times = stats.sorted_times();
+    if times.is_empty() {
+        return None;
+    }
+    match spec {
+        HistogramSpec::Buckets(n) => {
+            let num_buckets = (*n).clamp(3, 50);
+            let min = times[0].as_secs_f64() * 1000.0;
+            let max = times[times.len() - 1].as_secs_f64() * 1000.0;
+            if (max - min).abs() < f64::EPSILON {
+                return None;
+            }
+            let bw = (max - min) / num_buckets as f64;
+            let mut counts = vec![0usize; num_buckets];
+            for t in &times {
+                let ms = t.as_secs_f64() * 1000.0;
+                let idx = ((ms - min) / bw) as usize;
+                counts[idx.min(num_buckets - 1)] += 1;
+            }
+            let xs = (0..num_buckets).map(|i| min + i as f64 * bw).collect();
+            Some((xs, counts.iter().map(|&c| c as f64).collect()))
+        }
+        HistogramSpec::Thresholds(ts) => {
+            let n = ts.len() + 1;
+            let mut counts = vec![0usize; n];
+            for t in &times {
+                let ms = t.as_secs_f64() * 1000.0;
+                let idx = ts.partition_point(|&th| ms > th);
+                counts[idx.min(n - 1)] += 1;
+            }
+            let xs = (0..n).map(|i| i as f64).collect();
+            Some((xs, counts.iter().map(|&c| c as f64).collect()))
+        }
+    }
+}
+
+/// `-p` 直方图：ploot boxes（Unicode 柱状图）。
+fn print_ploot_histogram(
+    w: &mut StandardStream,
+    stats: &Stats,
+    spec: &HistogramSpec,
+) -> Result<()> {
+    let Some((xs, ys)) = histogram_xy(stats, spec) else {
+        return Ok(());
+    };
+    let mut fig = ploot::Figure::new();
+    fig.set_terminal_size(80, 20);
+    let ax = fig.axes2d();
+    let title = t!("stats.latency_dist");
+    ax.set_title(&title);
+    ax.boxes(xs.iter().copied(), ys.iter().copied(), &[]);
+    write!(w, "{}", strip_ansi(fig.render()))?;
+    Ok(())
+}
+
+/// 非 tty 时剥离 ANSI 转义（ploot 恒输出颜色，管道下保持干净）。
+fn strip_ansi(out: String) -> String {
+    if std::io::stdout().is_terminal() {
+        return out;
+    }
+    let mut s = String::with_capacity(out.len());
+    let mut it = out.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' {
+            // \x1b[...m
+            if it.next_if_eq(&'[').is_some() {
+                for c in it.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        s.push(c);
+    }
+    s
 }
 
 fn print_bucket_histogram(w: &mut StandardStream, stats: &Stats, num_buckets: usize) -> Result<()> {
@@ -330,6 +415,10 @@ fn print_threshold_histogram(
 
 /// Print latency timeline (scatter: time vs latency).
 pub fn print_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
+    // -p/--pretty：用 ploot 渲染 Braille 散点图
+    if PRETTY.load(Ordering::Relaxed) {
+        return print_ploot_timeline(w, stats);
+    }
     if stats.timeline.len() < 2 {
         return Ok(());
     }
@@ -400,6 +489,26 @@ pub fn print_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
         write!(w, " ")?;
     }
     writeln!(w, "{label}")?;
+    Ok(())
+}
+
+/// `-p` 时间线：ploot points（Braille 散点）。
+fn print_ploot_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
+    if stats.timeline.len() < 2 {
+        return Ok(());
+    }
+    let xs: Vec<f64> = stats.timeline.iter().map(|&(t, _)| t).collect();
+    let ys: Vec<f64> = stats.timeline.iter().map(|&(_, y)| y).collect();
+    let mut fig = ploot::Figure::new();
+    fig.set_terminal_size(80, 16);
+    let ax = fig.axes2d();
+    ax.set_title("Latency timeline");
+    ax.points(
+        xs.iter().copied(),
+        ys.iter().copied(),
+        &[ploot::PlotOption::Caption("latency (ms)".into())],
+    );
+    write!(w, "{}", strip_ansi(fig.render()))?;
     Ok(())
 }
 

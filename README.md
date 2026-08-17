@@ -10,7 +10,7 @@
 - **带宽测试**：多连接并发（`-P`），直方图，`-r` 测下载方向
 - **IPv4/IPv6 双栈**：`[::1]:80` 括号格式自动识别
 - **统计输出**：min/max/avg/stddev + P50/P95/P99 + 丢包率
-- **可视化**：直方图（`-H`，支持自定义阈值）、延迟时间线、Unicode 渲染（`-p`）
+- **可视化**：直方图（`-H`，支持自定义阈值）、延迟时间线；`-p` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图/Braille 散点
 - **JSON 输出**：`--json` 机器可读统计，适合脚本/监控
 - **退出码**：有丢包时返回 1，脚本可据此判断成败
 - **i18n**：英文/中文自动检测（`--lang` 切换）
@@ -144,6 +144,7 @@ Latency timeline (Y: 0.12~0.17ms, X: 0~2.0s):
 - [termcolor](https://github.com/BurntSushi/termcolor) — 跨平台终端颜色
 - [socket2](https://github.com/rust-lang/socket2) — raw socket
 - libc — Unix Ctrl+C 信号处理
+- [ploot](https://github.com/ploot-rs/ploot) — `-p` Unicode 终端绘图
 
 ## 开发
 

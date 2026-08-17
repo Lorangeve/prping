@@ -16,3 +16,4 @@ socket2 = { version = "0.6", features = ["all"] }
 rust-i18n = "3"
 libc = "0.2"
 thiserror = "2"
+ploot = "0.1"

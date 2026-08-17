@@ -10,7 +10,7 @@
 - **错误处理**: lib 层用 thiserror（`PrpingError` 分派层枚举 + IO/anyhow 透传），bin 层用 anyhow 做胶水
 - **代码结构**: 单 crate 双 target — `src/lib.rs`（协议/统一入口 `run`/`serve`，公开面最小化）+ `src/main.rs`（CLI 解析/渲染/退出码/信号安装）+ `src/{util,stats,output,icmp,tcp,udp,latency,bandwidth}.rs`（lib 内部）
 - **终端颜色**: [termcolor](https://github.com/BurntSushi/termcolor)，颜色函数统一在 `output.rs`（客户端与服务端一致）
-- **直方图**: 默认 ASCII `#`，`-p`/`--pretty` 用 Unicode `█`（内置实现，无外部依赖）；`-H` 支持桶数或逗号分隔阈值（ms）
+- **直方图**: 默认 ASCII `#`（内置）；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图与 Braille 散点时间线（非 tty 自动剥离 ANSI 颜色）；`-H` 支持桶数或逗号分隔阈值（ms）
 - **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en.yml` + `locales/zh-CN.yml`，自动检测 `$LANG` 或 `--lang`
 - **信号处理**: Ctrl+C 优雅退出 — Unix 用 `libc::signal`，Windows 用 `kernel32::SetConsoleCtrlHandler`（首次停止并输出统计，再次强制退出）
 - **DNS 解析**: `smol::unblock` + `std::net::ToSocketAddrs`，统一在 `util.rs`
