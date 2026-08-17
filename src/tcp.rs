@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
-pub fn ping(cfg: &PingConfig) -> anyhow::Result<bool> {
+pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
     if cfg.host.parse::<IpAddr>().is_err() {
         let stripped = cfg
@@ -54,7 +54,7 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<bool> {
     smol::block_on(ping_async(addr, cfg))
 }
 
-async fn ping_async(addr: std::net::SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
+async fn ping_async(addr: std::net::SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
     let mut w = output::stdout();
     let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
@@ -108,7 +108,7 @@ async fn ping_async(addr: std::net::SocketAddr, cfg: &PingConfig) -> anyhow::Res
     if !stats::json() {
         stats::print_timeline(&mut w, &stats)?;
     }
-    Ok(stats.loss_pct() > 0.0)
+    Ok(stats)
 }
 
 fn print_connected(

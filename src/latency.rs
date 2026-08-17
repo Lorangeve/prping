@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
-pub fn run_client(cfg: &PingConfig) -> anyhow::Result<bool> {
+pub fn run_client(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
     if cfg.host.parse::<IpAddr>().is_err() {
         let stripped = cfg
@@ -36,7 +36,7 @@ pub fn run_client(cfg: &PingConfig) -> anyhow::Result<bool> {
     smol::block_on(run_client_async(addr, cfg))
 }
 
-async fn run_client_async(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
+async fn run_client_async(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     if cfg.udp {
         run_udp_client(addr, cfg).await
     } else {
@@ -44,11 +44,11 @@ async fn run_client_async(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<
     }
 }
 
-async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
+async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
     let mut w = output::stdout();
-    let payload = vec![0x42u8; cfg.size];
-    let mut buf = vec![0u8; cfg.size + 1];
+    let payload = vec![0x42u8; cfg.size.unwrap()];
+    let mut buf = vec![0u8; cfg.size.unwrap() + 1];
     let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
 
     loop {
@@ -81,7 +81,10 @@ async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bo
             match smol::future::or(
                 async {
                     stream.read_exact(&mut buf[..1]).await?;
-                    stream.read_exact(&mut buf[1..]).await.map(|_| cfg.size + 1)
+                    stream
+                        .read_exact(&mut buf[1..])
+                        .await
+                        .map(|_| cfg.size.unwrap() + 1)
                 },
                 async {
                     smol::Timer::after(Duration::from_secs(10)).await;
@@ -96,7 +99,7 @@ async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bo
                         stats.record(rtt);
                     }
                     if !stats::json() {
-                        print_latency(&mut w, addr, rtt, cfg.size, is_warmup)?;
+                        print_latency(&mut w, addr, rtt, cfg.size.unwrap(), is_warmup)?;
                     }
                 }
                 Err(_) => {
@@ -117,7 +120,7 @@ async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bo
             continue;
         }
         match smol::future::or(
-            async { stream.read_exact(&mut buf[..cfg.size]).await },
+            async { stream.read_exact(&mut buf[..cfg.size.unwrap()]).await },
             async {
                 smol::Timer::after(Duration::from_secs(10)).await;
                 Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
@@ -131,7 +134,7 @@ async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bo
                     stats.record(rtt);
                 }
                 if !stats::json() {
-                    print_latency(&mut w, addr, rtt, cfg.size, is_warmup)?;
+                    print_latency(&mut w, addr, rtt, cfg.size.unwrap(), is_warmup)?;
                 }
             }
             Err(_) => {
@@ -146,10 +149,10 @@ async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bo
         run.advance();
     }
     print_result(&mut w, &stats, cfg)?;
-    Ok(stats.loss_pct() > 0.0)
+    Ok(stats)
 }
 
-async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
+async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let bind_addr: SocketAddr = if addr.is_ipv4() {
         "0.0.0.0:0".parse()?
     } else {
@@ -158,9 +161,9 @@ async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bo
     let sock = util::bind_udp(bind_addr)?;
     let mut stats = Stats::default();
     let mut w = output::stdout();
-    let payload = vec![0x42u8; cfg.size];
-    let trigger = util::udp_receive_trigger(cfg.size, 1);
-    let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size + 512];
+    let payload = vec![0x42u8; cfg.size.unwrap()];
+    let trigger = util::udp_receive_trigger(cfg.size.unwrap(), 1);
+    let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap() + 512];
     let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
 
     loop {
@@ -213,7 +216,7 @@ async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bo
         run.advance();
     }
     print_result(&mut w, &stats, cfg)?;
-    Ok(stats.loss_pct() > 0.0)
+    Ok(stats)
 }
 
 fn print_latency(

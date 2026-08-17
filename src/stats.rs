@@ -85,6 +85,11 @@ impl Stats {
         (self.sent - self.received) as f64 / self.sent as f64 * 100.0
     }
 
+    /// 是否有丢包（供退出码判断）。
+    pub fn has_loss(&self) -> bool {
+        self.loss_pct() > 0.0
+    }
+
     pub fn avg(&self) -> Option<Duration> {
         if self.received == 0 {
             return None;

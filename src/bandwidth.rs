@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub fn run_client(cfg: &PingConfig) -> anyhow::Result<()> {
+pub fn run_client(cfg: &PingConfig) -> anyhow::Result<crate::BandwidthReport> {
     let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
     if cfg.host.parse::<std::net::IpAddr>().is_err() {
         let stripped = cfg
@@ -33,10 +33,15 @@ pub fn run_client(cfg: &PingConfig) -> anyhow::Result<()> {
             )?;
         }
     }
-    smol::block_on(run_client_async(addr, cfg))
+    let mut cfg = cfg.clone();
+    cfg.size = Some(cfg.size.unwrap_or(8192));
+    smol::block_on(run_client_async(addr, &cfg))
 }
 
-async fn run_client_async(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<()> {
+async fn run_client_async(
+    addr: SocketAddr,
+    cfg: &PingConfig,
+) -> anyhow::Result<crate::BandwidthReport> {
     if cfg.udp {
         run_udp(addr, cfg).await
     } else {
@@ -44,10 +49,10 @@ async fn run_client_async(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<
     }
 }
 
-async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<()> {
+async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::BandwidthReport> {
     let (count, size, parallel, receive, warmup, duration) = (
         cfg.count,
-        cfg.size,
+        cfg.size.unwrap(),
         cfg.parallel,
         cfg.receive,
         cfg.warmup,
@@ -95,14 +100,14 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<()> {
                 total = target_bytes;
             }
         }
-        report(
+        return report(
             t!("bandwidth.tcp_test"),
             total,
             start.elapsed(),
             cfg.histogram.as_ref(),
             &[],
-        )?;
-        return Ok(());
+            cfg.quiet,
+        );
     }
 
     if parallel <= 1 {
@@ -137,7 +142,8 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<()> {
             start.elapsed(),
             cfg.histogram.as_ref(),
             &times,
-        )?;
+            cfg.quiet,
+        )
     } else {
         // 并行连接：全局配额保证总量精确等于 count（修复 count < parallel 时发 0 包）
         let per_conn = if duration.is_some() {
@@ -194,14 +200,19 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<()> {
             start.elapsed(),
             cfg.histogram.as_ref(),
             &[],
-        )?;
+            cfg.quiet,
+        )
     }
-    Ok(())
 }
 
-async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<()> {
-    let (count, size, receive, warmup, duration) =
-        (cfg.count, cfg.size, cfg.receive, cfg.warmup, cfg.duration);
+async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::BandwidthReport> {
+    let (count, size, receive, warmup, duration) = (
+        cfg.count,
+        cfg.size.unwrap(),
+        cfg.receive,
+        cfg.warmup,
+        cfg.duration,
+    );
     let bind_addr: SocketAddr = if addr.is_ipv4() {
         "0.0.0.0:0".parse()?
     } else {
@@ -255,14 +266,14 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<()> {
                 Err(_) => break,
             }
         }
-        report(
+        return report(
             t!("bandwidth.udp_test"),
             total,
             start.elapsed(),
             cfg.histogram.as_ref(),
             &[],
-        )?;
-        return Ok(());
+            cfg.quiet,
+        );
     }
 
     let payload = vec![0u8; size];
@@ -292,8 +303,8 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<()> {
         start.elapsed(),
         cfg.histogram.as_ref(),
         &times,
-    )?;
-    Ok(())
+        cfg.quiet,
+    )
 }
 
 fn report(
@@ -302,12 +313,23 @@ fn report(
     elapsed: Duration,
     histogram: Option<&HistogramSpec>,
     times: &[Duration],
-) -> anyhow::Result<()> {
+    quiet: bool,
+) -> anyhow::Result<crate::BandwidthReport> {
     let label = label.as_ref();
-    let mut w = output::stdout();
     let secs = elapsed.as_secs_f64();
     let mbits = total_bytes as f64 * 8.0 / (secs * 1_000_000.0);
+    let report = crate::BandwidthReport {
+        label: label.to_string(),
+        total_bytes,
+        secs,
+        mbps: mbits,
+    };
 
+    if quiet {
+        return Ok(report);
+    }
+
+    let mut w = output::stdout();
     if stats::json() {
         // label 可能含引号/反斜杠，做最小转义保证 JSON 合法
         let escaped = label.replace('\\', "\\\\").replace('"', "\\\"");
@@ -315,7 +337,7 @@ fn report(
             &mut w,
             "{{\"type\":\"bandwidth\",\"label\":\"{escaped}\",\"bytes\":{total_bytes},\"secs\":{secs:.2},\"mbps\":{mbits:.2}}}"
         )?;
-        return Ok(());
+        return Ok(report);
     }
 
     println!();
@@ -346,5 +368,5 @@ fn report(
         }
         crate::stats::print_histogram(&mut w, &s, spec)?;
     }
-    Ok(())
+    Ok(report)
 }

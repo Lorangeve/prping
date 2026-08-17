@@ -1,19 +1,12 @@
-mod bandwidth;
-mod icmp;
-mod latency;
-mod output;
-mod stats;
-mod tcp;
-mod udp;
-mod util;
-
 rust_i18n::i18n!("locales");
 
 use bpaf::*;
+use prping::{
+    OutcomeKind, PingConfig, PrpingError, PrpingWarning, configure_executor_threads,
+    parse_histogram, run, serve, set_json, set_pretty,
+};
 use rust_i18n::t;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::net::SocketAddr;
 
 /// Parse "host:port" string.
 fn parse_target(input: &str) -> anyhow::Result<(String, Option<u16>)> {
@@ -184,19 +177,6 @@ fn parse_count(s: &str) -> anyhow::Result<(u64, Option<f64>)> {
 }
 
 /// UDP 数据报负载上限（IPv4 65507 / IPv6 65527，取保守值），超限时 clamp 并提示。
-fn clamp_udp_size(size: usize, udp: bool) -> usize {
-    const MAX_UDP: usize = 65507;
-    if udp && size > MAX_UDP {
-        eprintln!(
-            "{}",
-            t!("errors.udp_size_clamped", size = size, max = MAX_UDP)
-        );
-        return MAX_UDP;
-    }
-    size
-}
-
-#[derive(Debug, Clone)]
 struct Command {
     help_icmp: bool,
     help_tcp: bool,
@@ -245,12 +225,11 @@ fn detect_locale() {
         rust_i18n::set_locale(&loc);
     }
 }
-
 fn main() -> anyhow::Result<()> {
     // 多线程 executor：smol 全局 executor 默认单线程，-P 并发无法真正并行
-    util::configure_executor_threads();
+    configure_executor_threads();
     detect_locale();
-    util::install_interrupt_handler()?;
+    install_interrupt_handler()?;
 
     let cmd = cmd().run();
 
@@ -283,8 +262,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Set output modes before any output
-    crate::stats::set_pretty(cmd.pretty);
-    crate::stats::set_json(cmd.json);
+    set_pretty(cmd.pretty);
+    set_json(cmd.json);
 
     // No args: show summary (bpaf handles -h/--help with i18n descriptions)
     if cmd.target.is_none()
@@ -299,7 +278,22 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(addr) = &cmd.server {
-        return smol::block_on(serve_both(addr.clone()));
+        let addr: SocketAddr = addr
+            .parse()
+            .map_err(|_| anyhow::anyhow!(t!("errors.invalid_bind", addr = addr.as_str())))?;
+        println!("{}", t!("server.bandwidth_listening", addr = addr));
+        let report = smol::block_on(serve(addr))?;
+        println!(
+            "{}",
+            t!(
+                "server.summary",
+                conns = report.connections,
+                bytes = report.bytes,
+                secs = format!("{:.2}", report.secs),
+                mbps = format!("{:.2}", report.mbps)
+            )
+        );
+        return Ok(());
     }
 
     let target = cmd
@@ -308,7 +302,7 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!(t!("errors.host_port_required")))?;
 
     let (host, port) = parse_target(target)?;
-    let hist = cmd.histogram.as_deref().and_then(stats::parse_histogram);
+    let hist = cmd.histogram.as_deref().and_then(parse_histogram);
 
     // 次数/时长解析（-n 10 或 -n 10s），非法值直接报错
     let (cnt, dur) = match cmd.count.as_deref() {
@@ -316,21 +310,13 @@ fn main() -> anyhow::Result<()> {
         None => (0, None),
     };
 
-    // -i 0 快速模式：clamp 到 1ms 下限，避免无意中以最大速率打爆网络
-    let interval = if cmd.interval < 0.001 {
-        eprintln!("{}", t!("errors.interval_min", value = cmd.interval));
-        0.001
-    } else {
-        cmd.interval
-    };
-
-    let mut cfg = util::PingConfig {
+    let cfg = PingConfig {
         host,
         port: port.unwrap_or(0),
         count: cnt,
         duration: dur,
-        interval,
-        size: 32,
+        interval: cmd.interval,
+        size: cmd.req_size.as_deref().map(parse_size).transpose()?,
         quiet: cmd.quiet,
         histogram: hist,
         warmup: cmd.warmup,
@@ -339,265 +325,111 @@ fn main() -> anyhow::Result<()> {
         parallel: cmd.parallel,
         udp: cmd.udp,
         receive: cmd.receive,
+        bandwidth: cmd.bandwidth,
     };
 
-    let has_loss = if cmd.bandwidth {
-        let p = port.ok_or_else(|| anyhow::anyhow!(t!("errors.bandwidth_requires_port")))?;
-        cfg.port = p;
-        let size = parse_size(cmd.req_size.as_deref().unwrap_or("8192"))?;
-        cfg.size = clamp_udp_size(size, cmd.udp);
-        // UDP 带宽无并发，-P 静默忽略 → 提示
-        if cmd.udp && cmd.parallel > 1 {
-            eprintln!("{}", t!("errors.parallel_udp_ignored"));
+    // 统一入口：模式识别、clamp、忽略提示都在 lib 的 run() 内
+    match run(&cfg, |w| eprintln!("{}", render_warning(w))) {
+        Ok(kind) => {
+            let has_loss = match &kind {
+                OutcomeKind::Ping(stats) => stats.has_loss(),
+                OutcomeKind::Bandwidth(_) => false,
+            };
+            // 有丢包时以非零退出码结束（脚本友好）
+            if has_loss {
+                std::process::exit(1);
+            }
         }
-        bandwidth::run_client(&cfg)?;
-        false
-    } else if cmd.req_size.is_some()
-        && let Some(p) = port
-    {
-        cfg.port = p;
-        let size = parse_size(cmd.req_size.as_deref().unwrap())?;
-        cfg.size = clamp_udp_size(size, cmd.udp);
-        cfg.count = cnt.max(1);
-        latency::run_client(&cfg)?
-    } else if let Some(p) = port {
-        cfg.port = p;
-        // 普通 ping 模式不使用 -r，提示避免误以为生效
-        if cmd.receive {
-            eprintln!("{}", t!("errors.receive_ignored_ping"));
+        Err(PrpingError::UdpRequiresPort) => {
+            eprintln!("{}", t!("errors.udp_requires_port"));
+            std::process::exit(1);
         }
-        if cmd.udp {
-            udp::ping(&cfg)?
-        } else {
-            tcp::ping(&cfg)?
+        Err(PrpingError::BandwidthRequiresPort) => {
+            eprintln!("{}", t!("errors.bandwidth_requires_port"));
+            std::process::exit(1);
         }
-    } else {
-        if cmd.udp {
-            anyhow::bail!(t!("errors.udp_requires_port"));
-        }
-        if cmd.receive {
-            eprintln!("{}", t!("errors.receive_ignored_ping"));
-        }
-        // ICMP 负载大小（-l，默认 32）
-        let size = cmd
-            .req_size
-            .as_deref()
-            .map(parse_size)
-            .transpose()?
-            .unwrap_or(32);
-        cfg.size = size;
-        icmp::ping(&cfg)?
-    };
-
-    // 有丢包时以非零退出码结束（脚本友好）
-    if has_loss {
-        std::process::exit(1);
+        Err(e) => return Err(e.into()),
     }
     Ok(())
 }
 
-/// Summary help: overview + tips + examples (shown when no args).
+/// 渲染测试警告为本地化文案。
+fn render_warning(w: PrpingWarning) -> String {
+    match w {
+        PrpingWarning::IntervalClamped { requested } => {
+            t!("errors.interval_min", value = requested).to_string()
+        }
+        PrpingWarning::ParallelUdpIgnored => t!("errors.parallel_udp_ignored").to_string(),
+        PrpingWarning::ReceiveIgnoredPing => t!("errors.receive_ignored_ping").to_string(),
+        PrpingWarning::UdpSizeClamped { requested, max } => {
+            t!("errors.udp_size_clamped", size = requested, max = max).to_string()
+        }
+    }
+}
+
+/// 安装 Ctrl+C 处理器：首次按下置位中断标志（优雅停止并输出统计），再次按下立即退出。
+///
+/// Unix 用 `libc::signal`，Windows 用 `kernel32::SetConsoleCtrlHandler`。
+#[cfg(unix)]
+fn install_interrupt_handler() -> anyhow::Result<()> {
+    extern "C" fn on_sigint(_: libc::c_int) {
+        if INTERRUPT_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
+            prping::set_interrupted(true);
+        } else {
+            // 第二次 Ctrl+C：立即退出（_exit 为异步信号安全）
+            unsafe { libc::_exit(130) };
+        }
+    }
+    // SAFETY: 安装 SIGINT 处理器；处理器内只做原子操作与 _exit，均异步信号安全。
+    unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
+    Ok(())
+}
+
+#[cfg(windows)]
+fn install_interrupt_handler() -> anyhow::Result<()> {
+    use std::os::raw::{c_int, c_uint};
+
+    // Windows 控制台事件处理器（BOOL CALLBACK HandlerRoutine(DWORD dwCtrlType)）。
+    // 运行在专用线程而非信号上下文，可安全调用原子操作与 ExitProcess。
+    unsafe extern "system" fn on_ctrl(_ctrl_type: c_uint) -> c_int {
+        if INTERRUPT_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
+            prping::set_interrupted(true);
+        } else {
+            // 第二次 Ctrl+C：立即退出（ExitProcess 不跑 atexit，处理器线程内安全）
+            unsafe { ExitProcess(130) };
+        }
+        1 // TRUE：事件已处理，阻止默认终止
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(c_uint) -> c_int>,
+            add: c_int,
+        ) -> c_int;
+        fn ExitProcess(code: c_uint) -> !;
+    }
+
+    // SAFETY: 注册控制台事件处理器；处理器内只做原子操作与 ExitProcess。
+    let ok = unsafe { SetConsoleCtrlHandler(Some(on_ctrl), 1) };
+    if ok == 0 {
+        anyhow::bail!("SetConsoleCtrlHandler failed");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn install_interrupt_handler() -> anyhow::Result<()> {
+    Ok(())
+}
+
+use std::sync::atomic::{AtomicU8, Ordering};
+static INTERRUPT_COUNT: AtomicU8 = AtomicU8::new(0);
+
 fn print_summary_help() {
     println!("{}", t!("help.overview"));
     println!();
     println!("{}", t!("help.usage_line"));
     println!();
     println!("{}", t!("help.examples"));
-}
-
-/// 服务端聚合统计（Ctrl+C 退出时打印）。
-struct ServerAgg {
-    connections: AtomicU64,
-    bytes: AtomicU64,
-    micros: AtomicU64,
-}
-
-/// 服务端并发 TCP 连接上限。
-const MAX_CONNECTIONS: usize = 1024;
-
-/// Server handles both latency and bandwidth client connections (TCP + UDP).
-async fn serve_both(addr: String) -> anyhow::Result<()> {
-    use smol::io::{AsyncReadExt, AsyncWriteExt};
-    use smol::net::TcpListener;
-    let addr: std::net::SocketAddr = addr
-        .parse()
-        .map_err(|_| anyhow::anyhow!(t!("errors.invalid_bind", addr = addr)))?;
-    println!("{}", t!("server.bandwidth_listening", addr = addr));
-    let listener = TcpListener::bind(addr).await?;
-    let agg = Arc::new(ServerAgg {
-        connections: AtomicU64::new(0),
-        bytes: AtomicU64::new(0),
-        micros: AtomicU64::new(0),
-    });
-
-    // UDP：回显服务 + 接收模式触发协议（大缓冲 socket，避免突发丢包）
-    let udp_socket = Arc::new(util::bind_udp(addr)?);
-    smol::spawn(async move {
-        let mut buf: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::new(0u8); 65536];
-        loop {
-            let Ok((n, src)) = util::udp_recv(&udp_socket, &mut buf).await else {
-                continue;
-            };
-            let data = util::init_slice(&buf, n);
-            // UDP 接收模式触发包：[0xFF, 0xFF, size(2B BE), count(4B BE)]
-            if n == 8 && data[0] == 0xFF && data[1] == 0xFF {
-                let size = u16::from_be_bytes([data[2], data[3]]) as usize;
-                let count = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-                let sock = udp_socket.clone();
-                let payload = vec![0x42u8; size.max(1)];
-                smol::spawn(async move {
-                    let mut sent = 0u64;
-                    while sent < count as u64 {
-                        if util::interrupted() {
-                            break;
-                        }
-                        match util::udp_send(&sock, &payload, &src).await {
-                            Ok(_) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                // 发送缓冲区满：让出，等客户端排空后重试
-                                smol::Timer::after(Duration::from_millis(1)).await;
-                                continue;
-                            }
-                            Err(_) => break, // 端口不可达等致命错误
-                        }
-                        sent += 1;
-                    }
-                })
-                .detach();
-                continue;
-            }
-            let _ = util::udp_send(&udp_socket, data, &src).await;
-        }
-    })
-    .detach();
-
-    // 并发连接上限：防恶意/失控客户端无限堆任务
-    let conn_sem = Arc::new(smol::lock::Semaphore::new(MAX_CONNECTIONS));
-
-    loop {
-        if util::interrupted() {
-            break;
-        }
-        // 200ms 轮询 accept，以便及时响应 Ctrl+C
-        let accept = smol::future::or(listener.accept(), async {
-            smol::Timer::after(Duration::from_millis(200)).await;
-            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, ""))
-        })
-        .await;
-        let (stream, peer) = match accept {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        // 超出上限：直接拒绝新连接（信号量配额在任务结束时释放）
-        let Some(perm) = conn_sem.clone().try_acquire_arc() else {
-            drop(stream);
-            continue;
-        };
-        let agg = agg.clone();
-
-        smol::spawn(async move {
-            use std::io::Write as _;
-            let _perm = perm;
-            let mut stream = stream;
-            stream.set_nodelay(true).ok();
-            let mut buf = vec![0u8; 65536];
-            let mut total: u64 = 0;
-            let mut echo_ok = true;
-            let start = std::time::Instant::now();
-            loop {
-                match stream.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        total += n as u64;
-                        // 接收模式触发（0xFF 单字节）：持续回送数据
-                        if n == 1 && buf[0] == 0xFF && total == 1 {
-                            let dummy = vec![0u8; 65536];
-                            loop {
-                                if stream.write_all(&dummy).await.is_err() {
-                                    break;
-                                }
-                            }
-                            break;
-                        }
-                        // 回显：100ms 写超时。带宽测试客户端不回读回显，
-                        // 写窗口会迅速打满；超时后停止回显但继续排空数据，避免连接被 RST。
-                        if echo_ok {
-                            let echo = smol::future::or(stream.write_all(&buf[..n]), async {
-                                smol::Timer::after(Duration::from_millis(100)).await;
-                                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, ""))
-                            })
-                            .await;
-                            if echo.is_err() {
-                                echo_ok = false;
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let elapsed = start.elapsed().as_secs_f64();
-            agg.connections.fetch_add(1, Ordering::Relaxed);
-            agg.bytes.fetch_add(total, Ordering::Relaxed);
-            agg.micros
-                .fetch_add((elapsed * 1_000_000.0) as u64, Ordering::Relaxed);
-
-            let ip = peer.ip().to_string();
-            let port = peer.port();
-            let mut w = output::stdout();
-            if total > 0 && elapsed > 0.0 {
-                let mbits = (total as f64 * 8.0) / (elapsed * 1_000_000.0);
-                let size_str = format_bytes(total);
-                let _ = output::print_green(&mut w, t!("server.recv_tag"));
-                let _ = output::print_cyan(&mut w, format!("{ip}:{port} "));
-                let _ = output::print_yellow(
-                    &mut w,
-                    format!("{size_str} ({total}) in {elapsed:.2}s — {mbits:.2} Mbps"),
-                );
-                let _ = writeln!(&mut w);
-            } else {
-                let _ = output::print_green(&mut w, t!("server.connect_tag"));
-                let _ = output::print_cyan(&mut w, format!("{ip}:{port} "));
-                let _ = output::print_yellow(&mut w, format!("{:.2}ms", elapsed * 1000.0));
-                let _ = writeln!(&mut w);
-            }
-        })
-        .detach();
-    }
-
-    // 聚合统计
-    let conns = agg.connections.load(Ordering::Relaxed);
-    let bytes = agg.bytes.load(Ordering::Relaxed);
-    let micros = agg.micros.load(Ordering::Relaxed);
-    let secs = micros as f64 / 1_000_000.0;
-    let mbps = if secs > 0.0 {
-        (bytes as f64 * 8.0) / (secs * 1_000_000.0)
-    } else {
-        0.0
-    };
-    println!(
-        "{}",
-        t!(
-            "server.summary",
-            conns = conns,
-            bytes = bytes,
-            secs = format!("{secs:.2}"),
-            mbps = format!("{mbps:.2}")
-        )
-    );
-    Ok(())
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{:.2} {}", size, UNITS[unit])
-    }
 }

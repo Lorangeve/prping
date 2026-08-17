@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
-pub fn ping(cfg: &PingConfig) -> anyhow::Result<bool> {
+pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
     if cfg.host.parse::<IpAddr>().is_err() {
         let stripped = cfg
@@ -35,7 +35,7 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<bool> {
     smol::block_on(ping_async(addr, cfg))
 }
 
-async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
+async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let bind_addr: SocketAddr = if target.is_ipv4() {
         "0.0.0.0:0".parse()?
     } else {
@@ -45,8 +45,8 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool
     let mut stats = Stats::default();
     let mut w = output::stdout();
     // 前 2 字节放 seq，用于回包校验（#3：过滤杂包）
-    let mut payload = vec![0u8; cfg.size.max(2)];
-    let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size + 512];
+    let mut payload = vec![0u8; cfg.size.unwrap_or(32).max(2)];
+    let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap_or(32) + 512];
     let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
 
     loop {
@@ -126,7 +126,7 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<bool
     if !stats::json() {
         stats::print_timeline(&mut w, &stats)?;
     }
-    Ok(stats.loss_pct() > 0.0)
+    Ok(stats)
 }
 
 fn print_reply(

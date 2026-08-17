@@ -7,13 +7,15 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 /// 一次测试的全部参数（收敛各模块的长参数列表）。
+#[derive(Debug, Clone)]
 pub struct PingConfig {
     pub host: String,
     pub port: u16,
     pub count: u64,
     pub duration: Option<f64>,
     pub interval: f64,
-    pub size: usize,
+    /// 负载大小（`-l`，None = 未指定）。
+    pub size: Option<usize>,
     pub quiet: bool,
     pub histogram: Option<crate::stats::HistogramSpec>,
     pub warmup: u64,
@@ -22,6 +24,8 @@ pub struct PingConfig {
     pub parallel: u32,
     pub udp: bool,
     pub receive: bool,
+    /// 带宽测试模式（`-b`）。
+    pub bandwidth: bool,
 }
 
 /// 创建带大收发缓冲的 UDP socket（socket2 设置后包成 smol::Async）。
@@ -216,65 +220,20 @@ pub async fn connect_timeout(addr: SocketAddr) -> std::io::Result<smol::net::Tcp
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static INTERRUPT_COUNT: AtomicU8 = AtomicU8::new(0);
 
-/// 是否收到过 Ctrl+C。
+/// 是否收到过 Ctrl+C（或被注入中断）。
 pub fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed)
 }
 
-/// 安装 Ctrl+C 处理器：首次按下置位中断标志（优雅停止并输出统计），再次按下立即退出。
-///
-/// Unix 用 `libc::signal`；Windows 暂保持系统默认行为（直接退出）。
-#[cfg(unix)]
-pub fn install_interrupt_handler() -> anyhow::Result<()> {
-    extern "C" fn on_sigint(_: libc::c_int) {
-        if INTERRUPT_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
-            INTERRUPTED.store(true, Ordering::SeqCst);
-        } else {
-            // 第二次 Ctrl+C：立即退出（_exit 为异步信号安全）
-            unsafe { libc::_exit(130) };
-        }
-    }
-    // SAFETY: 安装 SIGINT 处理器；处理器内只做原子操作与 _exit，均异步信号安全。
-    unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
-    Ok(())
+/// 置位/清除中断标志（测试注入优雅退出时使用）。
+pub fn set_interrupted(v: bool) {
+    INTERRUPTED.store(v, Ordering::Relaxed);
 }
 
-#[cfg(windows)]
-pub fn install_interrupt_handler() -> anyhow::Result<()> {
-    use std::os::raw::{c_int, c_uint};
-
-    // Windows 控制台事件处理器（BOOL CALLBACK HandlerRoutine(DWORD dwCtrlType)）。
-    // 运行在专用线程而非信号上下文，可安全调用原子操作与 ExitProcess。
-    unsafe extern "system" fn on_ctrl(_ctrl_type: c_uint) -> c_int {
-        if INTERRUPT_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
-            INTERRUPTED.store(true, Ordering::SeqCst);
-        } else {
-            // 第二次 Ctrl+C：立即退出（ExitProcess 不跑 atexit，处理器线程内安全）
-            unsafe { ExitProcess(130) };
-        }
-        1 // TRUE：事件已处理，阻止默认终止
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn SetConsoleCtrlHandler(
-            handler: Option<unsafe extern "system" fn(c_uint) -> c_int>,
-            add: c_int,
-        ) -> c_int;
-        fn ExitProcess(code: c_uint) -> !;
-    }
-
-    // SAFETY: 注册控制台事件处理器；处理器内只做原子操作与 ExitProcess。
-    let ok = unsafe { SetConsoleCtrlHandler(Some(on_ctrl), 1) };
-    if ok == 0 {
-        anyhow::bail!("SetConsoleCtrlHandler failed");
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn install_interrupt_handler() -> anyhow::Result<()> {
-    Ok(())
+/// 重置中断状态（测试隔离用）。
+pub fn reset_interrupt() {
+    INTERRUPTED.store(false, Ordering::Relaxed);
+    INTERRUPT_COUNT.store(0, Ordering::Relaxed);
 }
 
 /// 构造 UDP 接收模式触发包：`[0xFF, 0xFF, size(2B BE), count(4B BE)]`。

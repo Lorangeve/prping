@@ -20,7 +20,7 @@ enum IcmpErr {
 }
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
-pub fn ping(cfg: &PingConfig) -> anyhow::Result<bool> {
+pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addrs = util::resolve_all(&cfg.host, cfg.v4, cfg.v6)?;
     if addrs.is_empty() {
         anyhow::bail!(t!("errors.cannot_resolve", host = cfg.host));
@@ -44,7 +44,11 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<bool> {
     if !stats::json() {
         println!(
             "{}",
-            t!("icmp.pinging", addr = addr.to_string(), size = cfg.size)
+            t!(
+                "icmp.pinging",
+                addr = addr.to_string(),
+                size = cfg.size.unwrap_or(32)
+            )
         );
         if let Some(d) = cfg.duration {
             println!("{}", t!("icmp.duration", secs = d, warmup = cfg.warmup));
@@ -63,7 +67,7 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<bool> {
     smol::block_on(ping_async(addr, cfg))
 }
 
-async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
+async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let (sock, target) = create_socket(addr)?;
     let async_sock = smol::Async::new(sock)?;
     let mut stats = Stats::default();
@@ -80,7 +84,16 @@ async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
         }
         let is_warmup = run.is_warmup();
         let seq_num = run.seq() as u16;
-        match send_recv(&async_sock, &target, ident, seq_num, cfg.size, addr).await {
+        match send_recv(
+            &async_sock,
+            &target,
+            ident,
+            seq_num,
+            cfg.size.unwrap_or(32),
+            addr,
+        )
+        .await
+        {
             Ok((rtt, ttl, reply_size)) => {
                 if !is_warmup {
                     stats.record(rtt);
@@ -122,7 +135,7 @@ async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<bool> {
     if !stats::json() {
         stats::print_timeline(&mut w, &stats)?;
     }
-    Ok(stats.loss_pct() > 0.0)
+    Ok(stats)
 }
 
 fn create_socket(addr: IpAddr) -> anyhow::Result<(Socket, SockAddr)> {

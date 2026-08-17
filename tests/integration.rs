@@ -1,6 +1,6 @@
-//! 集成测试：真实起服务端 + 客户端子进程，回环验证各协议路径。
+//! 子进程 CLI 行为测试：验证 bin 的解析、输出、退出码。
 //!
-//! 断言基于 `--json` 输出（与 locale 无关）和字节数，避免本地化文本耦合。
+//! 协议路径（echo/trigger/聚合/优雅退出）由 `tests/protocol.rs` 进程内覆盖。
 
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -32,7 +32,7 @@ fn start_server() -> (ServerGuard, u16) {
     let port = alloc_port();
     let child = prping()
         .args(["-s", &format!("127.0.0.1:{port}")])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn server");
@@ -96,130 +96,6 @@ fn tcp_ping_exit_code_loss() {
 }
 
 #[test]
-fn tcp_ping_duration_mode() {
-    let (_srv, port) = start_server();
-    let out = run_client(port, &["-n", "1s", "-i", "0.2", "-w", "0", "--json"]);
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    // 1s / 0.2s 间隔 ≈ 5 次
-    assert!(
-        s.contains("\"sent\":5") || s.contains("\"sent\":6"),
-        "got: {s}"
-    );
-}
-
-#[test]
-fn latency_tcp_send() {
-    let (_srv, port) = start_server();
-    let out = run_client(port, &["-l", "64", "-n", "5", "-w", "0", "--json"]);
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(
-        s.contains("\"sent\":5") && s.contains("\"received\":5"),
-        "got: {s}"
-    );
-}
-
-#[test]
-fn latency_tcp_receive() {
-    let (_srv, port) = start_server();
-    let out = run_client(port, &["-l", "64", "-n", "5", "-w", "0", "-r", "--json"]);
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(
-        s.contains("\"sent\":5") && s.contains("\"received\":5"),
-        "got: {s}"
-    );
-}
-
-#[test]
-fn latency_udp_send() {
-    let (_srv, port) = start_server();
-    let out = run_client(port, &["-l", "64", "-n", "5", "-w", "0", "-u", "--json"]);
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(
-        s.contains("\"sent\":5") && s.contains("\"received\":5"),
-        "got: {s}"
-    );
-}
-
-#[test]
-fn latency_udp_receive() {
-    let (_srv, port) = start_server();
-    let out = run_client(
-        port,
-        &["-l", "64", "-n", "5", "-w", "0", "-u", "-r", "--json"],
-    );
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(
-        s.contains("\"sent\":5") && s.contains("\"received\":5"),
-        "got: {s}"
-    );
-}
-
-#[test]
-fn bandwidth_tcp_send_bytes() {
-    let (_srv, port) = start_server();
-    let out = run_client(port, &["-b", "-l", "8k", "-n", "100", "-w", "0", "--json"]);
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(s.contains("\"bytes\":819200"), "got: {s}");
-}
-
-#[test]
-fn bandwidth_tcp_receive_bytes() {
-    let (_srv, port) = start_server();
-    let out = run_client(
-        port,
-        &["-b", "-l", "8k", "-n", "100", "-w", "0", "-r", "--json"],
-    );
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(s.contains("\"bytes\":819200"), "got: {s}");
-}
-
-#[test]
-fn bandwidth_udp_send_bytes() {
-    let (_srv, port) = start_server();
-    let out = run_client(
-        port,
-        &["-b", "-l", "8k", "-n", "100", "-w", "0", "-u", "--json"],
-    );
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(s.contains("\"bytes\":819200"), "got: {s}");
-}
-
-#[test]
-fn bandwidth_udp_receive_bytes() {
-    let (_srv, port) = start_server();
-    let out = run_client(
-        port,
-        &[
-            "-b", "-l", "8k", "-n", "100", "-w", "0", "-u", "-r", "--json",
-        ],
-    );
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(s.contains("\"bytes\":819200"), "got: {s}");
-}
-
-#[test]
-fn bandwidth_parallel_exact_quota() {
-    // count < parallel 时也必须发满 count 包（4 × 8k = 32768 字节）
-    let (_srv, port) = start_server();
-    let out = run_client(
-        port,
-        &["-b", "-l", "8k", "-n", "4", "-w", "0", "-P", "8", "--json"],
-    );
-    assert!(out.status.success());
-    let s = stdout_str(&out);
-    assert!(s.contains("\"bytes\":32768"), "got: {s}");
-}
-
-#[test]
 fn version_flag() {
     let out = prping().arg("--version").output().expect("run --version");
     assert!(out.status.success());
@@ -233,42 +109,4 @@ fn invalid_count_errors() {
         .output()
         .expect("run");
     assert!(!out.status.success());
-}
-
-#[cfg(unix)]
-#[test]
-fn server_graceful_shutdown_summary() {
-    use std::io::Read;
-    let port = alloc_port();
-    let mut guard = ServerGuard(
-        prping()
-            .args(["-s", &format!("127.0.0.1:{port}")])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn server"),
-    );
-    wait_port(port);
-    // 跑一个客户端制造连接
-    let out = run_client(port, &["-n", "2", "-w", "0"]);
-    assert!(out.status.success());
-    // SIGINT 优雅退出，输出聚合统计
-    unsafe { libc::kill(guard.0.id() as i32, libc::SIGINT) };
-    let mut buf = String::new();
-    guard
-        .0
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut buf)
-        .expect("read server stdout");
-    let status = guard.0.wait().expect("wait server");
-    assert!(
-        status.success(),
-        "server should exit 0 after SIGINT, got {status:?}"
-    );
-    assert!(
-        buf.contains("server summary") || buf.contains("服务端汇总"),
-        "got: {buf}"
-    );
 }
