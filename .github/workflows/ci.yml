@@ -46,3 +46,22 @@ jobs:
       - name: Run benchmark
         continue-on-error: true
         run: bash scripts/bench.sh target/release/prping
+
+  win7-build:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly + rust-src
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - name: Build Win7 target (build-std)
+        run: cargo +nightly build -Z build-std --target x86_64-win7-windows-gnu --release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prping-win7
+          path: target/x86_64-win7-windows-gnu/release/prping.exe

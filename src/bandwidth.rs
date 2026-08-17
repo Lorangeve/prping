@@ -174,6 +174,8 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                             break;
                         }
                         // 抢占全局配额，发完即停（总量截断为 count）
+                        // nightly 1.93+ 将 fetch_update 更名 try_update（尚未稳定），显式 allow
+                        #[allow(deprecated)]
                         if rem
                             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |r: u64| {
                                 r.checked_sub(1)
