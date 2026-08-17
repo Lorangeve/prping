@@ -49,6 +49,7 @@
 //!     udp: false,
 //!     receive: false,
 //!     bandwidth: false,
+//!     graph: false,
 //! };
 //! let kind = run(&cfg, |_| {}).expect("run");
 //! ```

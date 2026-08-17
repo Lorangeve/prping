@@ -132,7 +132,7 @@ async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     {
         stats::print_histogram(&mut w, &stats, spec)?;
     }
-    if !stats::json() {
+    if cfg.graph && !stats::json() {
         stats::print_timeline(&mut w, &stats)?;
     }
     Ok(stats)

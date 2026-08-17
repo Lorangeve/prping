@@ -105,7 +105,7 @@ async fn ping_async(addr: std::net::SocketAddr, cfg: &PingConfig) -> anyhow::Res
     {
         stats::print_histogram(&mut w, &stats, spec)?;
     }
-    if !stats::json() {
+    if cfg.graph && !stats::json() {
         stats::print_timeline(&mut w, &stats)?;
     }
     Ok(stats)

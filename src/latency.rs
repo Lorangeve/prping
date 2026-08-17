@@ -253,7 +253,7 @@ fn print_result(w: &mut StandardStream, stats: &Stats, cfg: &PingConfig) -> anyh
     {
         stats::print_histogram(w, stats, spec)?;
     }
-    if !stats::json() {
+    if cfg.graph && !stats::json() {
         stats::print_timeline(w, stats)?;
     }
     Ok(())

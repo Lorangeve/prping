@@ -48,7 +48,8 @@ prping -s ADDR:PORT            # 服务端（同时支持延迟/带宽/接收模
 | `-r` | 接收模式（测下载） |
 | `-u` | UDP 模式 |
 | `-P N` | 并发连接数 |
-| `-p` | Unicode 渲染 |
+| `-p` | Unicode 渲染（直方图/时间线用 ploot） |
+| `-g` | 显示时间线图（配合 `-p` 用 ploot 渲染） |
 | `-4` / `-6` | 强制 IPv4/IPv6 |
 | `--json` | 输出 JSON 统计 |
 | `-V` / `--version` | 版本号 |
@@ -58,8 +59,8 @@ prping -s ADDR:PORT            # 服务端（同时支持延迟/带宽/接收模
 ## 示例
 
 ```bash
-# TCP ping，30 次，0.1s 间隔，直方图 + Unicode 渲染
-prping -n 30 -i 0.1 -H 10 -p 192.168.1.1:80
+# TCP ping，30 次，0.1s 间隔，直方图 + 时间线图（ploot 渲染）
+prping -n 30 -i 0.1 -H 10 -gp 192.168.1.1:80
 
 # 延迟测试（客户端发送 64B）
 prping -l 64 -n 100 server:8080

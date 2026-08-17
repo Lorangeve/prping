@@ -33,6 +33,7 @@ prping -u HOST:PORT         UDP ping
 prping -l SIZE HOST:PORT    Latency test
 prping -b -l SIZE HOST:PORT Bandwidth test
 prping -s ADDR:PORT         Server（同时服务 latency/bandwidth）
+prping -g HOST:PORT        TCP ping + 时间线图（-gp 用 ploot 渲染）
 ```
 
 ## 功能完成度

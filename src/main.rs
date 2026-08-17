@@ -113,6 +113,10 @@ fn cmd() -> impl Parser<Command> {
         .short('p')
         .switch()
         .help("Use Unicode/Braille histogram rendering");
+    let graph = long("graph")
+        .short('g')
+        .switch()
+        .help("Print latency timeline graph (with -p: ploot rendering)");
     let json = long("json")
         .flag(true, false)
         .help(t!("help.options.json").as_ref());
@@ -142,6 +146,7 @@ fn cmd() -> impl Parser<Command> {
         v4,
         v6,
         pretty,
+        graph,
         json,
         version,
         target,
@@ -196,6 +201,7 @@ struct Command {
     v4: bool,
     v6: bool,
     pretty: bool,
+    graph: bool,
     json: bool,
     version: bool,
     receive: bool,
@@ -326,6 +332,7 @@ fn main() -> anyhow::Result<()> {
         udp: cmd.udp,
         receive: cmd.receive,
         bandwidth: cmd.bandwidth,
+        graph: cmd.graph,
     };
 
     // 统一入口：模式识别、clamp、忽略提示都在 lib 的 run() 内

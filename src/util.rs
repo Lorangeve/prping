@@ -26,6 +26,8 @@ pub struct PingConfig {
     pub receive: bool,
     /// 带宽测试模式（`-b`）。
     pub bandwidth: bool,
+    /// 是否打印时间线图（`-g`）。
+    pub graph: bool,
 }
 
 /// 创建带大收发缓冲的 UDP socket（socket2 设置后包成 smol::Async）。

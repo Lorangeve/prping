@@ -137,6 +137,7 @@ fn run_udp_requires_port() {
         udp: true,
         receive: false,
         bandwidth: false,
+        graph: false,
     };
     let err = run(&cfg, |_| {}).expect_err("should fail");
     assert!(matches!(err, PrpingError::UdpRequiresPort));
@@ -207,5 +208,6 @@ fn ping_config() -> PingConfig {
         udp: false,
         receive: false,
         bandwidth: false,
+        graph: false,
     }
 }

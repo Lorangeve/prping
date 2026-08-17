@@ -6,6 +6,7 @@
 
 ### 新增
 
+- `-g`/`--graph`：显式显示时间线图（默认不再自动打印；`-gp` 用 ploot 渲染）
 - `-p`/`--pretty` 改用 [ploot](https://github.com/ploot-rs/ploot) 渲染：Unicode 柱状图直方图 + Braille 散点时间线（管道下自动剥离 ANSI）
 - `--json` 机器可读统计输出（ping 带 `type` 字段，带宽带 `bytes`/`mbps`）
 - `--version` / `-V`
