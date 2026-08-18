@@ -248,6 +248,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let mut total: u64 = 0;
         let start = Instant::now();
         let mut prog = make_progress(duration, count, size as u64, true, cfg.quiet);
+        let mut times = Vec::new();
         while total < target_bytes {
             if util::interrupted() {
                 break;
@@ -255,9 +256,13 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             if deadline.is_some_and(|dl| Instant::now() >= dl) {
                 break;
             }
+            let t0 = Instant::now();
             let n = stream.read(&mut buf).await?;
             if n == 0 {
                 break;
+            }
+            if cfg.histogram.is_some() {
+                times.push(t0.elapsed());
             }
             total += n as u64;
             // TCP 是字节流，读块可能越过目标：截断到目标字节数（时长模式无上限）
@@ -272,7 +277,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             total,
             start.elapsed(),
             cfg.histogram.as_ref(),
-            &[],
+            &times,
             cfg.quiet,
             &format!("{}:{}", cfg.host, cfg.port),
             cfg.receive,
@@ -467,6 +472,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let mut total: u64 = 0;
         let start = Instant::now();
         let mut prog = make_progress(duration, count, size as u64, true, cfg.quiet);
+        let mut times = Vec::new();
         while total < target {
             if util::interrupted() {
                 break;
@@ -474,6 +480,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             if deadline.is_some_and(|dl| Instant::now() >= dl) {
                 break;
             }
+            let t0 = Instant::now();
             let recv = smol::future::or(async { util::udp_recv(&sock, &mut buf).await }, async {
                 smol::Timer::after(Duration::from_secs(5)).await;
                 Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
@@ -481,6 +488,9 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             .await;
             match recv {
                 Ok((n, _)) => {
+                    if cfg.histogram.is_some() {
+                        times.push(t0.elapsed());
+                    }
                     total += n as u64;
                     prog.update(0, total);
                 }
@@ -493,7 +503,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             total,
             start.elapsed(),
             cfg.histogram.as_ref(),
-            &[],
+            &times,
             cfg.quiet,
             &format!("{}:{}", cfg.host, cfg.port),
             cfg.receive,

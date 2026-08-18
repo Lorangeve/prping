@@ -28,6 +28,7 @@
 
 ### 修复
 
+- 带宽测试接收模式（`-b -r`）`-H` 直方图此前无数据（只统计发送耗时）→ 接收方向也记录每块读取耗时
 - ICMP 模式 `--json` 缺少逐行输出（只有末尾 summary）→ 补上 `json_sample`，与 tcp/udp/latency 一致（修复 `prping HOST --json -i 0.3` 终端无输出、看似卡死）
 - `-n 10s` 此前静默失效（TCP/UDP/ICMP 会变无限 ping）
 - UDP `-r` 接收模式此前为空壳（静默回退为发送）
