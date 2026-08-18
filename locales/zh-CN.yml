@@ -10,6 +10,12 @@ tcp:
   iterations: "%{total} 次迭代 (预热 %{warmup}) ping 测试:"
   duration: "%{secs} 秒时长 (预热 %{warmup}) ping 测试:"
 
+udp:
+  pinging: "UDP ping 目标 %{addr}:%{port}，负载 %{size} 字节:"
+  iterations: "%{total} 次迭代 (预热 %{warmup}) ping 测试:"
+  duration: "%{secs} 秒时长 (预热 %{warmup}) ping 测试:"
+  echo_hint: "提示: 目标端口需有回显服务（如 prping -s ADDR:PORT）才会回包"
+
 common:
   resolving: "解析 %{host} -> %{ip}"
   reply_from: "来自 "
@@ -47,6 +53,7 @@ server:
   connect_tag: "连接 "
   sent_tag: "发送 "
   recv_tag: "接收 "
+  udp_trigger: "UDP 接收模式触发：来自 "
   summary: "服务端汇总: %{conns} 个连接，接收 %{bytes} 字节、发送 %{sent} 字节，耗时 %{secs}秒（平均 %{mbps} Mbps）"
 
 errors:

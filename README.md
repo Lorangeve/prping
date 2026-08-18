@@ -37,6 +37,11 @@ cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --relea
 # → target/x86_64-win7-windows-msvc/release/prping.exe
 ```
 
+> MSVC 构建**静态链接 CRT 与 C++ 运行库**（`.cargo/config.toml` 的 `crt-static`）：
+> 产物不依赖 `vcruntime140.dll`/`msvcp140.dll`/`ucrtbase.dll`，目标机器无需安装
+> VC++ Redistributable。实测 Win7 目标产物仅依赖 `ADVAPI32`/`KERNEL32`/`ntdll`
+> 三个 Win7 自带系统库。`x86_64-pc-windows-msvc`（普通 MSVC 目标）同样静态链接。
+
 无 xwin 的环境（如 CI 用 mingw）可退而求其次构建 GNU 备选版（MSVCRT 链接）：
 
 ```bash

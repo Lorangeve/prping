@@ -119,7 +119,8 @@ fn server_udp_echo() {
         assert_eq!(&buf[..n], b"ping");
     });
     assert_eq!(report.connections, 1);
-    assert_eq!(report.bytes, 0);
+    // UDP 回显字节计入聚合统计（此前 bytes 只统计 TCP）
+    assert_eq!(report.bytes, 4);
 }
 
 #[test]

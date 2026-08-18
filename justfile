@@ -29,7 +29,7 @@ build-release:
 
 # ── Windows 交叉编译（Linux 上；Windows 本机直接跑 build-release） ──
 
-# Windows MSVC x86_64（Linux 需 xwin）
+# Windows MSVC x86_64（Linux 需 xwin；.cargo/config.toml 已配 crt-static 静态链接 CRT/C++ 运行库）
 build-windows-msvc:
     cargo xwin build --target x86_64-pc-windows-msvc --release
 
@@ -43,7 +43,7 @@ build-windows-gnu-32:
     CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER=i686-w64-mingw32-gcc \
         cargo build --target i686-pc-windows-gnu --release
 
-# Windows 7（官方 Win7 基线目标 MSVC；Linux 需 xwin，首次自动下载 SDK）
+# Windows 7（官方 Win7 基线目标 MSVC；Linux 需 xwin，首次自动下载 SDK；静态链接 CRT/C++ 运行库）
 build-win7:
     cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
 

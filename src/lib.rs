@@ -235,6 +235,7 @@ fn clamp_udp_size(size: usize, udp: bool, on_warning: &mut impl FnMut(PrpingWarn
 pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
     use smol::io::{AsyncReadExt, AsyncWriteExt};
     use smol::net::TcpListener;
+    use std::io::Write as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -260,6 +261,12 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
             if n == 8 && data[0] == 0xFF && data[1] == 0xFF {
                 let size = u16::from_be_bytes([data[2], data[3]]) as usize;
                 let count = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                // 接收模式开始：给服务端一个即时接收反馈（不逐包打印，带宽测试会刷屏）
+                let mut w = output::stdout();
+                let _ = output::print_green(&mut w, rust_i18n::t!("server.udp_trigger"));
+                let _ = output::print_cyan(&mut w, format!("{}:{} ", src.ip(), src.port()));
+                let _ = output::print_yellow(&mut w, format!("({count} × {size}B)"));
+                let _ = writeln!(&mut w);
                 let sock = udp_socket.clone();
                 let payload = vec![0x42u8; size.max(1)];
                 let agg = udp_agg.clone();
@@ -285,7 +292,10 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
                 .detach();
                 continue;
             }
-            let _ = util::udp_send(&udp_socket, data, &src).await;
+            // 普通回显：原样回送并统计接收字节（UDP ping/latency 的接收量进聚合报告）
+            if util::udp_send(&udp_socket, data, &src).await.is_ok() {
+                udp_agg.bytes.fetch_add(n as u64, Ordering::Relaxed);
+            }
         }
     })
     .detach();

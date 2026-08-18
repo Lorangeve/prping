@@ -10,6 +10,12 @@ tcp:
   iterations: "%{total} iterations (warmup %{warmup}) ping test:"
   duration: "%{secs}s duration (warmup %{warmup}) ping test:"
 
+udp:
+  pinging: "UDP ping to %{addr}:%{port} with %{size} bytes payload:"
+  iterations: "%{total} iterations (warmup %{warmup}) ping test:"
+  duration: "%{secs}s duration (warmup %{warmup}) ping test:"
+  echo_hint: "Note: UDP gets a reply only if the target echoes it back — run prping -s ADDR:PORT on the target"
+
 common:
   resolving: "Resolving %{host} -> %{ip}"
   reply_from: "Reply from "
@@ -47,6 +53,7 @@ server:
   connect_tag: "connect "
   sent_tag: "sent "
   recv_tag: "recv "
+  udp_trigger: "UDP receive-mode trigger from "
   summary: "server summary: %{conns} connections, %{bytes} bytes received, %{sent} bytes sent in %{secs}s (avg %{mbps} Mbps)"
 
 errors:

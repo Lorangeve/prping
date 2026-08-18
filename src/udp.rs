@@ -15,6 +15,30 @@ use termcolor::StandardStream;
 pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
     util::print_resolving(&cfg.host, addr.ip());
+    if !stats::json() {
+        println!(
+            "{}",
+            t!(
+                "udp.pinging",
+                addr = addr.ip().to_string(),
+                port = addr.port(),
+                size = cfg.size.unwrap_or(32)
+            )
+        );
+        if let Some(d) = cfg.duration {
+            println!("{}", t!("udp.duration", secs = d, warmup = cfg.warmup));
+        } else {
+            println!(
+                "{}",
+                t!(
+                    "udp.iterations",
+                    total = cfg.warmup + cfg.count,
+                    warmup = cfg.warmup
+                )
+            );
+        }
+        println!("{}", t!("udp.echo_hint"));
+    }
     smol::block_on(ping_async(addr, cfg))
 }
 

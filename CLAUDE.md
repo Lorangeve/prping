@@ -13,14 +13,14 @@
 - **直方图**: 默认 ASCII `#`（内置）；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图与 Braille 散点时间线（非 tty 自动剥离 ANSI 颜色）；`-H` 支持桶数或逗号分隔阈值（ms）
 - **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en-US.yml` + `locales/zh-CN.yml`，自动检测 `$LANG` 或 `--lang`
 - **信号处理**: Ctrl+C 优雅退出 — Unix 用 `libc::signal`，Windows 用 `kernel32::SetConsoleCtrlHandler`（首次停止并输出统计，再次强制退出）；`--json` 模式在 Unix 上运行期间关闭 stdin tty 的 `ECHOCTL` 以隐藏终端回显的 `^C`（`^C` 是终端回显、从不进入 stdout 管道；退出时恢复）
-- **Windows 7**: 官方 Win7 基线目标（Tier 3）+ nightly `-Z build-std`；首选 `x86_64-win7-windows-msvc`（xwin 链接），GNU 版 `x86_64-win7-windows-gnu`（MSVCRT）为无 xwin 备选
+- **Windows 7**: 官方 Win7 基线目标（Tier 3）+ nightly `-Z build-std`；首选 `x86_64-win7-windows-msvc`（xwin 链接），GNU 版 `x86_64-win7-windows-gnu`（MSVCRT）为无 xwin 备选。MSVC 目标统一静态链接 CRT/C++ 运行库（`.cargo/config.toml` 配 `crt-static`）：产物不依赖 `vcruntime140.dll`/`msvcp140.dll`/`ucrtbase.dll`，Win7 实测仅依赖 `ADVAPI32`/`KERNEL32`/`ntdll`
 - **DNS 解析**: `smol::unblock` + `std::net::ToSocketAddrs`，统一在 `util.rs`（`resolve_vec` 返回全部、`resolve` 取首个；解析横幅统一 `util::print_resolving`）
 - **ping 循环驱动器**: icmp/tcp/udp/latency 共用 `drive.rs::drive`（间隔/预热/统计/JSONL/收尾），各模式实现 `Probe` trait 只做「一次探测」与人读行
 - **次数/时长**: `-n 10` 固定次数，`-n 10s` 按秒运行（`util::Run` 统一控制循环）
 - **带宽测试并发**: 多连接 `-P`，smol::Task 池 + 全局配额（总量精确等于 count）
 - **多线程**: `util::configure_executor_threads` 按 CPU 核数设置 `SMOL_THREADS`（smol 全局 executor 默认单线程）
-- **UDP**: socket2 大收发缓冲（4MB）+ smol::Async 包装（`util::bind_udp`），避免突发丢包
-- **UDP 接收模式**: 触发包协议 `[0xFF, 0xFF, size(2B), count(4B)]`，服务端回送 count 个 size 字节数据报
+- **UDP**: socket2 大收发缓冲（4MB）+ smol::Async 包装（`util::bind_udp`），避免突发丢包；客户端打印头部提示（目标/负载/迭代数）与回显要求说明（目标需 `prping -s` 回显才回包）
+- **UDP 接收模式**: 触发包协议 `[0xFF, 0xFF, size(2B), count(4B)]`，服务端回送 count 个 size 字节数据报；服务端 UDP 回显字节计入聚合统计、触发包打印即时接收日志（不逐包打印）
 - **JSON 输出**: `--json` 输出机器可读统计（`stats::set_json`），抑制人读输出
 - **退出码**: `run()` 返回 `OutcomeKind`（Ping(Stats)/Bandwidth(report)），bin 依据 `Stats::has_loss()` 返回 1
 - **IPv6**: `-4`/`-6` 全支持
