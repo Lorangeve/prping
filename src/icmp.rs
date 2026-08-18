@@ -100,6 +100,17 @@ async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
                 }
                 if !cfg.quiet && !stats::json() {
                     print_reply(&mut w, addr, reply_size, rtt, ttl, is_warmup)?;
+                } else if stats::json() && !is_warmup {
+                    // JSONL：每次测量一行（与 tcp/udp/latency 一致）
+                    stats::json_sample(
+                        &mut w,
+                        "icmp",
+                        &cfg.host,
+                        run.seq(),
+                        true,
+                        Some(rtt),
+                        None,
+                    )?;
                 }
             }
             Err(e) => {
@@ -116,6 +127,21 @@ async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
                             output::writeln_red(&mut w, &t!("common.ttl_expired"))?
                         }
                     }
+                } else if stats::json() && !is_warmup {
+                    let err = match e {
+                        IcmpErr::Timeout => "timeout",
+                        IcmpErr::Unreachable => "unreachable",
+                        IcmpErr::TtlExceeded => "ttl exceeded",
+                    };
+                    stats::json_sample(
+                        &mut w,
+                        "icmp",
+                        &cfg.host,
+                        run.seq(),
+                        false,
+                        None,
+                        Some(err),
+                    )?;
                 }
             }
         }
