@@ -269,14 +269,14 @@ struct Command {
 
 /// 把 BCP-47 语言标识（en-US / zh-CN / en_US / zh）规范化到 rust-i18n 实际 locale。
 ///
-/// locales 目录只有 `en.yml` 与 `zh-CN.yml`，所有输入统一映射：
-/// 中文系 → `zh-CN`，其余（含 en-US/en/en_GB...）→ `en`。
+/// locales 目录为 `en-US.yml` 与 `zh-CN.yml`，所有输入统一映射：
+/// 中文系 → `zh-CN`，其余（含 en-US/en/en_GB...）→ `en-US`。
 fn normalize_locale(s: &str) -> String {
     let s = s.trim().to_lowercase().replace('_', "-");
     if s.starts_with("zh") {
         "zh-CN".to_string()
     } else {
-        "en".to_string()
+        "en-US".to_string()
     }
 }
 
@@ -299,9 +299,9 @@ fn detect_locale() {
     if let Ok(loc) = std::env::var("RUST_I18N_LOCALE") {
         rust_i18n::set_locale(&normalize_locale(&loc));
     } else if let Ok(loc) = std::env::var("LANG") {
-        let loc = loc.split('.').next().unwrap_or("en");
+        let loc = loc.split('.').next().unwrap_or("en-US");
         rust_i18n::set_locale(&normalize_locale(loc));
-    } else {
+    } else if cfg!(windows) {
         // Windows：无 LANG 环境变量，用系统 UI 语言
         #[cfg(windows)]
         {
