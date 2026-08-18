@@ -45,6 +45,9 @@ pub fn parse_histogram(s: &str) -> Option<HistogramSpec> {
     }
 }
 
+/// 保留的采样窗口上限（无限 ping 时内存有界）。
+const MAX_SAMPLES: usize = 10000;
+
 #[derive(Debug, Default)]
 pub struct Stats {
     pub sent: u64,
@@ -72,6 +75,11 @@ impl Stats {
         self.min = Some(self.min.map_or(rtt, |m| m.min(rtt)));
         self.max = Some(self.max.map_or(rtt, |m| m.max(rtt)));
         self.times.push(rtt);
+        // 无限 ping 时内存有界：窗口上限 10000，超出丢弃最旧（min/max/loss 仍累计）
+        if self.times.len() > MAX_SAMPLES {
+            self.times.remove(0);
+            self.timeline.remove(0);
+        }
     }
 
     pub fn record_loss(&mut self) {

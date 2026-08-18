@@ -35,6 +35,7 @@ bandwidth:
   tcp_test: "TCP 带宽测试:"
   udp_test: "UDP 带宽测试:"
   sent_bytes: "已发送 = %{bytes} 字节，耗时 %{secs}秒"
+  received_bytes: "已接收 = %{bytes} 字节，耗时 %{secs}秒"
   bandwidth: "带宽 = %{mbps} Mbps"
 
 server:

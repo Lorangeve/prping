@@ -108,6 +108,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             &[],
             cfg.quiet,
             &format!("{}:{}", cfg.host, cfg.port),
+            cfg.receive,
         );
     }
 
@@ -136,6 +137,8 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             }
             sent += 1;
         }
+        // 优雅结束发送方向：避免 RST 清队列导致服务端统计偏小
+        util::drain_after_send(&mut stream).await;
         drop(stream);
         report(
             t!("bandwidth.tcp_test"),
@@ -145,6 +148,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             &times,
             cfg.quiet,
             &format!("{}:{}", cfg.host, cfg.port),
+            cfg.receive,
         )
     } else {
         // 并行连接：全局配额保证总量精确等于 count（修复 count < parallel 时发 0 包）
@@ -190,6 +194,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                     stream.write_all(&payload).await?;
                     sent += 1;
                 }
+                util::drain_after_send(&mut stream).await;
                 Ok::<_, anyhow::Error>(sent)
             }));
         }
@@ -206,6 +211,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             &[],
             cfg.quiet,
             &format!("{}:{}", cfg.host, cfg.port),
+            cfg.receive,
         )
     }
 }
@@ -279,6 +285,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             &[],
             cfg.quiet,
             &format!("{}:{}", cfg.host, cfg.port),
+            cfg.receive,
         );
     }
 
@@ -311,9 +318,11 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         &times,
         cfg.quiet,
         &format!("{}:{}", cfg.host, cfg.port),
+        cfg.receive,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn report(
     label: impl AsRef<str>,
     total_bytes: u64,
@@ -322,6 +331,7 @@ fn report(
     times: &[Duration],
     quiet: bool,
     target: &str,
+    received: bool,
 ) -> anyhow::Result<crate::BandwidthReport> {
     let label = label.as_ref();
     let secs = elapsed.as_secs_f64();
@@ -348,7 +358,8 @@ fn report(
             .unwrap_or(0);
         writeln!(
             &mut w,
-            "{{\"type\":\"bandwidth\",\"target\":\"{target}\",\"ts\":{ts},\"label\":\"{escaped}\",\"bytes\":{total_bytes},\"secs\":{secs:.2},\"mbps\":{mbits:.2}}}"
+            "{{\"type\":\"bandwidth\",\"target\":\"{target}\",\"ts\":{ts},\"direction\":\"{}\",\"label\":\"{escaped}\",\"bytes\":{total_bytes},\"secs\":{secs:.2},\"mbps\":{mbits:.2}}}",
+            if received { "recv" } else { "send" }
         )?;
         return Ok(report);
     }
@@ -356,15 +367,20 @@ fn report(
     println!();
     output::print_bold(&mut w, label)?;
     writeln!(&mut w)?;
-    writeln!(
-        &mut w,
-        "  {}",
+    let verb = if received {
+        t!(
+            "bandwidth.received_bytes",
+            bytes = total_bytes,
+            secs = format!("{:.2}", secs)
+        )
+    } else {
         t!(
             "bandwidth.sent_bytes",
             bytes = total_bytes,
             secs = format!("{:.2}", secs)
         )
-    )?;
+    };
+    writeln!(&mut w, "  {verb}")?;
     output::print_green(
         &mut w,
         format!(

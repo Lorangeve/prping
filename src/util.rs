@@ -241,6 +241,21 @@ pub async fn connect_first(addrs: &[SocketAddr]) -> std::io::Result<smol::net::T
         std::io::Error::new(std::io::ErrorKind::NotFound, "no addresses to connect")
     }))
 }
+/// 优雅结束发送方向：shutdown(Write) 后排空残余数据至 EOF。
+///
+/// 带宽发送方向客户端不回读服务端回显，直接 drop 会因接收缓冲未读数据触发 RST，
+/// 导致服务端统计的接收量偏小；shutdown + drain 让服务端完整处理后再关闭。
+pub async fn drain_after_send(stream: &mut smol::net::TcpStream) {
+    use smol::io::AsyncReadExt;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut buf = [0u8; 65536];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static INTERRUPT_COUNT: AtomicU8 = AtomicU8::new(0);
