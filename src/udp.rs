@@ -1,37 +1,20 @@
 //! UDP ping — test UDP port reachability and measure round-trip latency.
 
+use crate::drive::{Probe, ProbeOutcome, drive};
 use crate::output;
 use crate::stats::{self, Stats};
-use crate::util::{self, PingConfig, Run};
+use crate::util::{self, PingConfig};
 use rust_i18n::t;
 use std::io::Write;
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
 pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
-    if cfg.host.parse::<IpAddr>().is_err() {
-        let stripped = cfg
-            .host
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(&cfg.host);
-        if stripped.parse::<IpAddr>().is_err() && !stats::json() {
-            let mut w = output::stdout();
-            writeln!(
-                &mut w,
-                "{}",
-                t!(
-                    "common.resolving",
-                    host = cfg.host,
-                    ip = addr.ip().to_string()
-                )
-            )?;
-        }
-    }
+    util::print_resolving(&cfg.host, addr.ip());
     smol::block_on(ping_async(addr, cfg))
 }
 
@@ -42,27 +25,49 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stat
         "[::]:0".parse()?
     };
     let sock = util::bind_udp(bind_addr)?;
-    let mut stats = Stats::default();
-    let mut w = output::stdout();
     // 前 2 字节放 seq，用于回包校验（#3：过滤杂包）
-    let mut payload = vec![0u8; cfg.size.unwrap_or(32).max(2)];
-    let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap_or(32) + 512];
-    let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
+    let payload = vec![0u8; cfg.size.unwrap_or(32).max(2)];
+    let buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap_or(32) + 512];
+    let mut probe = UdpProbe {
+        sock: &sock,
+        payload,
+        buf,
+        target,
+        cfg,
+    };
+    drive(
+        cfg,
+        "udp",
+        &format!("{}:{}", cfg.host, cfg.port),
+        &mut probe,
+    )
+    .await
+}
 
-    loop {
-        if run.seq() > 0 {
-            smol::Timer::after(Duration::from_secs_f64(cfg.interval)).await;
-        }
-        if run.done() {
-            break;
-        }
-        let is_warmup = run.is_warmup();
-        let seq_num = run.seq() as u16;
-        payload[..2].copy_from_slice(&seq_num.to_be_bytes());
+/// UDP 探测体：发 seq 标记包 + 过滤杂包等回包 + 人读行（统计/JSONL 由 drive 处理）。
+struct UdpProbe<'a> {
+    sock: &'a smol::Async<socket2::Socket>,
+    payload: Vec<u8>,
+    buf: Vec<MaybeUninit<u8>>,
+    target: SocketAddr,
+    cfg: &'a PingConfig,
+}
+
+impl Probe for UdpProbe<'_> {
+    async fn probe(
+        &mut self,
+        w: &mut StandardStream,
+        seq: u64,
+        is_warmup: bool,
+    ) -> anyhow::Result<ProbeOutcome> {
+        let seq_num = seq as u16;
+        self.payload[..2].copy_from_slice(&seq_num.to_be_bytes());
         let start = Instant::now();
-        if util::udp_send(&sock, &payload, &target).await.is_err() {
-            run.advance();
-            continue;
+        if util::udp_send(self.sock, &self.payload, &self.target)
+            .await
+            .is_err()
+        {
+            return Ok(ProbeOutcome::Skip);
         }
 
         // 等待回包：校验前 2 字节 seq，杂包忽略继续等，直到整体超时
@@ -73,7 +78,7 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stat
                 break Err(());
             }
             let recv = smol::future::or(
-                async { Some(util::udp_recv(&sock, &mut buf).await) },
+                async { Some(util::udp_recv(self.sock, &mut self.buf).await) },
                 async {
                     smol::Timer::after(remaining).await;
                     None
@@ -82,7 +87,7 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stat
             .await;
             match recv {
                 Some(Ok((n, src))) => {
-                    let init = util::init_slice(&buf, n);
+                    let init = util::init_slice(&self.buf, n);
                     if n >= 2 && init[..2] == seq_num.to_be_bytes() {
                         break Ok((start.elapsed(), src, n));
                     }
@@ -92,67 +97,23 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stat
             }
         };
 
-        let target_str = format!("{}:{}", cfg.host, cfg.port);
         match result {
             Ok((rtt, src, n)) => {
-                if !is_warmup {
-                    stats.record(rtt);
+                if !self.cfg.quiet && !stats::json() {
+                    print_reply(w, src, n, rtt, is_warmup)?;
                 }
-                if !cfg.quiet && !stats::json() {
-                    print_reply(&mut w, src, n, rtt, is_warmup)?;
-                } else if stats::json() && !is_warmup {
-                    stats::json_sample(
-                        &mut w,
-                        "udp",
-                        &target_str,
-                        run.seq(),
-                        true,
-                        Some(rtt),
-                        None,
-                    )?;
-                }
+                Ok(ProbeOutcome::Ok { rtt })
             }
             Err(_) => {
-                if !is_warmup {
-                    stats.record_loss();
+                if !self.cfg.quiet && !stats::json() {
+                    output::writeln_red(w, t!("common.timeout"))?;
                 }
-                if !cfg.quiet && !stats::json() {
-                    output::writeln_red(&mut w, t!("common.timeout"))?;
-                } else if stats::json() && !is_warmup {
-                    stats::json_sample(
-                        &mut w,
-                        "udp",
-                        &target_str,
-                        run.seq(),
-                        false,
-                        None,
-                        Some("timeout"),
-                    )?;
-                }
+                Ok(ProbeOutcome::Err {
+                    json_err: "timeout",
+                })
             }
         }
-        run.advance();
     }
-
-    if !cfg.quiet && !stats::json() {
-        println!();
-    }
-    let target = if cfg.port > 0 {
-        format!("{}:{}", cfg.host, cfg.port)
-    } else {
-        cfg.host.clone()
-    };
-    stats::print_summary(&mut w, &stats, "udp", &target)?;
-    if !stats::json()
-        && stats.received > 0
-        && let Some(spec) = &cfg.histogram
-    {
-        stats::print_histogram(&mut w, &stats, spec)?;
-    }
-    if cfg.graph && !stats::json() {
-        stats::print_timeline(&mut w, &stats)?;
-    }
-    Ok(stats)
 }
 
 fn print_reply(

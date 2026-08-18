@@ -8,13 +8,14 @@
 - **ICMP**: 手写 raw socket (socket2) + smol::Async，无第三方 ICMP 依赖
 - **CLI**: [bpaf](https://github.com/pacak/bpaf) — 轻量级，编译快
 - **错误处理**: lib 层用 thiserror（`PrpingError` 分派层枚举 + IO/anyhow 透传），bin 层用 anyhow 做胶水
-- **代码结构**: 单 crate 双 target — `src/lib.rs`（协议/统一入口 `run`/`serve`，公开面最小化）+ `src/main.rs`（CLI 解析/渲染/退出码/信号安装）+ `src/{util,stats,output,icmp,tcp,udp,latency,bandwidth}.rs`（lib 内部）
+- **代码结构**: 单 crate 双 target — `src/lib.rs`（协议/统一入口 `run`/`serve`，公开面最小化）+ `src/main.rs`（CLI 解析/渲染/退出码/信号安装）+ `src/{util,drive,stats,output,icmp,tcp,udp,latency,bandwidth}.rs`（lib 内部）
 - **终端颜色**: [termcolor](https://github.com/BurntSushi/termcolor)，颜色函数统一在 `output.rs`（客户端与服务端一致）
 - **直方图**: 默认 ASCII `#`（内置）；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图与 Braille 散点时间线（非 tty 自动剥离 ANSI 颜色）；`-H` 支持桶数或逗号分隔阈值（ms）
 - **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en-US.yml` + `locales/zh-CN.yml`，自动检测 `$LANG` 或 `--lang`
 - **信号处理**: Ctrl+C 优雅退出 — Unix 用 `libc::signal`，Windows 用 `kernel32::SetConsoleCtrlHandler`（首次停止并输出统计，再次强制退出）；`--json` 模式在 Unix 上运行期间关闭 stdin tty 的 `ECHOCTL` 以隐藏终端回显的 `^C`（`^C` 是终端回显、从不进入 stdout 管道；退出时恢复）
 - **Windows 7**: 官方 Win7 基线目标（Tier 3）+ nightly `-Z build-std`；首选 `x86_64-win7-windows-msvc`（xwin 链接），GNU 版 `x86_64-win7-windows-gnu`（MSVCRT）为无 xwin 备选
-- **DNS 解析**: `smol::unblock` + `std::net::ToSocketAddrs`，统一在 `util.rs`
+- **DNS 解析**: `smol::unblock` + `std::net::ToSocketAddrs`，统一在 `util.rs`（`resolve_vec` 返回全部、`resolve` 取首个；解析横幅统一 `util::print_resolving`）
+- **ping 循环驱动器**: icmp/tcp/udp/latency 共用 `drive.rs::drive`（间隔/预热/统计/JSONL/收尾），各模式实现 `Probe` trait 只做「一次探测」与人读行
 - **次数/时长**: `-n 10` 固定次数，`-n 10s` 按秒运行（`util::Run` 统一控制循环）
 - **带宽测试并发**: 多连接 `-P`，smol::Task 池 + 全局配额（总量精确等于 count）
 - **多线程**: `util::configure_executor_threads` 按 CPU 核数设置 `SMOL_THREADS`（smol 全局 executor 默认单线程）
@@ -54,11 +55,11 @@ prping -g HOST:PORT        TCP ping + 时间线图（-gp 用 ploot 渲染）
 ## 编码约定
 
 - Rust edition 2024
-- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --all-targets` 全通过（单元 34 + 协议 13 + CLI 10 = 57 tests）
+- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --all-targets` 全通过（单元 40 + 协议 15 + CLI 12 = 67 tests）
 - 用户可见输出英文，注释中文
-- 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端不使用内联 ANSI）；bin 侧错误用红色、警告用橙色（lib re-export `output::{stderr, writeln_red, writeln_orange}` 给 bin 用）
-- 互斥参数在解析后校验（`main.rs::validate`），冲突输出红色错误并退出码 1：`-4`/`-6`、`-s` 与目标或客户端参数、`--json` 与 `-p`/`-g`/`-H`、无 `-b`/`-l` 时使用 `-r`（`-i`/`-w`/`-P` 用 Option 记录是否显式给出）
-- 共享逻辑（DNS 解析、运行循环、UDP socket、测试参数 `PingConfig`）收敛在 `util.rs`，不重复实现
+- 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端连接日志用 `output::print_server_log`）；bin 侧错误用红色、警告用橙色（lib re-export `output::{stderr, writeln_red, writeln_orange}` 给 bin 用）
+- 互斥/非法参数校验：`main.rs::validate` 管 CLI 级冲突（`-s` 与目标或客户端参数、`--json` 与 `-p`/`-g`/`-H`、无 `-b`/`-l` 时 `-r`），lib `run` 管 config 级不变式（`-4`/`-6` 冲突、UDP/带宽缺端口、`-P` 非带宽警告、`-i` clamp）；非法 `-H`（如 `-H abc`）与非法 `-n` 一样在 bin 红色报错退出码 1（`-i`/`-w`/`-P` 用 Option 记录是否显式给出）
+- 共享逻辑（DNS 解析、运行循环、直方图桶计算、UDP socket、测试参数 `PingConfig`）收敛一处，不重复实现：直方图数据与渲染解耦（`stats::Histogram::from_times`），带宽报告用 `ReportArgs` 结构传参
 - lib 公开面最小化：只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告/`output::{stderr, writeln_red, writeln_orange}`，其余 `pub(crate)`
 - 不引入不必要的抽象
 - 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner 设置 cap_net_raw；各平台产物配方在 `justfile`（`just build-release` / `build-win7` / `build-windows` / `test` / `lint` 等）

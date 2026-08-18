@@ -57,6 +57,7 @@
 rust_i18n::i18n!("locales");
 
 mod bandwidth;
+mod drive;
 mod icmp;
 mod latency;
 mod output;
@@ -116,6 +117,8 @@ pub enum PrpingWarning {
     IntervalClamped { requested: f64 },
     /// `-b -u` 时 `-P` 无效。
     ParallelUdpIgnored,
+    /// 非带宽模式 `-P` 无效。
+    ParallelIgnored,
     /// 普通 ping 模式 `-r` 无效。
     ReceiveIgnoredPing,
     /// UDP 负载超 65507，已截断。
@@ -129,6 +132,8 @@ pub enum PrpingError {
     UdpRequiresPort,
     #[error("bandwidth requires HOST:PORT")]
     BandwidthRequiresPort,
+    #[error("-4 and -6 cannot be used together")]
+    ConflictV4V6,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -145,12 +150,22 @@ pub fn run(
     let mut on_warning = on_warning;
     let mut cfg = cfg.clone();
 
+    // config 级不变式：-4/-6 冲突（bin 的 validate 只管 CLI 级冲突，这里兜底库调用方）
+    if cfg.v4 && cfg.v6 {
+        return Err(PrpingError::ConflictV4V6);
+    }
+
     // -i 0 快速模式：clamp 到 1ms 下限
     if cfg.interval < 0.001 {
         on_warning(PrpingWarning::IntervalClamped {
             requested: cfg.interval,
         });
         cfg.interval = 0.001;
+    }
+
+    // 非带宽模式 -P 无效（-b -u 的 -P 警告在带宽分支）
+    if cfg.parallel > 1 && !cfg.bandwidth {
+        on_warning(PrpingWarning::ParallelIgnored);
     }
 
     if cfg.bandwidth {
@@ -300,7 +315,6 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
         let agg = agg.clone();
 
         smol::spawn(async move {
-            use std::io::Write as _;
             let _perm = perm;
             let mut stream = stream;
             stream.set_nodelay(true).ok();
@@ -348,36 +362,9 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
             agg.micros
                 .fetch_add((elapsed * 1_000_000.0) as u64, Ordering::Relaxed);
 
-            let ip = peer.ip().to_string();
-            let port = peer.port();
+            // 连接日志渲染收敛在 output.rs（着色统一）
             let mut w = output::stdout();
-            if sent_total > 0 && elapsed > 0.0 {
-                // 服务端发送方向（-r 触发模式）：打印发送的数据量
-                let mbits = (sent_total as f64 * 8.0) / (elapsed * 1_000_000.0);
-                let size_str = format_bytes(sent_total);
-                let _ = output::print_green(&mut w, rust_i18n::t!("server.sent_tag"));
-                let _ = output::print_cyan(&mut w, format!("{ip}:{port} "));
-                let _ = output::print_yellow(
-                    &mut w,
-                    format!("{size_str} ({sent_total}) in {elapsed:.2}s — {mbits:.2} Mbps"),
-                );
-                let _ = writeln!(&mut w);
-            } else if total > 0 && elapsed > 0.0 {
-                let mbits = (total as f64 * 8.0) / (elapsed * 1_000_000.0);
-                let size_str = format_bytes(total);
-                let _ = output::print_green(&mut w, rust_i18n::t!("server.recv_tag"));
-                let _ = output::print_cyan(&mut w, format!("{ip}:{port} "));
-                let _ = output::print_yellow(
-                    &mut w,
-                    format!("{size_str} ({total}) in {elapsed:.2}s — {mbits:.2} Mbps"),
-                );
-                let _ = writeln!(&mut w);
-            } else {
-                let _ = output::print_green(&mut w, rust_i18n::t!("server.connect_tag"));
-                let _ = output::print_cyan(&mut w, format!("{ip}:{port} "));
-                let _ = output::print_yellow(&mut w, format!("{:.2}ms", elapsed * 1000.0));
-                let _ = writeln!(&mut w);
-            }
+            let _ = output::print_server_log(&mut w, peer, total, sent_total, elapsed);
         })
         .detach();
     }

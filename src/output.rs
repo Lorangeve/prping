@@ -1,6 +1,8 @@
 //! 统一输出和颜色管理。
 
+use rust_i18n::t;
 use std::io::Result;
+use std::net::SocketAddr;
 use termcolor::{Color, ColorSpec, StandardStream, WriteColor};
 
 /// 获取标准输出流（自动检测颜色支持）。
@@ -83,4 +85,43 @@ pub fn print_dim<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> 
     )?;
     write!(w, "{}", text.as_ref())?;
     w.reset()
+}
+
+/// 服务端连接日志（三态：发送 -r 触发模式 / 接收 / 纯连接；着色统一在此）。
+pub fn print_server_log<W: WriteColor>(
+    w: &mut W,
+    peer: SocketAddr,
+    total: u64,
+    sent_total: u64,
+    elapsed: f64,
+) -> Result<()> {
+    let ip = peer.ip().to_string();
+    let port = peer.port();
+    if sent_total > 0 && elapsed > 0.0 {
+        // 服务端发送方向（-r 触发模式）：打印发送的数据量
+        let mbits = (sent_total as f64 * 8.0) / (elapsed * 1_000_000.0);
+        let size_str = crate::format_bytes(sent_total);
+        print_green(w, t!("server.sent_tag"))?;
+        print_cyan(w, format!("{ip}:{port} "))?;
+        print_yellow(
+            w,
+            format!("{size_str} ({sent_total}) in {elapsed:.2}s — {mbits:.2} Mbps"),
+        )?;
+        writeln!(w)
+    } else if total > 0 && elapsed > 0.0 {
+        let mbits = (total as f64 * 8.0) / (elapsed * 1_000_000.0);
+        let size_str = crate::format_bytes(total);
+        print_green(w, t!("server.recv_tag"))?;
+        print_cyan(w, format!("{ip}:{port} "))?;
+        print_yellow(
+            w,
+            format!("{size_str} ({total}) in {elapsed:.2}s — {mbits:.2} Mbps"),
+        )?;
+        writeln!(w)
+    } else {
+        print_green(w, t!("server.connect_tag"))?;
+        print_cyan(w, format!("{ip}:{port} "))?;
+        print_yellow(w, format!("{:.2}ms", elapsed * 1000.0))?;
+        writeln!(w)
+    }
 }

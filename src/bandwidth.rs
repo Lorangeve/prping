@@ -178,25 +178,7 @@ impl Progress {
 
 pub fn run_client(cfg: &PingConfig) -> anyhow::Result<crate::BandwidthReport> {
     let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
-    if cfg.host.parse::<std::net::IpAddr>().is_err() {
-        let stripped = cfg
-            .host
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(&cfg.host);
-        if stripped.parse::<std::net::IpAddr>().is_err() && !stats::json() {
-            let mut w = output::stdout();
-            writeln!(
-                &mut w,
-                "{}",
-                t!(
-                    "common.resolving",
-                    host = cfg.host,
-                    ip = addr.ip().to_string()
-                )
-            )?;
-        }
-    }
+    util::print_resolving(&cfg.host, addr.ip());
     let mut cfg = cfg.clone();
     cfg.size = Some(cfg.size.unwrap_or(8192));
     smol::block_on(run_client_async(addr, &cfg))
@@ -272,16 +254,16 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             prog.update(0, total);
         }
         prog.finish(0, total);
-        return report(
-            t!("bandwidth.tcp_test"),
-            total,
-            start.elapsed(),
-            cfg.histogram.as_ref(),
-            &times,
-            cfg.quiet,
-            &format!("{}:{}", cfg.host, cfg.port),
-            cfg.receive,
-        );
+        return report(ReportArgs {
+            label: t!("bandwidth.tcp_test").to_string(),
+            total_bytes: total,
+            elapsed: start.elapsed(),
+            histogram: cfg.histogram.as_ref(),
+            times: &times,
+            quiet: cfg.quiet,
+            target: format!("{}:{}", cfg.host, cfg.port),
+            received: cfg.receive,
+        });
     }
 
     if parallel <= 1 {
@@ -315,16 +297,16 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         util::drain_after_send(&mut stream).await;
         drop(stream);
         prog.finish(sent, sent * size as u64);
-        report(
-            t!("bandwidth.tcp_test"),
-            sent * size as u64,
-            start.elapsed(),
-            cfg.histogram.as_ref(),
-            &times,
-            cfg.quiet,
-            &format!("{}:{}", cfg.host, cfg.port),
-            cfg.receive,
-        )
+        report(ReportArgs {
+            label: t!("bandwidth.tcp_test").to_string(),
+            total_bytes: sent * size as u64,
+            elapsed: start.elapsed(),
+            histogram: cfg.histogram.as_ref(),
+            times: &times,
+            quiet: cfg.quiet,
+            target: format!("{}:{}", cfg.host, cfg.port),
+            received: cfg.receive,
+        })
     } else {
         // 并行连接：全局配额保证总量精确等于 count（修复 count < parallel 时发 0 包）
         let per_conn = if duration.is_some() {
@@ -335,6 +317,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let remaining = Arc::new(AtomicU64::new(count));
         let done = Arc::new(AtomicU64::new(0));
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
+        let want_times = cfg.histogram.is_some();
         let mut tasks = Vec::new();
         for _ in 0..parallel {
             let a = addr;
@@ -345,6 +328,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                 stream.set_nodelay(true)?;
                 let payload = vec![0u8; size];
                 let mut sent = 0u64;
+                let mut times = Vec::new();
                 loop {
                     if util::interrupted() {
                         break;
@@ -368,12 +352,16 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                             break;
                         }
                     }
+                    let t0 = Instant::now();
                     stream.write_all(&payload).await?;
+                    if want_times {
+                        times.push(t0.elapsed());
+                    }
                     sent += 1;
                     done.fetch_add(1, Ordering::Relaxed);
                 }
                 util::drain_after_send(&mut stream).await;
-                Ok::<_, anyhow::Error>(sent)
+                Ok::<_, anyhow::Error>((sent, times))
             }));
         }
         // 进度条：并行发送期间主循环在等待，用独立 task 每 100ms 刷新
@@ -404,8 +392,11 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         };
         let start = Instant::now();
         let mut total_sent: u64 = 0;
+        let mut all_times: Vec<Duration> = Vec::new();
         for t in tasks {
-            total_sent += t.await?;
+            let (sent, times) = t.await?;
+            total_sent += sent;
+            all_times.extend(times);
         }
         stop.store(true, Ordering::Relaxed);
         if let Some(t) = prog_task {
@@ -414,16 +405,16 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         prog.lock()
             .unwrap()
             .finish(total_sent, total_sent * size as u64);
-        report(
-            t!("bandwidth.tcp_test"),
-            total_sent * size as u64,
-            start.elapsed(),
-            cfg.histogram.as_ref(),
-            &[],
-            cfg.quiet,
-            &format!("{}:{}", cfg.host, cfg.port),
-            cfg.receive,
-        )
+        report(ReportArgs {
+            label: t!("bandwidth.tcp_test").to_string(),
+            total_bytes: total_sent * size as u64,
+            elapsed: start.elapsed(),
+            histogram: cfg.histogram.as_ref(),
+            times: &all_times,
+            quiet: cfg.quiet,
+            target: format!("{}:{}", cfg.host, cfg.port),
+            received: cfg.receive,
+        })
     }
 }
 
@@ -498,16 +489,16 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             }
         }
         prog.finish(0, total);
-        return report(
-            t!("bandwidth.udp_test"),
-            total,
-            start.elapsed(),
-            cfg.histogram.as_ref(),
-            &times,
-            cfg.quiet,
-            &format!("{}:{}", cfg.host, cfg.port),
-            cfg.receive,
-        );
+        return report(ReportArgs {
+            label: t!("bandwidth.udp_test").to_string(),
+            total_bytes: total,
+            elapsed: start.elapsed(),
+            histogram: cfg.histogram.as_ref(),
+            times: &times,
+            quiet: cfg.quiet,
+            target: format!("{}:{}", cfg.host, cfg.port),
+            received: cfg.receive,
+        });
     }
 
     let payload = vec![0u8; size];
@@ -534,34 +525,45 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         prog.update(sent, sent * size as u64);
     }
     prog.finish(sent, sent * size as u64);
-    report(
-        t!("bandwidth.udp_test"),
-        sent * size as u64,
-        start.elapsed(),
-        cfg.histogram.as_ref(),
-        &times,
-        cfg.quiet,
-        &format!("{}:{}", cfg.host, cfg.port),
-        cfg.receive,
-    )
+    report(ReportArgs {
+        label: t!("bandwidth.udp_test").to_string(),
+        total_bytes: sent * size as u64,
+        elapsed: start.elapsed(),
+        histogram: cfg.histogram.as_ref(),
+        times: &times,
+        quiet: cfg.quiet,
+        target: format!("{}:{}", cfg.host, cfg.port),
+        received: cfg.receive,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn report(
-    label: impl AsRef<str>,
-    total_bytes: u64,
-    elapsed: Duration,
-    histogram: Option<&HistogramSpec>,
-    times: &[Duration],
-    quiet: bool,
-    target: &str,
-    received: bool,
-) -> anyhow::Result<crate::BandwidthReport> {
-    let label = label.as_ref();
+/// 带宽报告渲染参数（收敛 report 的 8 个位置参数，避免同类型传错）。
+pub(crate) struct ReportArgs<'a> {
+    pub label: String,
+    pub total_bytes: u64,
+    pub elapsed: Duration,
+    pub histogram: Option<&'a HistogramSpec>,
+    pub times: &'a [Duration],
+    pub quiet: bool,
+    pub target: String,
+    pub received: bool,
+}
+
+fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
+    let ReportArgs {
+        label,
+        total_bytes,
+        elapsed,
+        histogram,
+        times,
+        quiet,
+        target,
+        received,
+    } = args;
     let secs = elapsed.as_secs_f64();
     let mbits = total_bytes as f64 * 8.0 / (secs * 1_000_000.0);
     let report = crate::BandwidthReport {
-        label: label.to_string(),
+        label: label.clone(),
         total_bytes,
         secs,
         mbps: mbits,
@@ -612,14 +614,9 @@ fn report(
             t!("bandwidth.bandwidth", mbps = format!("{:.2}", mbits))
         ),
     )?;
-    if let Some(spec) = histogram
-        && !times.is_empty()
-    {
-        let mut s = crate::stats::Stats::default();
-        for t in times {
-            s.record(*t);
-        }
-        crate::stats::print_histogram(&mut w, &s, spec)?;
+    if let Some(spec) = histogram {
+        // 直方图直接消费耗时样本（不再临时构造 Stats）
+        crate::stats::print_histogram(&mut w, times, spec)?;
     }
     Ok(report)
 }

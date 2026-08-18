@@ -1,8 +1,9 @@
 //! ICMP ping — send ICMP echo requests and measure round-trip latency.
 
+use crate::drive::{Probe, ProbeOutcome, drive};
 use crate::output;
 use crate::stats::{self, Stats};
-use crate::util::{self, PingConfig, Run};
+use crate::util::{self, PingConfig};
 use rust_i18n::t;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io::Write;
@@ -21,25 +22,12 @@ enum IcmpErr {
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
 pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
-    let addrs = util::resolve_all(&cfg.host, cfg.v4, cfg.v6)?;
+    let addrs = util::resolve_vec(&cfg.host, 0, cfg.v4, cfg.v6)?;
     if addrs.is_empty() {
         anyhow::bail!(t!("errors.cannot_resolve", host = cfg.host));
     }
-
     let addr = addrs[0].ip();
-    if cfg.host.parse::<IpAddr>().is_err() {
-        let stripped = cfg
-            .host
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(&cfg.host);
-        if stripped.parse::<IpAddr>().is_err() && !stats::json() {
-            println!(
-                "{}",
-                t!("common.resolving", host = cfg.host, ip = addr.to_string())
-            );
-        }
-    }
+    util::print_resolving(&cfg.host, addr);
 
     if !stats::json() {
         println!(
@@ -70,103 +58,68 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
 async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let (sock, target) = create_socket(addr)?;
     let async_sock = smol::Async::new(sock)?;
-    let mut stats = Stats::default();
-    let mut w = output::stdout();
     let ident = rand_id();
-    let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
+    let mut probe = IcmpProbe {
+        sock: &async_sock,
+        target,
+        ident,
+        addr,
+        cfg,
+    };
+    drive(cfg, "icmp", &cfg.host, &mut probe).await
+}
 
-    loop {
-        if run.seq() > 0 {
-            smol::Timer::after(Duration::from_secs_f64(cfg.interval)).await;
-        }
-        if run.done() {
-            break;
-        }
-        let is_warmup = run.is_warmup();
-        let seq_num = run.seq() as u16;
+/// ICMP 探测体：发包 + 收包解析 + 人读行（统计/JSONL 由 drive 统一处理）。
+struct IcmpProbe<'a> {
+    sock: &'a smol::Async<Socket>,
+    target: SockAddr,
+    ident: u16,
+    addr: IpAddr,
+    cfg: &'a PingConfig,
+}
+
+impl Probe for IcmpProbe<'_> {
+    async fn probe(
+        &mut self,
+        w: &mut StandardStream,
+        seq: u64,
+        is_warmup: bool,
+    ) -> anyhow::Result<ProbeOutcome> {
+        let seq_num = seq as u16;
         match send_recv(
-            &async_sock,
-            &target,
-            ident,
+            self.sock,
+            &self.target,
+            self.ident,
             seq_num,
-            cfg.size.unwrap_or(32),
-            addr,
+            self.cfg.size.unwrap_or(32),
+            self.addr,
         )
         .await
         {
             Ok((rtt, ttl, reply_size)) => {
-                if !is_warmup {
-                    stats.record(rtt);
+                if !self.cfg.quiet && !stats::json() {
+                    print_reply(w, self.addr, reply_size, rtt, ttl, is_warmup)?;
                 }
-                if !cfg.quiet && !stats::json() {
-                    print_reply(&mut w, addr, reply_size, rtt, ttl, is_warmup)?;
-                } else if stats::json() && !is_warmup {
-                    // JSONL：每次测量一行（与 tcp/udp/latency 一致）
-                    stats::json_sample(
-                        &mut w,
-                        "icmp",
-                        &cfg.host,
-                        run.seq(),
-                        true,
-                        Some(rtt),
-                        None,
-                    )?;
-                }
+                Ok(ProbeOutcome::Ok { rtt })
             }
             Err(e) => {
-                if !is_warmup {
-                    stats.record_loss();
-                }
-                if !cfg.quiet && !stats::json() {
-                    match e {
-                        IcmpErr::Timeout => output::writeln_red(&mut w, &t!("common.timeout"))?,
-                        IcmpErr::Unreachable => {
-                            output::writeln_red(&mut w, &t!("common.dest_unreachable"))?
-                        }
-                        IcmpErr::TtlExceeded => {
-                            output::writeln_red(&mut w, &t!("common.ttl_expired"))?
-                        }
-                    }
-                } else if stats::json() && !is_warmup {
-                    let err = match e {
-                        IcmpErr::Timeout => "timeout",
-                        IcmpErr::Unreachable => "unreachable",
-                        IcmpErr::TtlExceeded => "ttl exceeded",
+                let json_err = match e {
+                    IcmpErr::Timeout => "timeout",
+                    IcmpErr::Unreachable => "unreachable",
+                    IcmpErr::TtlExceeded => "ttl exceeded",
+                };
+                if !self.cfg.quiet && !stats::json() {
+                    let msg = match e {
+                        IcmpErr::Timeout => t!("common.timeout"),
+                        IcmpErr::Unreachable => t!("common.dest_unreachable"),
+                        IcmpErr::TtlExceeded => t!("common.ttl_expired"),
                     };
-                    stats::json_sample(
-                        &mut w,
-                        "icmp",
-                        &cfg.host,
-                        run.seq(),
-                        false,
-                        None,
-                        Some(err),
-                    )?;
+                    output::writeln_red(w, &msg)?;
                 }
+                Ok(ProbeOutcome::Err { json_err })
             }
         }
-        run.advance();
     }
-
-    if !cfg.quiet && !stats::json() {
-        println!();
-    }
-    let target = if cfg.port > 0 {
-        format!("{}:{}", cfg.host, cfg.port)
-    } else {
-        cfg.host.clone()
-    };
-    stats::print_summary(&mut w, &stats, "icmp", &target)?;
-    if !stats::json()
-        && stats.received > 0
-        && let Some(spec) = &cfg.histogram
-    {
-        stats::print_histogram(&mut w, &stats, spec)?;
-    }
-    if cfg.graph && !stats::json() {
-        stats::print_timeline(&mut w, &stats)?;
-    }
-    Ok(stats)
 }
 
 fn create_socket(addr: IpAddr) -> anyhow::Result<(Socket, SockAddr)> {

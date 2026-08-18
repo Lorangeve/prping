@@ -220,18 +220,14 @@ struct ModeGroup {
 /// 校验互斥参数组合，返回本地化错误文案（None = 通过）。
 ///
 /// `port_present`：目标是否带端口（None = 无目标或目标非法，跳过 `-r` 校验，
-/// 交由后续目标解析路径报错）。互斥规则：
+/// 交由后续目标解析路径报错）。互斥规则（CLI 级；config 级不变式在 lib `run`：
+/// v4∧v6、UDP/带宽缺端口、`-P` 非带宽警告、`-i` clamp）：
 ///
-/// - `-4` 与 `-6` 不能同时使用（地址族矛盾）
 /// - `-s`（服务端模式）不能与目标 `HOST[:PORT]` 同时使用
 /// - `-s` 不能与任何客户端测试参数同时使用（-b/-l/-u/-r/-n/-i/-H/-w/-P/-q/-p/-g/--json）
 /// - `--json` 与 `-p`/`-g`/`-H` 冲突（JSON 输出替代全部人读渲染）
 /// - `-r` 仅在与 `-b`（带宽）或 `-l`+端口（延迟）搭配时有效
 fn validate(cmd: &Command, port_present: Option<bool>) -> Option<String> {
-    if cmd.network.v4 && cmd.network.v6 {
-        return Some(t!("errors.conflict_v4_v6").to_string());
-    }
-
     if cmd.server_grp.server.is_some() {
         if cmd.target.is_some() {
             return Some(t!("errors.conflict_server_target").to_string());
@@ -476,6 +472,23 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // 非法 -H 参数直接报错（与 -n abc 一致；parse_histogram 对非法值返回 None）
+    let hist = cmd.test.histogram.as_deref().and_then(parse_histogram);
+    if cmd.test.histogram.is_some() && hist.is_none() {
+        let mut w = stderr();
+        let _ = writeln_red(
+            &mut w,
+            format!(
+                "Error: {}",
+                t!(
+                    "errors.invalid_histogram",
+                    value = cmd.test.histogram.as_deref().unwrap_or("")
+                )
+            ),
+        );
+        std::process::exit(1);
+    }
+
     // --json 模式：隐藏终端回显的 ^C（Unix 且 stdin 为 tty 时；Drop 时恢复原设置）。
     // ^C 是终端行规程回显、从不进入 stdout 管道，这里只做显示层清理。
     let _ctrl_echo = suppress_ctrl_c_echo(cmd.output.json);
@@ -524,7 +537,6 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!(t!("errors.host_port_required")))?;
 
     let (host, port) = parse_target(target)?;
-    let hist = cmd.test.histogram.as_deref().and_then(parse_histogram);
 
     // 次数/时长解析（-n 10 或 -n 10s），非法值直接报错
     let (cnt, dur) = match cmd.test.count.as_deref() {
@@ -580,6 +592,12 @@ fn main() -> anyhow::Result<()> {
             let _ = writeln_red(&mut w, t!("errors.bandwidth_requires_port"));
             std::process::exit(1);
         }
+        Err(PrpingError::ConflictV4V6) => {
+            drop(_ctrl_echo);
+            let mut w = stderr();
+            let _ = writeln_red(&mut w, t!("errors.conflict_v4_v6"));
+            std::process::exit(1);
+        }
         Err(e) => return Err(e.into()),
     }
     Ok(())
@@ -592,6 +610,7 @@ fn render_warning(w: PrpingWarning) -> String {
             t!("errors.interval_min", value = requested).to_string()
         }
         PrpingWarning::ParallelUdpIgnored => t!("errors.parallel_udp_ignored").to_string(),
+        PrpingWarning::ParallelIgnored => t!("errors.parallel_ignored").to_string(),
         PrpingWarning::ReceiveIgnoredPing => t!("errors.receive_ignored_ping").to_string(),
         PrpingWarning::UdpSizeClamped { requested, max } => {
             t!("errors.udp_size_clamped", size = requested, max = max).to_string()

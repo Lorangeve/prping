@@ -1,36 +1,20 @@
 //! TCP ping — test TCP port connectivity and measure connection latency.
 
+use crate::drive::{Probe, ProbeOutcome, drive};
 use crate::output;
 use crate::stats::{self, Stats};
-use crate::util::{self, PingConfig, Run};
+use crate::util::{self, PingConfig};
 use rust_i18n::t;
 use std::io::Write;
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
 pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addrs = util::resolve_vec(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
-    if cfg.host.parse::<IpAddr>().is_err() {
-        let stripped = cfg
-            .host
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(&cfg.host);
-        if stripped.parse::<IpAddr>().is_err()
-            && !stats::json()
-            && let Some(first) = addrs.first()
-        {
-            println!(
-                "{}",
-                t!(
-                    "common.resolving",
-                    host = cfg.host,
-                    ip = first.ip().to_string()
-                )
-            );
-        }
+    if let Some(first) = addrs.first() {
+        util::print_resolving(&cfg.host, first.ip());
     }
     if !stats::json() {
         if let Some(first) = addrs.first() {
@@ -59,80 +43,52 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
     smol::block_on(ping_async(addrs, cfg))
 }
 
-async fn ping_async(addrs: Vec<std::net::SocketAddr>, cfg: &PingConfig) -> anyhow::Result<Stats> {
-    let mut stats = Stats::default();
-    let mut w = output::stdout();
-    let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
+async fn ping_async(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Result<Stats> {
+    let mut probe = TcpProbe { addrs, cfg };
+    drive(
+        cfg,
+        "tcp",
+        &format!("{}:{}", cfg.host, cfg.port),
+        &mut probe,
+    )
+    .await
+}
 
-    loop {
-        if run.seq() > 0 {
-            smol::Timer::after(Duration::from_secs_f64(cfg.interval)).await;
-        }
-        if run.done() {
-            break;
-        }
-        let is_warmup = run.is_warmup();
+/// TCP 探测体：connect + 人读行（统计/JSONL 由 drive 统一处理）。
+struct TcpProbe<'a> {
+    addrs: Vec<SocketAddr>,
+    cfg: &'a PingConfig,
+}
+
+impl Probe for TcpProbe<'_> {
+    async fn probe(
+        &mut self,
+        w: &mut StandardStream,
+        _seq: u64,
+        is_warmup: bool,
+    ) -> anyhow::Result<ProbeOutcome> {
         let start = Instant::now();
-        let target = format!("{}:{}", cfg.host, cfg.port);
         // 5 秒 connect 超时 + 多地址回退
-        match util::connect_first(&addrs).await {
+        match util::connect_first(&self.addrs).await {
             Ok(stream) => {
                 let rtt = start.elapsed();
                 let local = stream.local_addr().ok();
-                let peer = stream.peer_addr().unwrap_or(addrs[0]);
-                if !is_warmup {
-                    stats.record(rtt);
+                let peer = stream.peer_addr().unwrap_or(self.addrs[0]);
+                if !self.cfg.quiet && !stats::json() {
+                    print_connected(w, peer, local, rtt, is_warmup)?;
                 }
-                if !cfg.quiet && !stats::json() {
-                    print_connected(&mut w, peer, local, rtt, is_warmup)?;
-                } else if stats::json() && !is_warmup {
-                    stats::json_sample(&mut w, "tcp", &target, run.seq(), true, Some(rtt), None)?;
-                }
+                Ok(ProbeOutcome::Ok { rtt })
             }
             Err(e) => {
-                if !is_warmup {
-                    stats.record_loss();
+                if !self.cfg.quiet && !stats::json() {
+                    output::writeln_red(w, &t!("common.connect_failed", error = e.to_string()))?;
                 }
-                if !cfg.quiet && !stats::json() {
-                    output::writeln_red(
-                        &mut w,
-                        &t!("common.connect_failed", error = e.to_string()),
-                    )?;
-                } else if stats::json() && !is_warmup {
-                    stats::json_sample(
-                        &mut w,
-                        "tcp",
-                        &target,
-                        run.seq(),
-                        false,
-                        None,
-                        Some("connect failed"),
-                    )?;
-                }
+                Ok(ProbeOutcome::Err {
+                    json_err: "connect failed",
+                })
             }
         }
-        run.advance();
     }
-
-    if !cfg.quiet && !stats::json() {
-        println!();
-    }
-    let target = if cfg.port > 0 {
-        format!("{}:{}", cfg.host, cfg.port)
-    } else {
-        cfg.host.clone()
-    };
-    stats::print_summary(&mut w, &stats, "tcp", &target)?;
-    if !stats::json()
-        && stats.received > 0
-        && let Some(spec) = &cfg.histogram
-    {
-        stats::print_histogram(&mut w, &stats, spec)?;
-    }
-    if cfg.graph && !stats::json() {
-        stats::print_timeline(&mut w, &stats)?;
-    }
-    Ok(stats)
 }
 
 fn print_connected(

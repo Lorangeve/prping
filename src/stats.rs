@@ -45,6 +45,68 @@ pub fn parse_histogram(s: &str) -> Option<HistogramSpec> {
     }
 }
 
+/// 直方图数据（桶计算与渲染解耦）：渲染器只消费桶，不重算分布。
+#[derive(Debug)]
+pub struct Histogram {
+    /// 桶：(下界 ms, 上界 ms, 计数)；上界为 `f64::INFINITY` 表示无上界（末桶）。
+    pub buckets: Vec<(f64, f64, usize)>,
+    /// 最大桶计数（渲染缩放用）。
+    pub max_count: usize,
+}
+
+impl Histogram {
+    /// 从耗时样本构造直方图（内部排序；无样本或不可分桶返回 None）。
+    pub fn from_times(times: &[Duration], spec: &HistogramSpec) -> Option<Histogram> {
+        if times.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<f64> = times.iter().map(|t| t.as_secs_f64() * 1000.0).collect();
+        sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        match spec {
+            HistogramSpec::Buckets(n) => {
+                let num = (*n).clamp(3, 50);
+                let min = sorted[0];
+                let max = *sorted.last().unwrap();
+                if (max - min).abs() < f64::EPSILON {
+                    return None;
+                }
+                let bw = (max - min) / num as f64;
+                let mut counts = vec![0usize; num];
+                for &ms in &sorted {
+                    let idx = ((ms - min) / bw) as usize;
+                    counts[idx.min(num - 1)] += 1;
+                }
+                let buckets = (0..num)
+                    .map(|i| (min + i as f64 * bw, min + (i + 1) as f64 * bw, counts[i]))
+                    .collect();
+                Some(Histogram {
+                    buckets,
+                    max_count: *counts.iter().max().unwrap_or(&1),
+                })
+            }
+            HistogramSpec::Thresholds(ts) => {
+                let n = ts.len() + 1;
+                let mut counts = vec![0usize; n];
+                for &ms in &sorted {
+                    let idx = ts.partition_point(|&th| ms > th);
+                    counts[idx.min(n - 1)] += 1;
+                }
+                let buckets = (0..n)
+                    .map(|i| {
+                        let low = if i == 0 { 0.0 } else { ts[i - 1] };
+                        let high = if i == n - 1 { f64::INFINITY } else { ts[i] };
+                        (low, high, counts[i])
+                    })
+                    .collect();
+                Some(Histogram {
+                    buckets,
+                    max_count: *counts.iter().max().unwrap_or(&1),
+                })
+            }
+        }
+    }
+}
+
 /// 保留的采样窗口上限（无限 ping 时内存有界）。
 const MAX_SAMPLES: usize = 10000;
 
@@ -131,6 +193,11 @@ impl Stats {
         let mut v = self.times.clone();
         v.sort_unstable();
         v
+    }
+
+    /// 原始采样（供直方图等只读消费，避免克隆）。
+    pub(crate) fn samples(&self) -> &[Duration] {
+        &self.times
     }
 }
 
@@ -272,64 +339,28 @@ pub fn print_summary(
     Ok(())
 }
 
-pub fn print_histogram(w: &mut StandardStream, stats: &Stats, spec: &HistogramSpec) -> Result<()> {
+pub fn print_histogram(
+    w: &mut StandardStream,
+    times: &[Duration],
+    spec: &HistogramSpec,
+) -> Result<()> {
+    let Some(h) = Histogram::from_times(times, spec) else {
+        return Ok(());
+    };
     // -p/--pretty：用 ploot 渲染 Unicode 柱状图
     if PRETTY.load(Ordering::Relaxed) {
-        return print_ploot_histogram(w, stats, spec);
+        return print_ploot_histogram(w, &h);
     }
     match spec {
-        HistogramSpec::Buckets(n) => print_bucket_histogram(w, stats, *n),
-        HistogramSpec::Thresholds(ts) => print_threshold_histogram(w, stats, ts),
-    }
-}
-
-/// 计算直方图桶（x = 下界 ms，y = 计数），供 ploot 渲染。
-fn histogram_xy(stats: &Stats, spec: &HistogramSpec) -> Option<(Vec<f64>, Vec<f64>)> {
-    let times = stats.sorted_times();
-    if times.is_empty() {
-        return None;
-    }
-    match spec {
-        HistogramSpec::Buckets(n) => {
-            let num_buckets = (*n).clamp(3, 50);
-            let min = times[0].as_secs_f64() * 1000.0;
-            let max = times[times.len() - 1].as_secs_f64() * 1000.0;
-            if (max - min).abs() < f64::EPSILON {
-                return None;
-            }
-            let bw = (max - min) / num_buckets as f64;
-            let mut counts = vec![0usize; num_buckets];
-            for t in &times {
-                let ms = t.as_secs_f64() * 1000.0;
-                let idx = ((ms - min) / bw) as usize;
-                counts[idx.min(num_buckets - 1)] += 1;
-            }
-            let xs = (0..num_buckets).map(|i| min + i as f64 * bw).collect();
-            Some((xs, counts.iter().map(|&c| c as f64).collect()))
-        }
-        HistogramSpec::Thresholds(ts) => {
-            let n = ts.len() + 1;
-            let mut counts = vec![0usize; n];
-            for t in &times {
-                let ms = t.as_secs_f64() * 1000.0;
-                let idx = ts.partition_point(|&th| ms > th);
-                counts[idx.min(n - 1)] += 1;
-            }
-            let xs = (0..n).map(|i| i as f64).collect();
-            Some((xs, counts.iter().map(|&c| c as f64).collect()))
-        }
+        HistogramSpec::Buckets(_) => print_bucket_histogram(w, &h),
+        HistogramSpec::Thresholds(_) => print_threshold_histogram(w, &h),
     }
 }
 
 /// `-p` 直方图：ploot boxes（Unicode 柱状图）。
-fn print_ploot_histogram(
-    w: &mut StandardStream,
-    stats: &Stats,
-    spec: &HistogramSpec,
-) -> Result<()> {
-    let Some((xs, ys)) = histogram_xy(stats, spec) else {
-        return Ok(());
-    };
+fn print_ploot_histogram(w: &mut StandardStream, h: &Histogram) -> Result<()> {
+    let xs: Vec<f64> = h.buckets.iter().map(|&(low, _, _)| low).collect();
+    let ys: Vec<f64> = h.buckets.iter().map(|&(_, _, c)| c as f64).collect();
     let mut fig = ploot::Figure::new();
     fig.set_terminal_size(80, 20);
     let ax = fig.axes2d();
@@ -364,42 +395,19 @@ fn strip_ansi(out: String) -> String {
     s
 }
 
-fn print_bucket_histogram(w: &mut StandardStream, stats: &Stats, num_buckets: usize) -> Result<()> {
+fn print_bucket_histogram(w: &mut StandardStream, h: &Histogram) -> Result<()> {
     let bar_char = if PRETTY.load(Ordering::Relaxed) {
         "█"
     } else {
         "#"
     };
-    let times = stats.sorted_times();
-    if times.is_empty() {
-        return Ok(());
-    }
-
-    let num_buckets = num_buckets.clamp(3, 50);
-    let min = times[0].as_secs_f64() * 1000.0;
-    let max = times[times.len() - 1].as_secs_f64() * 1000.0;
-    if (max - min).abs() < f64::EPSILON {
-        return Ok(());
-    }
-
-    let bucket_width = (max - min) / num_buckets as f64;
-    let mut buckets = vec![0usize; num_buckets];
-    for t in &times {
-        let ms = t.as_secs_f64() * 1000.0;
-        let idx = ((ms - min) / bucket_width) as usize;
-        buckets[idx.min(num_buckets - 1)] += 1;
-    }
-
-    let max_count = *buckets.iter().max().unwrap_or(&1);
     let bar_width = 40usize;
 
     writeln!(w)?;
     writeln!(w, "{}", t!("stats.latency_dist"))?;
-    for (i, &count) in buckets.iter().enumerate() {
-        let low = min + i as f64 * bucket_width;
-        let high = low + bucket_width;
-        let bar_len = if max_count > 0 {
-            count * bar_width / max_count
+    for (low, high, count) in &h.buckets {
+        let bar_len = if h.max_count > 0 {
+            count * bar_width / h.max_count
         } else {
             0
         };
@@ -411,48 +419,24 @@ fn print_bucket_histogram(w: &mut StandardStream, stats: &Stats, num_buckets: us
 }
 
 /// 自定义阈值直方图：桶 i 覆盖 (th[i-1], th[i]]，最后一个桶为 (th[last], +∞)。
-fn print_threshold_histogram(
-    w: &mut StandardStream,
-    stats: &Stats,
-    thresholds: &[f64],
-) -> Result<()> {
+fn print_threshold_histogram(w: &mut StandardStream, h: &Histogram) -> Result<()> {
     let bar_char = if PRETTY.load(Ordering::Relaxed) {
         "█"
     } else {
         "#"
     };
-    let times = stats.sorted_times();
-    if times.is_empty() {
-        return Ok(());
-    }
-
-    let n = thresholds.len() + 1;
-    let mut buckets = vec![0usize; n];
-    for t in &times {
-        let ms = t.as_secs_f64() * 1000.0;
-        let idx = thresholds.partition_point(|&th| ms > th);
-        buckets[idx.min(n - 1)] += 1;
-    }
-
-    let max_count = *buckets.iter().max().unwrap_or(&1);
     let bar_width = 40usize;
 
     writeln!(w)?;
     writeln!(w, "{}", t!("stats.latency_dist"))?;
-    for (i, &count) in buckets.iter().enumerate() {
-        let low = if i == 0 { 0.0 } else { thresholds[i - 1] };
-        let high = if i == n - 1 {
-            f64::INFINITY
-        } else {
-            thresholds[i]
-        };
+    for (low, high, count) in &h.buckets {
         let range = if high.is_infinite() {
             format!("> {low:.2}")
         } else {
             format!("{low:.2} - {high:.2}")
         };
-        let bar_len = if max_count > 0 {
-            count * bar_width / max_count
+        let bar_len = if h.max_count > 0 {
+            count * bar_width / h.max_count
         } else {
             0
         };
@@ -661,6 +645,42 @@ mod tests {
         let spec = HistogramSpec::Thresholds(vec![1.0, 5.0, 10.0]);
         // 桶: (0,1] (1,5] (5,10] (10,∞] → 0.5→0, 1.0→0, 5.0→1, 10.0→2, 50.0→3
         let mut w = termcolor::StandardStream::stdout(termcolor::ColorChoice::Never);
-        print_histogram(&mut w, &s, &spec).unwrap();
+        print_histogram(&mut w, s.samples(), &spec).unwrap();
+    }
+
+    #[test]
+    fn test_histogram_from_times_thresholds() {
+        let times: Vec<Duration> = [0.5, 1.0, 5.0, 10.0, 50.0]
+            .iter()
+            .map(|&ms| Duration::from_secs_f64(ms / 1000.0))
+            .collect();
+        let h = Histogram::from_times(&times, &HistogramSpec::Thresholds(vec![1.0, 5.0, 10.0]))
+            .unwrap();
+        let counts: Vec<usize> = h.buckets.iter().map(|&(_, _, c)| c).collect();
+        assert_eq!(counts, vec![2, 1, 1, 1]);
+        assert_eq!(h.max_count, 2);
+        // 末桶无上界
+        assert!(h.buckets[3].1.is_infinite());
+    }
+
+    #[test]
+    fn test_histogram_from_times_buckets() {
+        let times: Vec<Duration> = (1..=10).map(Duration::from_millis).collect();
+        let h = Histogram::from_times(&times, &HistogramSpec::Buckets(5)).unwrap();
+        assert_eq!(h.buckets.len(), 5);
+        let total: usize = h.buckets.iter().map(|&(_, _, c)| c).sum();
+        assert_eq!(total, 10);
+    }
+
+    #[test]
+    fn test_histogram_from_times_empty() {
+        assert!(Histogram::from_times(&[], &HistogramSpec::Buckets(5)).is_none());
+    }
+
+    #[test]
+    fn test_histogram_from_times_flat() {
+        // 全部同值：不可分桶
+        let times = vec![Duration::from_millis(3); 5];
+        assert!(Histogram::from_times(&times, &HistogramSpec::Buckets(5)).is_none());
     }
 }

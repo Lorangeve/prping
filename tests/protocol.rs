@@ -170,6 +170,28 @@ fn run_collects_warnings() {
 }
 
 #[test]
+fn run_parallel_ignored_warning() {
+    // 非带宽模式 -P 无效 → 橙色警告（config 级不变式在 lib run 内）
+    let mut cfg = ping_config();
+    cfg.port = 1; // TCP ping（无服务，先看警告）
+    cfg.parallel = 4;
+    let mut warnings = Vec::new();
+    let _ = run(&cfg, |w| warnings.push(w));
+    assert!(warnings.contains(&PrpingWarning::ParallelIgnored));
+}
+
+#[test]
+fn run_conflict_v4_v6_error() {
+    // -4 与 -6 冲突：config 级不变式收敛在 lib run（bin validate 只查 CLI 级）
+    let mut cfg = ping_config();
+    cfg.port = 1;
+    cfg.v4 = true;
+    cfg.v6 = true;
+    let err = run(&cfg, |_| {}).expect_err("should fail");
+    assert!(matches!(err, PrpingError::ConflictV4V6));
+}
+
+#[test]
 fn run_receive_ignored_for_ping() {
     let mut cfg = ping_config();
     cfg.port = 1; // TCP ping（无服务，先看警告）

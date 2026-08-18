@@ -1,38 +1,21 @@
 //! Latency test — client/server TCP/UDP round-trip latency measurement.
 
+use crate::drive::{Probe, ProbeOutcome, drive};
 use crate::output;
 use crate::stats::{self, Stats};
-use crate::util::{self, PingConfig, Run};
+use crate::util::{self, PingConfig};
 use rust_i18n::t;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use std::io::Write;
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
 pub fn run_client(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addrs = util::resolve_vec(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
-    if cfg.host.parse::<IpAddr>().is_err() {
-        let stripped = cfg
-            .host
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(&cfg.host);
-        if stripped.parse::<IpAddr>().is_err() && !stats::json() {
-            let mut w = output::stdout();
-            writeln!(
-                &mut w,
-                "{}",
-                t!(
-                    "common.resolving",
-                    host = cfg.host,
-                    ip = addrs[0].ip().to_string()
-                )
-            )?;
-        }
-    }
+    util::print_resolving(&cfg.host, addrs[0].ip());
     smol::block_on(run_client_async(addrs, cfg))
 }
 
@@ -45,46 +28,62 @@ async fn run_client_async(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::R
 }
 
 async fn run_tcp_client(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Result<Stats> {
-    let mut stats = Stats::default();
-    let mut w = output::stdout();
     let payload = vec![0x42u8; cfg.size.unwrap()];
-    let mut buf = vec![0u8; cfg.size.unwrap() + 1];
-    let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
+    let buf = vec![0u8; cfg.size.unwrap() + 1];
+    let mut probe = LatencyTcpProbe {
+        addrs,
+        payload,
+        buf,
+        cfg,
+    };
+    drive(
+        cfg,
+        "latency",
+        &format!("{}:{}", cfg.host, cfg.port),
+        &mut probe,
+    )
+    .await
+}
 
-    loop {
-        if run.seq() > 0 {
-            smol::Timer::after(Duration::from_secs(1)).await;
-        }
-        if run.done() {
-            break;
-        }
-        let is_warmup = run.is_warmup();
+/// TCP 延迟探测体：connect + echo 往返（或接收模式触发）+ 人读行。
+struct LatencyTcpProbe<'a> {
+    addrs: Vec<SocketAddr>,
+    payload: Vec<u8>,
+    buf: Vec<u8>,
+    cfg: &'a PingConfig,
+}
+
+impl Probe for LatencyTcpProbe<'_> {
+    async fn probe(
+        &mut self,
+        w: &mut StandardStream,
+        _seq: u64,
+        is_warmup: bool,
+    ) -> anyhow::Result<ProbeOutcome> {
         let start = Instant::now();
-        let mut stream = match util::connect_first(&addrs).await {
+        let mut stream = match util::connect_first(&self.addrs).await {
             Ok(s) => s,
             Err(e) => {
-                if !is_warmup {
-                    stats.record_loss();
-                    if !stats::json() {
-                        output::writeln_red(&mut w, &t!("common.connect_failed", error = e))?;
-                    }
+                if !self.cfg.quiet && !stats::json() {
+                    output::writeln_red(w, &t!("common.connect_failed", error = e.to_string()))?;
                 }
-                run.advance();
-                continue;
+                return Ok(ProbeOutcome::Err {
+                    json_err: "connect failed",
+                });
             }
         };
         stream.set_nodelay(true)?;
 
-        if cfg.receive {
+        if self.cfg.receive {
             // 发送触发字节，服务器回送 size 字节
             stream.write_all(&[0xFF]).await?;
             match smol::future::or(
                 async {
-                    stream.read_exact(&mut buf[..1]).await?;
+                    stream.read_exact(&mut self.buf[..1]).await?;
                     stream
-                        .read_exact(&mut buf[1..])
+                        .read_exact(&mut self.buf[1..])
                         .await
-                        .map(|_| cfg.size.unwrap() + 1)
+                        .map(|_| self.cfg.size.unwrap() + 1)
                 },
                 async {
                     smol::Timer::after(Duration::from_secs(10)).await;
@@ -95,97 +94,55 @@ async fn run_tcp_client(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Res
             {
                 Ok(_) => {
                     let rtt = start.elapsed();
-                    if !is_warmup {
-                        stats.record(rtt);
+                    if !self.cfg.quiet && !stats::json() {
+                        print_latency(w, self.addrs[0], rtt, self.cfg.size.unwrap(), is_warmup)?;
                     }
-                    if !stats::json() {
-                        print_latency(&mut w, addrs[0], rtt, cfg.size.unwrap(), is_warmup)?;
-                    } else if !is_warmup {
-                        let tgt = format!("{}:{}", cfg.host, cfg.port);
-                        stats::json_sample(
-                            &mut w,
-                            "latency",
-                            &tgt,
-                            run.seq(),
-                            true,
-                            Some(rtt),
-                            None,
-                        )?;
-                    }
+                    Ok(ProbeOutcome::Ok { rtt })
                 }
                 Err(_) => {
-                    if !is_warmup {
-                        stats.record_loss();
+                    if !self.cfg.quiet && !stats::json() {
+                        output::writeln_red(w, t!("common.timeout"))?;
                     }
-                    if !stats::json() {
-                        output::writeln_red(&mut w, t!("common.timeout"))?;
-                    } else if !is_warmup {
-                        let tgt = format!("{}:{}", cfg.host, cfg.port);
-                        stats::json_sample(
-                            &mut w,
-                            "latency",
-                            &tgt,
-                            run.seq(),
-                            false,
-                            None,
-                            Some("timeout"),
-                        )?;
+                    Ok(ProbeOutcome::Err {
+                        json_err: "timeout",
+                    })
+                }
+            }
+        } else {
+            if stream.write_all(&self.payload).await.is_err() {
+                return Ok(ProbeOutcome::Skip);
+            }
+            match smol::future::or(
+                async {
+                    stream
+                        .read_exact(&mut self.buf[..self.cfg.size.unwrap()])
+                        .await
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(10)).await;
+                    Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
+                },
+            )
+            .await
+            {
+                Ok(_) => {
+                    let rtt = start.elapsed();
+                    if !self.cfg.quiet && !stats::json() {
+                        print_latency(w, self.addrs[0], rtt, self.cfg.size.unwrap(), is_warmup)?;
                     }
+                    Ok(ProbeOutcome::Ok { rtt })
                 }
-            }
-            run.advance();
-            continue;
-        }
-
-        if stream.write_all(&payload).await.is_err() {
-            run.advance();
-            continue;
-        }
-        match smol::future::or(
-            async { stream.read_exact(&mut buf[..cfg.size.unwrap()]).await },
-            async {
-                smol::Timer::after(Duration::from_secs(10)).await;
-                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
-            },
-        )
-        .await
-        {
-            Ok(_) => {
-                let rtt = start.elapsed();
-                if !is_warmup {
-                    stats.record(rtt);
-                }
-                if !stats::json() {
-                    print_latency(&mut w, addrs[0], rtt, cfg.size.unwrap(), is_warmup)?;
-                } else if !is_warmup {
-                    let tgt = format!("{}:{}", cfg.host, cfg.port);
-                    stats::json_sample(&mut w, "latency", &tgt, run.seq(), true, Some(rtt), None)?;
-                }
-            }
-            Err(_) => {
-                if !is_warmup {
-                    stats.record_loss();
-                }
-                if !stats::json() {
-                    output::writeln_red(&mut w, t!("common.timeout"))?;
-                } else if !is_warmup {
-                    let tgt = format!("{}:{}", cfg.host, cfg.port);
-                    stats::json_sample(
-                        &mut w,
-                        "latency",
-                        &tgt,
-                        run.seq(),
-                        false,
-                        None,
-                        Some("timeout"),
-                    )?;
+                Err(_) => {
+                    if !self.cfg.quiet && !stats::json() {
+                        output::writeln_red(w, t!("common.timeout"))?;
+                    }
+                    Ok(ProbeOutcome::Err {
+                        json_err: "timeout",
+                    })
                 }
             }
         }
-        run.advance();
     }
-    print_result(&mut w, &stats, cfg)?;
-    Ok(stats)
 }
 
 async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
@@ -195,35 +152,56 @@ async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<St
         "[::]:0".parse()?
     };
     let sock = util::bind_udp(bind_addr)?;
-    let mut stats = Stats::default();
-    let mut w = output::stdout();
     let payload = vec![0x42u8; cfg.size.unwrap()];
     let trigger = util::udp_receive_trigger(cfg.size.unwrap(), 1);
-    let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap() + 512];
-    let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
+    let buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap() + 512];
+    let mut probe = LatencyUdpProbe {
+        sock: &sock,
+        payload,
+        trigger,
+        buf,
+        addr,
+        cfg,
+    };
+    drive(
+        cfg,
+        "latency",
+        &format!("{}:{}", cfg.host, cfg.port),
+        &mut probe,
+    )
+    .await
+}
 
-    loop {
-        if run.seq() > 0 {
-            smol::Timer::after(Duration::from_secs(1)).await;
-        }
-        if run.done() {
-            break;
-        }
-        let is_warmup = run.is_warmup();
+/// UDP 延迟探测体：发负载/触发包 + 等回包 + 人读行。
+struct LatencyUdpProbe<'a> {
+    sock: &'a smol::Async<socket2::Socket>,
+    payload: Vec<u8>,
+    trigger: Vec<u8>,
+    buf: Vec<MaybeUninit<u8>>,
+    addr: SocketAddr,
+    cfg: &'a PingConfig,
+}
+
+impl Probe for LatencyUdpProbe<'_> {
+    async fn probe(
+        &mut self,
+        w: &mut StandardStream,
+        _seq: u64,
+        is_warmup: bool,
+    ) -> anyhow::Result<ProbeOutcome> {
         let start = Instant::now();
         // 接收模式：发送触发包，服务器回送 size 字节；否则发送 size 字节负载
-        let sent = if cfg.receive {
-            util::udp_send(&sock, &trigger, &addr).await
+        let sent = if self.cfg.receive {
+            util::udp_send(self.sock, &self.trigger, &self.addr).await
         } else {
-            util::udp_send(&sock, &payload, &addr).await
+            util::udp_send(self.sock, &self.payload, &self.addr).await
         };
         if sent.is_err() {
-            run.advance();
-            continue;
+            return Ok(ProbeOutcome::Skip);
         }
 
         match smol::future::or(
-            async { Some(util::udp_recv(&sock, &mut buf).await) },
+            async { Some(util::udp_recv(self.sock, &mut self.buf).await) },
             async {
                 smol::Timer::after(Duration::from_secs(10)).await;
                 None
@@ -233,40 +211,21 @@ async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<St
         {
             Some(Ok((n, _))) => {
                 let rtt = start.elapsed();
-                if !is_warmup {
-                    stats.record(rtt);
+                if !self.cfg.quiet && !stats::json() {
+                    print_latency(w, self.addr, rtt, n, is_warmup)?;
                 }
-                if !stats::json() {
-                    print_latency(&mut w, addr, rtt, n, is_warmup)?;
-                } else if !is_warmup {
-                    let tgt = format!("{}:{}", cfg.host, cfg.port);
-                    stats::json_sample(&mut w, "latency", &tgt, run.seq(), true, Some(rtt), None)?;
-                }
+                Ok(ProbeOutcome::Ok { rtt })
             }
             _ => {
-                if !is_warmup {
-                    stats.record_loss();
+                if !self.cfg.quiet && !stats::json() {
+                    output::writeln_red(w, t!("common.timeout"))?;
                 }
-                if !stats::json() {
-                    output::writeln_red(&mut w, t!("common.timeout"))?;
-                } else if !is_warmup {
-                    let tgt = format!("{}:{}", cfg.host, cfg.port);
-                    stats::json_sample(
-                        &mut w,
-                        "latency",
-                        &tgt,
-                        run.seq(),
-                        false,
-                        None,
-                        Some("timeout"),
-                    )?;
-                }
+                Ok(ProbeOutcome::Err {
+                    json_err: "timeout",
+                })
             }
         }
-        run.advance();
     }
-    print_result(&mut w, &stats, cfg)?;
-    Ok(stats)
 }
 
 fn print_latency(
@@ -289,27 +248,5 @@ fn print_latency(
         output::print_dim(w, format!(" {}", t!("common.warmup")))?;
     }
     writeln!(w)?;
-    Ok(())
-}
-
-fn print_result(w: &mut StandardStream, stats: &Stats, cfg: &PingConfig) -> anyhow::Result<()> {
-    if !stats::json() {
-        println!();
-    }
-    let target = if cfg.port > 0 {
-        format!("{}:{}", cfg.host, cfg.port)
-    } else {
-        cfg.host.clone()
-    };
-    stats::print_summary(w, stats, "latency", &target)?;
-    if !stats::json()
-        && stats.received > 0
-        && let Some(spec) = &cfg.histogram
-    {
-        stats::print_histogram(w, stats, spec)?;
-    }
-    if cfg.graph && !stats::json() {
-        stats::print_timeline(w, stats)?;
-    }
     Ok(())
 }

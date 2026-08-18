@@ -130,28 +130,23 @@ pub fn resolve(
         .ok_or_else(|| anyhow::anyhow!(t!("errors.cannot_resolve", host = host)))
 }
 
-/// 解析主机名，返回全部匹配地址（ICMP 模式使用）。
-pub fn resolve_all(host: &str, force_v4: bool, force_v6: bool) -> anyhow::Result<Vec<SocketAddr>> {
-    let raw = host
+/// 主机名解析成功后的横幅：仅域名（非 IP 字面量）打印、`--json` 静默。
+///
+/// 各模式（icmp/tcp/udp/latency/bandwidth）共用，收敛 strip-bracket + 判断的重复。
+pub fn print_resolving(host: &str, ip: IpAddr) {
+    if crate::stats::json() {
+        return;
+    }
+    let stripped = host
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host);
-    if let Ok(ip) = raw.parse::<IpAddr>() {
-        return Ok(vec![SocketAddr::new(ip, 0)]);
+    if stripped.parse::<IpAddr>().is_err() {
+        println!(
+            "{}",
+            t!("common.resolving", host = host, ip = ip.to_string())
+        );
     }
-    let host = raw.to_string();
-    Ok(smol::block_on(async {
-        smol::unblock(move || {
-            let mut addrs: Vec<SocketAddr> = (host.as_str(), 0).to_socket_addrs()?.collect();
-            if force_v4 {
-                addrs.retain(|a| a.is_ipv4());
-            } else if force_v6 {
-                addrs.retain(|a| a.is_ipv6());
-            }
-            Ok::<_, std::io::Error>(addrs)
-        })
-        .await
-    })?)
 }
 
 /// 运行循环控制：按次数、按时长或 Ctrl+C 中断决定何时停止。
@@ -313,12 +308,12 @@ mod tests {
     }
     #[test]
     fn test_resolve_all_ip_direct() {
-        let a = resolve_all("127.0.0.1", false, false).unwrap();
+        let a = resolve_vec("127.0.0.1", 0, false, false).unwrap();
         assert_eq!(a[0].ip().to_string(), "127.0.0.1");
     }
     #[test]
     fn test_resolve_all_ipv6() {
-        let a = resolve_all("::1", false, false).unwrap();
+        let a = resolve_vec("::1", 0, false, false).unwrap();
         assert_eq!(a[0].ip().to_string(), "::1");
     }
     #[test]

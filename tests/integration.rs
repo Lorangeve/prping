@@ -125,6 +125,34 @@ fn invalid_count_errors() {
     assert!(!out.status.success());
 }
 
+#[test]
+fn invalid_histogram_errors() {
+    // 非法 -H（非数字非阈值列表）应报错退出，而非静默忽略
+    let out = prping()
+        .args(["--lang", "en-US", "-H", "abc", "127.0.0.1:9"])
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    assert!(
+        stderr_str(&out).contains("invalid histogram value"),
+        "stderr: {}",
+        stderr_str(&out)
+    );
+}
+
+#[test]
+fn parallel_warning_non_bandwidth() {
+    // 非带宽模式 -P 警告（橙色，stderr）——不阻止运行
+    let (_srv, port) = start_server();
+    let out = run_client(port, &["--lang", "en-US", "-n", "1", "-w", "0", "-P", "4"]);
+    assert!(out.status.success());
+    assert!(
+        stderr_str(&out).contains("-P ignored in this mode"),
+        "stderr: {}",
+        stderr_str(&out)
+    );
+}
+
 // ---------- 互斥参数校验 ----------
 
 #[test]
