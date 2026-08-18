@@ -30,7 +30,7 @@ pub enum HistogramSpec {
     Thresholds(Vec<f64>),
 }
 
-/// 解析 `-H` 参数："20" → Buckets(20)；"1,5,10,50" → Thresholds([1,5,10,50])。
+/// 解析 `-H` 参数："20" → Buckets(20)；"1,5,10,50" → Thresholds(\[1,5,10,50\])。
 pub fn parse_histogram(s: &str) -> Option<HistogramSpec> {
     if s.contains(',') {
         let mut v: Vec<f64> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();

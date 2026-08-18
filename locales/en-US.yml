@@ -58,6 +58,13 @@ errors:
   parallel_udp_ignored: "-P ignored in UDP mode (UDP bandwidth is single-connection)"
   receive_ignored_ping: "-r ignored for plain ping (use -l for latency or -b for bandwidth)"
   invalid_ipv6: "invalid IPv6 format: [host] or [host]:port"
+  conflict_v4_v6: "-4 and -6 cannot be used together"
+  conflict_server_target: "-s (server mode) cannot be combined with a target HOST[:PORT]"
+  conflict_server_mode: "-s (server mode) cannot be combined with client test options: %{opts}"
+  conflict_json_pretty: "--json and -p/--pretty cannot be used together"
+  conflict_json_graph: "--json and -g/--graph cannot be used together"
+  conflict_json_histogram: "--json and -H/--histogram cannot be used together"
+  receive_requires_latency_bandwidth: "-r requires -b (bandwidth) or -l (latency) with HOST:PORT"
 
 help:
   group:
@@ -71,14 +78,14 @@ help:
     server: "Server listening address and port"
     bandwidth: "Bandwidth test mode"
     count: "Number of sends/receives (default: infinite). Append 's' for seconds e.g. '10s'"
-    interval: "Interval in seconds (0 = fast ping)"
+    interval: "Interval in seconds (default 1, 0 = fast ping)"
     size: "Request/payload size (e.g. 64, 8k, 1m). Triggers latency test when port present."
     lang: "Set language (e.g. en-US, zh-CN). Default: auto-detect from system."
     udp: "UDP mode (default is TCP)"
     quiet: "Suppress per-ping output"
     histogram: "Histogram: bucket count (e.g. 20) or comma-separated thresholds in ms (e.g. 1,5,10,50)"
     warmup: "Warmup iterations (default 4)"
-    parallel: "Number of parallel connections"
+    parallel: "Number of parallel connections (default 1)"
     v4: "Force IPv4"
     v6: "Force IPv6"
     json: "Output machine-readable JSON statistics"
@@ -103,6 +110,7 @@ help:
   mode_guide: |-
     Modes (auto-detected): host → ICMP | host:port → TCP | -u → UDP | -l SIZE → Latency | -b → Bandwidth | -s → Server
     Detailed help: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
+    Conflicting options are rejected with an error: -4/-6, -s with a target or client options, --json with -p/-g/-H, -r without -b/-l
 
   usage_line: "Help: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]\n   -h, --help            Show all options.\n   --help-icmp           ICMP ping usage.\n   --help-tcp            TCP ping usage.\n   --help-udp            UDP ping usage.\n   --help-latency        Latency test usage.\n   --help-bandwidth      Bandwidth test usage.\n   --help-server         Server usage."
 
@@ -143,7 +151,7 @@ help:
 
       Options: same as ICMP ping (see --help-icmp), but a target port is required.
         -l SIZE  turns this into a latency test (see --help-latency)
-        -r       ignored for plain TCP ping
+        -r       requires -b (bandwidth) or -l (latency); error otherwise
 
       Examples:
         prping -n 30 -i 0.1 -gp 192.168.1.1:22

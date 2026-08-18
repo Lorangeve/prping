@@ -7,8 +7,8 @@
 //!
 //! ```text
 //! prping crate
-//! ├── lib.rs       pub: run / serve / PingConfig / Stats / 报告 / 错误 / 警告
-//! ├── main.rs      bpaf 解析 → run()/serve() → t! 渲染 → 退出码；信号安装
+//! ├── lib.rs       pub: run / serve / PingConfig / Stats / 报告 / 错误 / 警告 / output 渲染辅助
+//! ├── main.rs      bpaf 解析 → 互斥校验 → run()/serve() → t! 渲染 → 退出码；信号安装
 //! └── util/stats/output/icmp/tcp/udp/latency/bandwidth   lib 内部实现
 //! ```
 //!
@@ -69,6 +69,8 @@ pub use stats::{HistogramSpec, Stats, parse_histogram, set_json, set_pretty};
 pub use util::{
     PingConfig, configure_executor_threads, interrupted, reset_interrupt, set_interrupted,
 };
+// bin 侧错误/警告渲染用（颜色统一在 output.rs 管理）
+pub use output::{stderr, writeln_orange, writeln_red};
 
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;

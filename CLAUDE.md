@@ -53,11 +53,12 @@ prping -g HOST:PORT        TCP ping + 时间线图（-gp 用 ploot 渲染）
 ## 编码约定
 
 - Rust edition 2024
-- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --all-targets` 全通过（单元 34 + 协议 13 + CLI 5 = 52 tests）
+- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --all-targets` 全通过（单元 34 + 协议 13 + CLI 10 = 57 tests）
 - 用户可见输出英文，注释中文
-- 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端不使用内联 ANSI）
+- 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端不使用内联 ANSI）；bin 侧错误用红色、警告用橙色（lib re-export `output::{stderr, writeln_red, writeln_orange}` 给 bin 用）
+- 互斥参数在解析后校验（`main.rs::validate`），冲突输出红色错误并退出码 1：`-4`/`-6`、`-s` 与目标或客户端参数、`--json` 与 `-p`/`-g`/`-H`、无 `-b`/`-l` 时使用 `-r`（`-i`/`-w`/`-P` 用 Option 记录是否显式给出）
 - 共享逻辑（DNS 解析、运行循环、UDP socket、测试参数 `PingConfig`）收敛在 `util.rs`，不重复实现
-- lib 公开面最小化：只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告，其余 `pub(crate)`
+- lib 公开面最小化：只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告/`output::{stderr, writeln_red, writeln_orange}`，其余 `pub(crate)`
 - 不引入不必要的抽象
 - 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner 设置 cap_net_raw；各平台产物配方在 `justfile`（`just build-release` / `build-win7` / `build-windows` / `test` / `lint` 等）
 - CI: `.github/workflows/ci.yml` — fmt/clippy/doc/全部测试 × Linux/macOS/Windows + 非门禁基准 job

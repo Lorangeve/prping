@@ -64,6 +64,20 @@ fn stdout_str(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn stderr_str(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// 互斥参数校验测试：固定 --lang en-US 保证错误文案可断言；
+/// 冲突在连接/建 socket 之前触发，无需网络与 root。
+fn run_conflict(args: &[&str]) -> std::process::Output {
+    prping()
+        .args(["--lang", "en-US"])
+        .args(args)
+        .output()
+        .expect("run conflict check")
+}
+
 #[test]
 fn tcp_ping_json_stats() {
     let (_srv, port) = start_server();
@@ -109,4 +123,81 @@ fn invalid_count_errors() {
         .output()
         .expect("run");
     assert!(!out.status.success());
+}
+
+// ---------- 互斥参数校验 ----------
+
+#[test]
+fn conflict_v4_v6_errors() {
+    let out = run_conflict(&["-4", "-6", "127.0.0.1"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_str(&out).contains("-4 and -6 cannot be used together"),
+        "stderr: {}",
+        stderr_str(&out)
+    );
+}
+
+#[test]
+fn conflict_server_target_errors() {
+    let out = run_conflict(&["-s", "127.0.0.1:9000", "127.0.0.1:9001"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_str(&out).contains("cannot be combined with a target"),
+        "stderr: {}",
+        stderr_str(&out)
+    );
+}
+
+#[test]
+fn conflict_server_mode_errors() {
+    // 服务端模式不能带客户端测试参数（-b/-l/-u/-r/-n/-i/-H/-w/-P/-q/-p/-g/--json）
+    let out = run_conflict(&["-s", "127.0.0.1:9000", "-b"]);
+    assert!(!out.status.success());
+    let s = stderr_str(&out);
+    assert!(s.contains("client test options"), "stderr: {s}");
+    assert!(s.contains("-b"), "stderr: {s}");
+
+    let out = run_conflict(&["-s", "127.0.0.1:9000", "--json", "-n", "5"]);
+    assert!(!out.status.success());
+    let s = stderr_str(&out);
+    assert!(s.contains("--json") && s.contains("-n"), "stderr: {s}");
+}
+
+#[test]
+fn conflict_json_output_errors() {
+    // --json 与 -p/-g/-H 冲突（JSON 输出替代全部人读渲染）
+    for args in [
+        &["--json", "-p", "127.0.0.1:9"][..],
+        &["--json", "-g", "127.0.0.1:9"][..],
+        &["--json", "-H", "20", "127.0.0.1:9"][..],
+    ] {
+        let out = run_conflict(args);
+        assert!(!out.status.success(), "args: {args:?}");
+        let s = stderr_str(&out);
+        assert!(
+            s.contains("--json and ") && s.contains("cannot be used together"),
+            "args: {args:?} stderr: {s}"
+        );
+    }
+}
+
+#[test]
+fn conflict_receive_without_latency_bandwidth_errors() {
+    // -r 无 -b/-l：无端口（ICMP）与有端口（TCP/UDP ping）都应报错
+    let out = run_conflict(&["-r", "127.0.0.1"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_str(&out).contains("-r requires -b (bandwidth) or -l (latency)"),
+        "stderr: {}",
+        stderr_str(&out)
+    );
+
+    let out = run_conflict(&["-r", "127.0.0.1:9"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_str(&out).contains("-r requires -b (bandwidth) or -l (latency)"),
+        "stderr: {}",
+        stderr_str(&out)
+    );
 }

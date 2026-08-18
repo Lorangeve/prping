@@ -3,7 +3,7 @@ rust_i18n::i18n!("locales");
 use bpaf::*;
 use prping::{
     OutcomeKind, PingConfig, PrpingError, PrpingWarning, configure_executor_threads,
-    parse_histogram, run, serve, set_json, set_pretty,
+    parse_histogram, run, serve, set_json, set_pretty, stderr, writeln_orange, writeln_red,
 };
 use rust_i18n::t;
 use std::net::SocketAddr;
@@ -75,7 +75,7 @@ fn cmd() -> impl Parser<Command> {
         .short('i')
         .argument::<f64>("S")
         .help(t!("help.options.interval").as_ref())
-        .fallback(1.0);
+        .optional();
 
     let req_size = long("size")
         .short('l')
@@ -109,12 +109,12 @@ fn cmd() -> impl Parser<Command> {
         .short('w')
         .help(t!("help.options.warmup").as_ref())
         .argument::<u64>("N")
-        .fallback(4);
+        .optional();
     let parallel = long("parallel")
         .short('P')
         .help(t!("help.options.parallel").as_ref())
         .argument::<u32>("N")
-        .fallback(1);
+        .optional();
     let v4 = short('4').switch().help(t!("help.options.v4").as_ref());
     let v6 = short('6').switch().help(t!("help.options.v6").as_ref());
     let pretty = long("pretty")
@@ -217,14 +217,109 @@ struct ModeGroup {
     udp: bool,
 }
 
-/// 测试控制组
+/// 校验互斥参数组合，返回本地化错误文案（None = 通过）。
+///
+/// `port_present`：目标是否带端口（None = 无目标或目标非法，跳过 `-r` 校验，
+/// 交由后续目标解析路径报错）。互斥规则：
+///
+/// - `-4` 与 `-6` 不能同时使用（地址族矛盾）
+/// - `-s`（服务端模式）不能与目标 `HOST[:PORT]` 同时使用
+/// - `-s` 不能与任何客户端测试参数同时使用（-b/-l/-u/-r/-n/-i/-H/-w/-P/-q/-p/-g/--json）
+/// - `--json` 与 `-p`/`-g`/`-H` 冲突（JSON 输出替代全部人读渲染）
+/// - `-r` 仅在与 `-b`（带宽）或 `-l`+端口（延迟）搭配时有效
+fn validate(cmd: &Command, port_present: Option<bool>) -> Option<String> {
+    if cmd.network.v4 && cmd.network.v6 {
+        return Some(t!("errors.conflict_v4_v6").to_string());
+    }
+
+    if cmd.server_grp.server.is_some() {
+        if cmd.target.is_some() {
+            return Some(t!("errors.conflict_server_target").to_string());
+        }
+        let mut opts: Vec<&str> = Vec::new();
+        let m = &cmd.mode;
+        if m.bandwidth {
+            opts.push("-b");
+        }
+        if m.req_size.is_some() {
+            opts.push("-l");
+        }
+        if m.receive {
+            opts.push("-r");
+        }
+        if m.udp {
+            opts.push("-u");
+        }
+        let g = &cmd.test;
+        if g.count.is_some() {
+            opts.push("-n");
+        }
+        if g.interval.is_some() {
+            opts.push("-i");
+        }
+        if g.histogram.is_some() {
+            opts.push("-H");
+        }
+        if g.warmup.is_some() {
+            opts.push("-w");
+        }
+        if g.parallel.is_some() {
+            opts.push("-P");
+        }
+        if g.quiet {
+            opts.push("-q");
+        }
+        let o = &cmd.output;
+        if o.pretty {
+            opts.push("-p");
+        }
+        if o.graph {
+            opts.push("-g");
+        }
+        if o.json {
+            opts.push("--json");
+        }
+        if !opts.is_empty() {
+            return Some(t!("errors.conflict_server_mode", opts = opts.join(" ")).to_string());
+        }
+    }
+
+    if cmd.output.json {
+        if cmd.output.pretty {
+            return Some(t!("errors.conflict_json_pretty").to_string());
+        }
+        if cmd.output.graph {
+            return Some(t!("errors.conflict_json_graph").to_string());
+        }
+        if cmd.test.histogram.is_some() {
+            return Some(t!("errors.conflict_json_histogram").to_string());
+        }
+    }
+
+    if cmd.mode.receive && !cmd.mode.bandwidth {
+        // -r 合法条件：-b（带宽），或 -l 且目标带端口（延迟测试）
+        let latency_ok = match port_present {
+            Some(true) => cmd.mode.req_size.is_some(),
+            Some(false) => false,
+            None => true, // 无目标/目标非法：跳过，交给后续路径报错
+        };
+        if !latency_ok {
+            return Some(t!("errors.receive_requires_latency_bandwidth").to_string());
+        }
+    }
+
+    None
+}
+
+/// 测试控制组（`-i`/`-w`/`-P` 用 Option 记录是否显式给出，供互斥校验使用；
+/// 缺省值在构造 `PingConfig` 时补全）。
 struct TestGroup {
     count: Option<String>,
-    interval: f64,
+    interval: Option<f64>,
     quiet: bool,
     histogram: Option<String>,
-    warmup: u64,
-    parallel: u32,
+    warmup: Option<u64>,
+    parallel: Option<u32>,
 }
 
 /// 输出组
@@ -369,6 +464,18 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // 互斥参数校验：-r 的合法性依赖目标端口，先轻量解析（失败则跳过该项检查）
+    let port_present = cmd
+        .target
+        .as_deref()
+        .and_then(|t| parse_target(t).ok())
+        .map(|(_, p)| p.is_some());
+    if let Some(msg) = validate(&cmd, port_present) {
+        let mut w = stderr();
+        let _ = writeln_red(&mut w, format!("Error: {msg}"));
+        std::process::exit(1);
+    }
+
     // Set output modes before any output
     set_pretty(cmd.output.pretty);
     set_json(cmd.output.json);
@@ -426,14 +533,14 @@ fn main() -> anyhow::Result<()> {
         port: port.unwrap_or(0),
         count: cnt,
         duration: dur,
-        interval: cmd.test.interval,
+        interval: cmd.test.interval.unwrap_or(1.0),
         size: cmd.mode.req_size.as_deref().map(parse_size).transpose()?,
         quiet: cmd.test.quiet,
         histogram: hist,
-        warmup: cmd.test.warmup,
+        warmup: cmd.test.warmup.unwrap_or(4),
         v4: cmd.network.v4,
         v6: cmd.network.v6,
-        parallel: cmd.test.parallel,
+        parallel: cmd.test.parallel.unwrap_or(1),
         udp: cmd.mode.udp,
         receive: cmd.mode.receive,
         bandwidth: cmd.mode.bandwidth,
@@ -441,7 +548,11 @@ fn main() -> anyhow::Result<()> {
     };
 
     // 统一入口：模式识别、clamp、忽略提示都在 lib 的 run() 内
-    match run(&cfg, |w| eprintln!("{}", render_warning(w))) {
+    // 警告（clamp/忽略）以橙色输出
+    match run(&cfg, |w| {
+        let mut err = stderr();
+        let _ = writeln_orange(&mut err, render_warning(w));
+    }) {
         Ok(kind) => {
             let has_loss = match &kind {
                 OutcomeKind::Ping(stats) => stats.has_loss(),
@@ -453,11 +564,13 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Err(PrpingError::UdpRequiresPort) => {
-            eprintln!("{}", t!("errors.udp_requires_port"));
+            let mut w = stderr();
+            let _ = writeln_red(&mut w, t!("errors.udp_requires_port"));
             std::process::exit(1);
         }
         Err(PrpingError::BandwidthRequiresPort) => {
-            eprintln!("{}", t!("errors.bandwidth_requires_port"));
+            let mut w = stderr();
+            let _ = writeln_red(&mut w, t!("errors.bandwidth_requires_port"));
             std::process::exit(1);
         }
         Err(e) => return Err(e.into()),

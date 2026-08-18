@@ -8,6 +8,11 @@ pub fn stdout() -> StandardStream {
     StandardStream::stdout(termcolor::ColorChoice::Auto)
 }
 
+/// 获取标准错误流（自动检测颜色支持）。
+pub fn stderr() -> StandardStream {
+    StandardStream::stderr(termcolor::ColorChoice::Auto)
+}
+
 /// 打印绿色文本。
 pub fn print_green<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> {
     w.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
@@ -46,6 +51,19 @@ pub fn print_bold<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()>
 /// 打印红色行。
 pub fn writeln_red<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> {
     print_red(w, text)?;
+    writeln!(w)
+}
+
+/// 打印橙色文本（警告）。
+pub fn print_orange<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> {
+    w.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(208))))?;
+    write!(w, "{}", text.as_ref())?;
+    w.reset()
+}
+
+/// 打印橙色行（警告）。
+pub fn writeln_orange<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> {
+    print_orange(w, text)?;
     writeln!(w)
 }
 

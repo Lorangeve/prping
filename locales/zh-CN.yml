@@ -58,6 +58,13 @@ errors:
   parallel_udp_ignored: "UDP 模式忽略 -P（UDP 带宽为单连接）"
   receive_ignored_ping: "普通 ping 模式忽略 -r（延迟/带宽测试请用 -l/-b）"
   invalid_ipv6: "无效的 IPv6 格式: [host] 或 [host]:port"
+  conflict_v4_v6: "-4 与 -6 不能同时使用"
+  conflict_server_target: "-s（服务端模式）不能与目标 HOST[:PORT] 同时使用"
+  conflict_server_mode: "-s（服务端模式）不能与客户端测试参数同时使用: %{opts}"
+  conflict_json_pretty: "--json 与 -p/--pretty 不能同时使用"
+  conflict_json_graph: "--json 与 -g/--graph 不能同时使用"
+  conflict_json_histogram: "--json 与 -H/--histogram 不能同时使用"
+  receive_requires_latency_bandwidth: "-r 需要配合 -b（带宽测试）或 -l + HOST:PORT（延迟测试）使用"
 
 help:
   group:
@@ -71,14 +78,14 @@ help:
     server: "服务端监听地址和端口"
     bandwidth: "带宽测试模式"
     count: "发送/接收次数（默认无限）。追加 's' 表示秒数（如 '10s'）"
-    interval: "间隔秒数（0 = 快速 ping）"
+    interval: "间隔秒数（默认 1，0 = 快速 ping）"
     size: "请求/负载大小（如 64, 8k, 1m）。有端口时触发延迟测试。"
     lang: "设置语言（如 en-US, zh-CN）。默认从系统自动检测。"
     udp: "UDP 模式（默认 TCP）"
     quiet: "不输出每次测试结果"
     histogram: "直方图: 桶数（如 20）或逗号分隔的毫秒阈值（如 1,5,10,50）"
     warmup: "预热迭代次数（默认 4）"
-    parallel: "并发连接数"
+    parallel: "并发连接数（默认 1）"
     v4: "强制使用 IPv4"
     v6: "强制使用 IPv6"
     json: "输出机器可读的 JSON 统计"
@@ -103,6 +110,7 @@ help:
   mode_guide: |-
     模式（自动识别）: host → ICMP | host:port → TCP | -u → UDP | -l SIZE → 延迟 | -b → 带宽 | -s → 服务端
     详细用法: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
+    互斥参数会直接报错: -4/-6、-s 与目标或客户端参数、--json 与 -p/-g/-H、无 -b/-l 时使用 -r
 
   usage_line: "帮助: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]\n   -h, --help            显示全部选项。\n   --help-icmp           ICMP ping 用法。\n   --help-tcp            TCP ping 用法。\n   --help-udp            UDP ping 用法。\n   --help-latency        延迟测试用法。\n   --help-bandwidth      带宽测试用法。\n   --help-server         服务端用法。"
 
@@ -143,7 +151,7 @@ help:
 
       参数同 ICMP ping（见 --help-icmp），但必须指定目标端口。
         -l SIZE  会进入延迟测试（见 --help-latency）
-        -r       普通 TCP ping 忽略
+        -r       需要 -b（带宽）或 -l（延迟），否则报错
 
       示例:
         prping -n 30 -i 0.1 -gp 192.168.1.1:22
