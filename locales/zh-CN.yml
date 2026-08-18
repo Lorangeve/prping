@@ -40,8 +40,9 @@ bandwidth:
 server:
   bandwidth_listening: "带宽测试服务端正在监听 %{addr}"
   connect_tag: "连接 "
+  sent_tag: "发送 "
   recv_tag: "接收 "
-  summary: "服务端汇总: %{conns} 个连接，共 %{bytes} 字节，耗时 %{secs}秒（平均 %{mbps} Mbps）"
+  summary: "服务端汇总: %{conns} 个连接，接收 %{bytes} 字节、发送 %{sent} 字节，耗时 %{secs}秒（平均 %{mbps} Mbps）"
 
 errors:
   raw_socket: "无法创建 raw socket: %{error}。需要 root 权限或 cap_net_raw"

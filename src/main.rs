@@ -398,6 +398,7 @@ fn main() -> anyhow::Result<()> {
                 "server.summary",
                 conns = report.connections,
                 bytes = report.bytes,
+                sent = report.sent,
                 secs = format!("{:.2}", report.secs),
                 mbps = format!("{:.2}", report.mbps)
             )

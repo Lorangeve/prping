@@ -78,6 +78,8 @@ fn server_tcp_receive_mode_trigger() {
     assert_eq!(report.connections, 2);
     // bytes 只统计客户端发来的数据（触发字节 1 个）
     assert_eq!(report.bytes, 1);
+    // sent 统计服务端触发模式发送的数据量
+    assert!(report.sent > 0, "sent={}", report.sent);
 }
 
 #[test]

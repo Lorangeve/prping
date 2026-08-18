@@ -40,8 +40,9 @@ bandwidth:
 server:
   bandwidth_listening: "Bandwidth server listening on %{addr}"
   connect_tag: "connect "
+  sent_tag: "sent "
   recv_tag: "recv "
-  summary: "server summary: %{conns} connections, %{bytes} bytes in %{secs}s (avg %{mbps} Mbps)"
+  summary: "server summary: %{conns} connections, %{bytes} bytes received, %{sent} bytes sent in %{secs}s (avg %{mbps} Mbps)"
 
 errors:
   raw_socket: "cannot create raw socket: %{error}. Requires root or cap_net_raw"

@@ -99,7 +99,10 @@ pub struct BandwidthReport {
 #[derive(Debug, Default)]
 pub struct ServerReport {
     pub connections: u64,
+    /// 服务端接收的字节数（普通 echo / 上行方向）。
     pub bytes: u64,
+    /// 服务端发送的字节数（-r 触发模式 / 下行方向）。
+    pub sent: u64,
     pub secs: f64,
     pub mbps: f64,
 }
@@ -222,6 +225,7 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
     let agg = Arc::new(ServerAgg {
         connections: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
+        sent: AtomicU64::new(0),
         micros: AtomicU64::new(0),
     });
 
@@ -297,6 +301,7 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
             stream.set_nodelay(true).ok();
             let mut buf = vec![0u8; 65536];
             let mut total: u64 = 0;
+            let mut sent_total: u64 = 0;
             let mut echo_ok = true;
             let start = std::time::Instant::now();
             loop {
@@ -304,13 +309,14 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
                     Ok(0) => break,
                     Ok(n) => {
                         total += n as u64;
-                        // 接收模式触发（0xFF 单字节）：持续回送数据
+                        // 接收模式触发（0xFF 单字节）：持续回送数据并统计发送量
                         if n == 1 && buf[0] == 0xFF && total == 1 {
                             let dummy = vec![0u8; 65536];
                             loop {
                                 if stream.write_all(&dummy).await.is_err() {
                                     break;
                                 }
+                                sent_total += dummy.len() as u64;
                             }
                             break;
                         }
@@ -333,13 +339,25 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
             let elapsed = start.elapsed().as_secs_f64();
             agg.connections.fetch_add(1, Ordering::Relaxed);
             agg.bytes.fetch_add(total, Ordering::Relaxed);
+            agg.sent.fetch_add(sent_total, Ordering::Relaxed);
             agg.micros
                 .fetch_add((elapsed * 1_000_000.0) as u64, Ordering::Relaxed);
 
             let ip = peer.ip().to_string();
             let port = peer.port();
             let mut w = output::stdout();
-            if total > 0 && elapsed > 0.0 {
+            if sent_total > 0 && elapsed > 0.0 {
+                // 服务端发送方向（-r 触发模式）：打印发送的数据量
+                let mbits = (sent_total as f64 * 8.0) / (elapsed * 1_000_000.0);
+                let size_str = format_bytes(sent_total);
+                let _ = output::print_green(&mut w, rust_i18n::t!("server.sent_tag"));
+                let _ = output::print_cyan(&mut w, format!("{ip}:{port} "));
+                let _ = output::print_yellow(
+                    &mut w,
+                    format!("{size_str} ({sent_total}) in {elapsed:.2}s — {mbits:.2} Mbps"),
+                );
+                let _ = writeln!(&mut w);
+            } else if total > 0 && elapsed > 0.0 {
                 let mbits = (total as f64 * 8.0) / (elapsed * 1_000_000.0);
                 let size_str = format_bytes(total);
                 let _ = output::print_green(&mut w, rust_i18n::t!("server.recv_tag"));
@@ -362,6 +380,7 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
     // 聚合报告（打印由调用方渲染）
     let conns = agg.connections.load(Ordering::Relaxed);
     let bytes = agg.bytes.load(Ordering::Relaxed);
+    let sent = agg.sent.load(Ordering::Relaxed);
     let micros = agg.micros.load(Ordering::Relaxed);
     let secs = micros as f64 / 1_000_000.0;
     let mbps = if secs > 0.0 {
@@ -372,6 +391,7 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
     Ok(ServerReport {
         connections: conns,
         bytes,
+        sent,
         secs,
         mbps,
     })
@@ -383,6 +403,7 @@ const MAX_CONNECTIONS: usize = 1024;
 struct ServerAgg {
     connections: AtomicU64,
     bytes: AtomicU64,
+    sent: AtomicU64,
     micros: AtomicU64,
 }
 
