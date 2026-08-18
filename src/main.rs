@@ -251,29 +251,27 @@ fn detect_locale() {
     }
     if let Ok(loc) = std::env::var("RUST_I18N_LOCALE") {
         rust_i18n::set_locale(&normalize_locale(&loc));
-        return;
-    }
-    if let Ok(loc) = std::env::var("LANG") {
+    } else if let Ok(loc) = std::env::var("LANG") {
         let loc = loc.split('.').next().unwrap_or("en");
         rust_i18n::set_locale(&normalize_locale(loc));
-        return;
-    }
-    // Windows：无 LANG 环境变量，用系统 UI 语言
-    #[cfg(windows)]
-    {
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetUserDefaultUILanguage() -> u16;
+    } else {
+        // Windows：无 LANG 环境变量，用系统 UI 语言
+        #[cfg(windows)]
+        {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetUserDefaultUILanguage() -> u16;
+            }
+            // SAFETY: 无参数、无指针，纯查询 API，任何线程安全。
+            let langid = unsafe { GetUserDefaultUILanguage() };
+            let primary = langid & 0x3FF;
+            let loc = match primary {
+                0x04 => "zh-CN", // 中文（含繁体，项目无繁体 locale，归入 zh-CN）
+                0x09 => "en-US", // 英语
+                _ => "en-US",
+            };
+            rust_i18n::set_locale(&normalize_locale(loc));
         }
-        // SAFETY: 无参数、无指针，纯查询 API，任何线程安全。
-        let langid = unsafe { GetUserDefaultUILanguage() };
-        let primary = langid & 0x3FF;
-        let loc = match primary {
-            0x04 => "zh-CN", // 中文（含繁体，项目无繁体 locale，归入 zh-CN）
-            0x09 => "en-US", // 英语
-            _ => "en-US",
-        };
-        rust_i18n::set_locale(&normalize_locale(loc));
     }
 }
 fn main() -> anyhow::Result<()> {
