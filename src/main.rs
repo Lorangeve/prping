@@ -91,7 +91,7 @@ fn cmd() -> impl Parser<Command> {
     let receive = long("receive")
         .short('r')
         .switch()
-        .help("Receive from server instead of sending");
+        .help(t!("help.options.receive").as_ref());
     let udp = long("udp")
         .short('u')
         .switch()
@@ -120,18 +120,18 @@ fn cmd() -> impl Parser<Command> {
     let pretty = long("pretty")
         .short('p')
         .switch()
-        .help("Use Unicode/Braille histogram rendering");
+        .help(t!("help.options.pretty").as_ref());
     let graph = long("graph")
         .short('g')
         .switch()
-        .help("Print latency timeline graph (with -p: ploot rendering)");
+        .help(t!("help.options.graph").as_ref());
     let json = long("json")
         .flag(true, false)
         .help(t!("help.options.json").as_ref());
     let version = long("version")
         .short('V')
         .flag(true, false)
-        .help("Show version");
+        .help(t!("help.options.version").as_ref());
     let target = positional::<String>("HOST[:PORT]").optional();
 
     construct!(Command {
