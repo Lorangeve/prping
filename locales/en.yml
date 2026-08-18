@@ -90,85 +90,133 @@ help:
 
   icmp: |-
     ICMP ping:
-      prping [-n count] [-i interval] [-l size] [-q] [-w warmup] [--histogram buckets] [-4] [-6] host
+      prping [-n count] [-i sec] [-l size] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host
 
-      -n           Number of pings. Append 's' for seconds e.g. '10s'.
-      -i           Interval in seconds (0 = fast ping).
-      -l           Request size. Append 'k' for KB, 'm' for MB.
-      -q           Suppress per-ping output.
-      -w           Warmup iterations (default 4).
-      --histogram  Print histogram (default 20 buckets) or custom thresholds.
-      -4           Force IPv4.
-      -6           Force IPv6.
+      Options:
+        -n N / -n Ns    Iterations, or seconds with 's' suffix (default: infinite)
+        -i S            Interval in seconds (0 = fast ping; clamped to 1ms min)
+        -l SIZE         Payload size (e.g. 64, 8k, 1m)
+        -g              Print latency timeline graph (default: off)
+        -p              Render graphs with ploot (Unicode/Braille)
+        -H N|t1,t2,...  Histogram: bucket count, or thresholds in ms (e.g. 1,5,10,50)
+        -w N            Warmup iterations (default 4)
+        -q              Suppress per-ping output
+        -4 / -6         Force IPv4 / IPv6
+        --json          Machine-readable JSON statistics
+        --lang          Language (en-US | zh-CN), default auto-detect
+
+      Examples:
+        prping 8.8.8.8                       ICMP ping (infinite, Ctrl+C to stop)
+        prping -n 10 8.8.8.8                  Ping 10 times
+        prping -n 5s -i 0.2 -gp 8.8.8.8       Run 5s at 0.2s interval with ploot graph
+        prping -l 64 -H "1,5,10,50" 8.8.8.8   64B payload with threshold histogram
+
+      Requires root or cap_net_raw on Linux.
 
   tcp: |-
     TCP ping:
-      prping [-n count] [-i interval] [-q] [-w warmup] [--histogram buckets] [-4] [-6] host:port
+      prping [-n count] [-i sec] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
 
-      Tests TCP port connectivity and measures connection latency.
-      Same options as ICMP ping, but requires a destination port.
+      Options: same as ICMP ping (see --help-icmp), but a target port is required.
+        -l SIZE  turns this into a latency test (see --help-latency)
+        -r       ignored for plain TCP ping
 
-  latency: |-
-    TCP/UDP latency test:
-      server: prping [-4] [-6] -s address:port
-      client: prping -l size[k|m] -n count[s] [-u] [-w warmup] [--histogram buckets] [-4] [-6] host:port
+      Examples:
+        prping 192.168.1.1:22                 TCP ping (infinite)
+        prping -n 30 -i 0.1 -gp 192.168.1.1:22   30 pings, ploot graph
+        prping -n 10s server:80               Run for 10 seconds
 
-      -l           Request size (required). Append 'k' for KB, 'm' for MB.
-      -n           Number of sends/receives. Append 's' for seconds e.g. '10s'.
-      -u           UDP mode (default is TCP).
-      -w           Warmup iterations (default 5).
-      --histogram  Print histogram (default 20 buckets).
-      -4           Force IPv4.
-      -6           Force IPv6.
-      -s           Server listening address and port.
-
-      Server handles both latency and bandwidth tests. Ctrl+C to stop.
-
-  bandwidth: |-
-    TCP/UDP bandwidth test:
-      server: prping [-4] [-6] -s address:port
-      client: prping -b -l size[k|m] -n count[s] [-u] [-P parallel] [-w warmup] [--histogram buckets]
-                    [-4] [-6] host:port
-
-      -b           Enable bandwidth test mode.
-      -l           Request size. Append 'k' for KB, 'm' for MB.
-      -n           Number of sends/receives. Append 's' for seconds e.g. '10s'.
-      -u           UDP mode (default is TCP).
-      -P           Number of parallel connections (default 4).
-      -w           Warmup iterations (default 2x CPU cores).
-      --histogram  Print histogram (default 20 buckets).
-      -4           Force IPv4.
-      -6           Force IPv6.
-      -s           Server listening address and port.
-
-      Server handles both latency and bandwidth tests. Ctrl+C to stop.
+      With server (echo):
+        server: prping -s 0.0.0.0:8080
+        client: prping -n 100 -gp server:8080
 
   udp: |-
     UDP ping:
-      prping -u [-n count] [-i interval] [-w warmup] [--histogram buckets] [-4] [-6] host:port
+      prping -u [-n count] [-i sec] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
 
-      -u           UDP mode (required).
-      -n           Number of pings. Append 's' for seconds e.g. '10s'.
-      -i           Interval in seconds (0 = fast ping).
-      -w           Warmup iterations (default 4).
-      --histogram  Print histogram (default 20 buckets).
-      -4           Force IPv4.
-      -6           Force IPv6.
+      Options:
+        -u           UDP mode (required)
+        -n N / -n Ns Iterations, or seconds with 's' suffix (default: infinite)
+        -i S         Interval in seconds (0 = fast ping)
+        -g           Print latency timeline graph
+        -p           Render graphs with ploot
+        -H N|t1,t2   Histogram: bucket count, or thresholds in ms
+        -w N         Warmup iterations (default 4)
+        -q           Suppress per-ping output
+        -4 / -6      Force IPv4 / IPv6
+        --json       Machine-readable JSON statistics
 
       Tests UDP port reachability and round-trip latency.
       Replies are validated by an embedded sequence number.
 
+      Examples:
+        prping -u -n 10 192.168.1.1:53           UDP ping 10 times
+        prping -u -n 5s -gp 192.168.1.1:53       UDP ping 5s with ploot graph
+
+      With server (echo):
+        server: prping -s 0.0.0.0:8080
+        client: prping -u -n 100 -gp server:8080
+
+  latency: |-
+    TCP/UDP latency test (echo round-trip):
+      server: prping [-4] [-6] -s address:port
+      client: prping -l size[k|m] -n count[s] [-u] [-r] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
+
+      Options:
+        -l SIZE      Request payload size (required; e.g. 64, 8k, 1m)
+        -n N / -n Ns Iterations, or seconds with 's' suffix (default: 100)
+        -u           UDP mode (default TCP)
+        -r           Receive mode: server sends data, client measures download latency
+        -g           Print latency timeline graph
+        -p           Render graphs with ploot
+        -H N|t1,t2   Histogram: bucket count, or thresholds in ms
+        -w N         Warmup iterations (default 4)
+        -4 / -6      Force IPv4 / IPv6
+        --json       Machine-readable JSON statistics
+
+      Examples:
+        server: prping -s 0.0.0.0:8080
+        client: prping -l 64 -n 100 -gp server:8080        TCP latency, 64B payload
+        client: prping -l 64 -n 10s -u -r server:8080       UDP receive-mode latency, 10s
+
+  bandwidth: |-
+    TCP/UDP bandwidth test:
+      server: prping [-4] [-6] -s address:port
+      client: prping -b -l size[k|m] -n count[s] [-P N] [-u] [-r] [-w warmup] [-H N|t1,t2,...] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
+
+      Options:
+        -b           Bandwidth mode (required)
+        -l SIZE      Packet size (default 8k; e.g. 8k, 1m)
+        -n N / -n Ns Packets, or seconds with 's' suffix (default: 10000)
+        -P N         Parallel TCP connections (TCP only; ignored with -u)
+        -u           UDP mode (default TCP)
+        -r           Receive mode (measure download direction)
+        -w N         Warmup packets (default 4)
+        -H N|t1,t2   Histogram of per-packet send time
+        -4 / -6      Force IPv4 / IPv6
+        --json       JSON: {"type":"bandwidth","bytes":...,"secs":...,"mbps":...}
+
+      Examples:
+        server: prping -s 0.0.0.0:8080
+        client: prping -b -l 8k -n 20000 -P 4 server:8080   TCP upload, 4 connections
+        client: prping -b -l 8k -n 10s -u -r server:8080     UDP download, 10 seconds
+
   server: |-
-    Server:
+    Server (serves latency & bandwidth clients):
       prping [-4] [-6] -s address:port
 
-      Serves latency and bandwidth tests over TCP and UDP on the same port:
+      Protocol on one port (TCP + UDP):
         TCP echo      Every packet echoed back (single 0xFF byte triggers stream mode)
         UDP echo      Every datagram echoed back
         UDP trigger   [0xFF,0xFF,size(2B BE),count(4B BE)] -> send count datagrams of size bytes
 
       Prints per-connection lines and an aggregate summary on Ctrl+C.
       Concurrent TCP connection cap: 1024.
+
+      Examples:
+        prping -s 0.0.0.0:8080                    Listen on all interfaces
+        prping -s 0.0.0.0:8080 -6                  Force IPv6 listener
+        client: prping -b -l 8k -n 10000 -P 4 host:8080
 
   examples: |-
     Examples:
