@@ -37,6 +37,10 @@ bandwidth:
   sent_bytes: "已发送 = %{bytes} 字节，耗时 %{secs}秒"
   received_bytes: "已接收 = %{bytes} 字节，耗时 %{secs}秒"
   bandwidth: "带宽 = %{mbps} Mbps"
+  progress:
+    packets: "%{done}/%{total} 包（%{done_bytes}/%{total_bytes}）  %{mbps} Mbps"
+    bytes: "%{done_bytes}/%{total_bytes}  %{mbps} Mbps"
+    time: "%{bytes}  %{mbps} Mbps"
 
 server:
   bandwidth_listening: "带宽测试服务端正在监听 %{addr}"

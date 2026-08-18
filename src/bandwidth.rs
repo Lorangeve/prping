@@ -5,12 +5,176 @@ use crate::stats::{self, HistogramSpec};
 use crate::util::{self, PingConfig};
 use rust_i18n::t;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use termcolor::StandardStream;
+
+/// 带宽测试实时进度条：同一行 `\r` 动态刷新（~100ms 限频）。
+///
+/// 仅当 stdout 为 tty 且非 `--json`/`-q` 时启用；非 tty（管道/文件）静默，
+/// 避免污染流式输出。时长模式按时间推进，次数模式按包（发送）/字节（接收）推进。
+struct Progress {
+    w: StandardStream,
+    enabled: bool,
+    start: Instant,
+    last: Instant,
+    kind: ProgressKind,
+    /// 次数模式里程碑步长：每 total/20 强制刷新一次（快速测试也能看到进度）
+    milestone_step: u64,
+    next_milestone: u64,
+}
+
+enum ProgressKind {
+    /// 次数模式 + 发送方向：按包数推进
+    Packets { total: u64, size: u64 },
+    /// 次数模式 + 接收方向：按字节推进
+    Bytes { total: u64 },
+    /// 时长模式：按时间推进
+    Time { duration: f64 },
+}
+
+const BAR_WIDTH: usize = 20;
+
+/// 构造进度条：时长模式按时间；次数模式按包（发送）/字节（接收）。
+fn make_progress(
+    duration: Option<f64>,
+    count: u64,
+    size: u64,
+    receive: bool,
+    quiet: bool,
+) -> Progress {
+    let kind = match duration {
+        Some(d) => ProgressKind::Time { duration: d },
+        None if receive => ProgressKind::Bytes {
+            total: count.saturating_mul(size),
+        },
+        None => ProgressKind::Packets { total: count, size },
+    };
+    Progress::new(kind, quiet)
+}
+
+impl Progress {
+    fn new(kind: ProgressKind, quiet: bool) -> Self {
+        let enabled = !quiet && !stats::json() && std::io::stdout().is_terminal();
+        let now = Instant::now();
+        // 次数模式每 5% 一个里程碑；时长模式只按时间刷新
+        let (milestone_step, next_milestone) = match &kind {
+            ProgressKind::Packets { total, .. } => {
+                let s = (total / 20).max(1);
+                (s, s)
+            }
+            ProgressKind::Bytes { total } => {
+                let s = (total / 20).max(1);
+                (s, s)
+            }
+            ProgressKind::Time { .. } => (0, u64::MAX),
+        };
+        Self {
+            w: output::stdout(),
+            enabled,
+            start: now,
+            last: now,
+            kind,
+            milestone_step,
+            next_milestone,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// 刷新：100ms 时间限频 + 每 5% 里程碑强制刷新。
+    fn update(&mut self, done: u64, bytes: u64) {
+        if !self.enabled {
+            return;
+        }
+        let now = Instant::now();
+        let milestone = self.milestone_step > 0 && done >= self.next_milestone;
+        let due = milestone || now.duration_since(self.last) >= Duration::from_millis(100);
+        if !due {
+            return;
+        }
+        if milestone {
+            self.next_milestone = self.next_milestone.saturating_add(self.milestone_step);
+        }
+        self.last = now;
+        self.render(done, bytes);
+    }
+
+    /// 打印最终进度行并换行（测试结束）。
+    fn finish(&mut self, done: u64, bytes: u64) {
+        if !self.enabled {
+            return;
+        }
+        self.render(done, bytes);
+        let _ = writeln!(&mut self.w);
+    }
+
+    fn render(&mut self, done: u64, bytes: u64) {
+        let elapsed = self.start.elapsed().as_secs_f64().max(0.001);
+        let mbits = bytes as f64 * 8.0 / elapsed / 1_000_000.0;
+        let (pct, stats) = match &self.kind {
+            ProgressKind::Packets { total, size } => {
+                let pct = if *total > 0 {
+                    done as f64 / *total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                let stats = t!(
+                    "bandwidth.progress.packets",
+                    done = done,
+                    total = total,
+                    done_bytes = crate::format_bytes(bytes),
+                    total_bytes = crate::format_bytes(total.saturating_mul(*size)),
+                    mbps = format!("{mbits:.2}")
+                );
+                (pct, stats)
+            }
+            ProgressKind::Bytes { total } => {
+                let pct = if *total > 0 {
+                    bytes as f64 / *total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                let stats = t!(
+                    "bandwidth.progress.bytes",
+                    done_bytes = crate::format_bytes(bytes),
+                    total_bytes = crate::format_bytes(*total),
+                    mbps = format!("{mbits:.2}")
+                );
+                (pct, stats)
+            }
+            ProgressKind::Time { duration } => {
+                let pct = if *duration > 0.0 {
+                    elapsed / *duration * 100.0
+                } else {
+                    0.0
+                };
+                let stats = t!(
+                    "bandwidth.progress.time",
+                    bytes = crate::format_bytes(bytes),
+                    mbps = format!("{mbits:.2}")
+                );
+                (pct, stats)
+            }
+        };
+        let pct = pct.min(100.0);
+        let filled = ((pct / 100.0) * BAR_WIDTH as f64).round() as usize;
+        let bar: String = "#".repeat(filled) + &"-".repeat(BAR_WIDTH - filled);
+        let mut line = format!("\r[{bar}] {pct:>3.0}%  {stats}");
+        // 补齐到固定宽度，覆盖上一行残留
+        if line.len() < 80 {
+            line.push_str(&" ".repeat(80 - line.len()));
+        }
+        let _ = write!(self.w, "{line}");
+        let _ = self.w.flush();
+    }
+}
 
 pub fn run_client(cfg: &PingConfig) -> anyhow::Result<crate::BandwidthReport> {
     let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
@@ -83,6 +247,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let mut buf = vec![0u8; 65536];
         let mut total: u64 = 0;
         let start = Instant::now();
+        let mut prog = make_progress(duration, count, size as u64, true, cfg.quiet);
         while total < target_bytes {
             if util::interrupted() {
                 break;
@@ -99,7 +264,9 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             if target_bytes != u64::MAX && total > target_bytes {
                 total = target_bytes;
             }
+            prog.update(0, total);
         }
+        prog.finish(0, total);
         return report(
             t!("bandwidth.tcp_test"),
             total,
@@ -120,6 +287,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
         let mut sent: u64 = 0;
         let start = Instant::now();
+        let mut prog = make_progress(duration, count, size as u64, false, cfg.quiet);
         loop {
             if util::interrupted() {
                 break;
@@ -136,10 +304,12 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                 times.push(t0.elapsed());
             }
             sent += 1;
+            prog.update(sent, sent * size as u64);
         }
         // 优雅结束发送方向：避免 RST 清队列导致服务端统计偏小
         util::drain_after_send(&mut stream).await;
         drop(stream);
+        prog.finish(sent, sent * size as u64);
         report(
             t!("bandwidth.tcp_test"),
             sent * size as u64,
@@ -158,11 +328,13 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             count.div_ceil(parallel as u64)
         };
         let remaining = Arc::new(AtomicU64::new(count));
+        let done = Arc::new(AtomicU64::new(0));
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
         let mut tasks = Vec::new();
         for _ in 0..parallel {
             let a = addr;
             let rem = remaining.clone();
+            let done = done.clone();
             tasks.push(smol::spawn(async move {
                 let mut stream = util::connect_timeout(a).await?;
                 stream.set_nodelay(true)?;
@@ -193,16 +365,50 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                     }
                     stream.write_all(&payload).await?;
                     sent += 1;
+                    done.fetch_add(1, Ordering::Relaxed);
                 }
                 util::drain_after_send(&mut stream).await;
                 Ok::<_, anyhow::Error>(sent)
             }));
         }
+        // 进度条：并行发送期间主循环在等待，用独立 task 每 100ms 刷新
+        let prog = Arc::new(std::sync::Mutex::new(make_progress(
+            duration,
+            count,
+            size as u64,
+            false,
+            cfg.quiet,
+        )));
+        let stop = Arc::new(AtomicBool::new(false));
+        let prog_task = if prog.lock().unwrap().enabled() {
+            let prog = prog.clone();
+            let done = done.clone();
+            let stop = stop.clone();
+            Some(smol::spawn(async move {
+                loop {
+                    smol::Timer::after(Duration::from_millis(100)).await;
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let d = done.load(Ordering::Relaxed);
+                    prog.lock().unwrap().update(d, d * size as u64);
+                }
+            }))
+        } else {
+            None
+        };
         let start = Instant::now();
         let mut total_sent: u64 = 0;
         for t in tasks {
             total_sent += t.await?;
         }
+        stop.store(true, Ordering::Relaxed);
+        if let Some(t) = prog_task {
+            let _ = t.await;
+        }
+        prog.lock()
+            .unwrap()
+            .finish(total_sent, total_sent * size as u64);
         report(
             t!("bandwidth.tcp_test"),
             total_sent * size as u64,
@@ -260,6 +466,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); 65536];
         let mut total: u64 = 0;
         let start = Instant::now();
+        let mut prog = make_progress(duration, count, size as u64, true, cfg.quiet);
         while total < target {
             if util::interrupted() {
                 break;
@@ -273,10 +480,14 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             })
             .await;
             match recv {
-                Ok((n, _)) => total += n as u64,
+                Ok((n, _)) => {
+                    total += n as u64;
+                    prog.update(0, total);
+                }
                 Err(_) => break,
             }
         }
+        prog.finish(0, total);
         return report(
             t!("bandwidth.udp_test"),
             total,
@@ -293,6 +504,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
     let mut times = Vec::new();
     let mut sent: u64 = 0;
     let start = Instant::now();
+    let mut prog = make_progress(duration, count, size as u64, false, cfg.quiet);
     loop {
         if util::interrupted() {
             break;
@@ -309,7 +521,9 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             times.push(t0.elapsed());
         }
         sent += 1;
+        prog.update(sent, sent * size as u64);
     }
+    prog.finish(sent, sent * size as u64);
     report(
         t!("bandwidth.udp_test"),
         sent * size as u64,

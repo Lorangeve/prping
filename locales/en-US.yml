@@ -37,6 +37,10 @@ bandwidth:
   sent_bytes: "Sent = %{bytes} bytes in %{secs}s"
   received_bytes: "Received = %{bytes} bytes in %{secs}s"
   bandwidth: "Bandwidth = %{mbps} Mbps"
+  progress:
+    packets: "%{done}/%{total} pkts (%{done_bytes}/%{total_bytes})  %{mbps} Mbps"
+    bytes: "%{done_bytes}/%{total_bytes}  %{mbps} Mbps"
+    time: "%{bytes}  %{mbps} Mbps"
 
 server:
   bandwidth_listening: "Bandwidth server listening on %{addr}"

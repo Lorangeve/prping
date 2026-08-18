@@ -49,6 +49,7 @@ prping -g HOST:PORT        TCP ping + 时间线图（-gp 用 ploot 渲染）
 8. `--json` 机器可读输出、`--version`、退出码反映丢包
 9. `-H` 自定义阈值直方图（psping `-h` 对齐）
 10. 服务端聚合统计（Ctrl+C 退出时打印）
+11. 带宽测试实时进度条（`-b`）——`\r` 同行动态刷新；时长模式按时间、次数模式按包（每 5% 里程碑 + 100ms 限频）；仅 tty 显示，管道/`--json`/`-q` 静默（`bandwidth.rs::Progress`）
 
 ## 编码约定
 
