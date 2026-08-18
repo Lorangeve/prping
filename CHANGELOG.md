@@ -6,6 +6,7 @@
 
 ### 新增
 
+- `--json` 模式运行期间隐藏终端回显的 `^C`（Unix 且 stdin 为 tty 时；`^C` 为终端行规程回显、本就不进入 stdout 管道，退出时恢复终端设置）
 - 互斥参数校验：冲突组合输出红色错误并退出码 1（`-4`/`-6`、`-s` 与目标或客户端参数、`--json` 与 `-p`/`-g`/`-H`、无 `-b`/`-l` 时使用 `-r`）；clamp/忽略类提示改为橙色输出
 - Windows 7 兼容构建：`x86_64-win7-windows-gnu` 目标 + nightly `build-std`（MSVCRT 链接，见 README）
 - `-g`/`--graph`：显式显示时间线图（默认不再自动打印；`-gp` 用 ploot 渲染）

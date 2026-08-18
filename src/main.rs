@@ -476,6 +476,10 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // --json 模式：隐藏终端回显的 ^C（Unix 且 stdin 为 tty 时；Drop 时恢复原设置）。
+    // ^C 是终端行规程回显、从不进入 stdout 管道，这里只做显示层清理。
+    let _ctrl_echo = suppress_ctrl_c_echo(cmd.output.json);
+
     // Set output modes before any output
     set_pretty(cmd.output.pretty);
     set_json(cmd.output.json);
@@ -560,15 +564,18 @@ fn main() -> anyhow::Result<()> {
             };
             // 有丢包时以非零退出码结束（脚本友好）
             if has_loss {
+                drop(_ctrl_echo); // 先恢复终端设置再退出（process::exit 不跑析构）
                 std::process::exit(1);
             }
         }
         Err(PrpingError::UdpRequiresPort) => {
+            drop(_ctrl_echo);
             let mut w = stderr();
             let _ = writeln_red(&mut w, t!("errors.udp_requires_port"));
             std::process::exit(1);
         }
         Err(PrpingError::BandwidthRequiresPort) => {
+            drop(_ctrl_echo);
             let mut w = stderr();
             let _ = writeln_red(&mut w, t!("errors.bandwidth_requires_port"));
             std::process::exit(1);
@@ -590,6 +597,61 @@ fn render_warning(w: PrpingWarning) -> String {
             t!("errors.udp_size_clamped", size = requested, max = max).to_string()
         }
     }
+}
+
+/// 运行期间隐藏终端回显 `^C` 的 guard：构造时关闭 stdin tty 的 ECHOCTL，
+/// Drop 时恢复原 termios。
+///
+/// `^C` 由终端行规程（ECHOCTL）回显到屏幕，**从不进入 stdout 管道**——
+/// 这里只做显示层清理，避免 `--json` 流式输出时屏幕上混入 `^C`。
+/// 仅在 stdin 为 tty（交互运行）时生效；stdin 被重定向时返回 None。
+#[cfg(unix)]
+struct CtrlCEchoGuard {
+    original: libc::termios,
+}
+
+#[cfg(unix)]
+impl Drop for CtrlCEchoGuard {
+    fn drop(&mut self) {
+        // SAFETY: 恢复我们修改前的 termios；tcsetattr 失败可忽略（终端已关闭等）。
+        unsafe {
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct CtrlCEchoGuard;
+
+/// `--json` 模式隐藏终端回显的 `^C`（Unix 且 stdin 为 tty 时；Windows 控制台不回显 `^C`）。
+///
+/// 第二次 Ctrl+C 走 `_exit` 不会恢复 termios——那是信号安全限制下的取舍，
+/// 残留的只是 ECHOCTL 关闭（纯显示层，无害）。
+#[cfg(unix)]
+fn suppress_ctrl_c_echo(enable: bool) -> Option<CtrlCEchoGuard> {
+    if !enable {
+        return None;
+    }
+    // SAFETY: isatty 为纯查询调用。
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return None;
+    }
+    // SAFETY: tcgetattr/tcsetattr 为常规 termios 查询/设置；仅修改 ECHOCTL 一位。
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut t) } != 0 {
+        return None;
+    }
+    let original = t;
+    t.c_lflag &= !libc::ECHOCTL;
+    if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t) } != 0 {
+        return None;
+    }
+    Some(CtrlCEchoGuard { original })
+}
+
+#[cfg(not(unix))]
+fn suppress_ctrl_c_echo(_enable: bool) -> Option<CtrlCEchoGuard> {
+    None
 }
 
 /// 安装 Ctrl+C 处理器：首次按下置位中断标志（优雅停止并输出统计），再次按下立即退出。
