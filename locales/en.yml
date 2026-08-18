@@ -58,6 +58,13 @@ errors:
   invalid_ipv6: "invalid IPv6 format: [host] or [host]:port"
 
 help:
+  group:
+    mode: "Mode (auto-detected)"
+    test: "Test control"
+    output: "Output"
+    network: "Network"
+    server: "Server"
+    other: "Other"
   options:
     server: "Server listening address and port"
     bandwidth: "Bandwidth test mode"
@@ -89,6 +96,10 @@ help:
 
     Implements ICMP ping, TCP ping, UDP ping, UDP/TCP latency,
     and UDP/TCP bandwidth measurement.
+
+  mode_guide: |-
+    Modes (auto-detected): host → ICMP | host:port → TCP | -u → UDP | -l SIZE → Latency | -b → Bandwidth | -s → Server
+    Detailed help: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
 
   usage_line: "Help: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]\n   -h, --help            Show all options.\n   --help-icmp           ICMP ping usage.\n   --help-tcp            TCP ping usage.\n   --help-udp            UDP ping usage.\n   --help-latency        Latency test usage.\n   --help-bandwidth      Bandwidth test usage.\n   --help-server         Server usage."
 

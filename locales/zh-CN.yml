@@ -58,6 +58,13 @@ errors:
   invalid_ipv6: "无效的 IPv6 格式: [host] 或 [host]:port"
 
 help:
+  group:
+    mode: "模式（自动识别）"
+    test: "测试控制"
+    output: "输出"
+    network: "网络"
+    server: "服务端"
+    other: "其他"
   options:
     server: "服务端监听地址和端口"
     bandwidth: "带宽测试模式"
@@ -89,6 +96,10 @@ help:
 
     实现 ICMP ping, TCP ping, UDP ping, TCP/UDP 延迟测试,
     以及 TCP/UDP 带宽测试。
+
+  mode_guide: |-
+    模式（自动识别）: host → ICMP | host:port → TCP | -u → UDP | -l SIZE → 延迟 | -b → 带宽 | -s → 服务端
+    详细用法: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
 
   usage_line: "帮助: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]\n   -h, --help            显示全部选项。\n   --help-icmp           ICMP ping 用法。\n   --help-tcp            TCP ping 用法。\n   --help-udp            UDP ping 用法。\n   --help-latency        延迟测试用法。\n   --help-bandwidth      带宽测试用法。\n   --help-server         服务端用法。"
 

@@ -134,6 +134,35 @@ fn cmd() -> impl Parser<Command> {
         .help(t!("help.options.version").as_ref());
     let target = positional::<String>("HOST[:PORT]").optional();
 
+    // 按语义分组，帮助中分组展示（group_help 应用于内层组合）
+    let mode = construct!(ModeGroup {
+        bandwidth,
+        req_size,
+        receive,
+        udp
+    })
+    .group_help(t!("help.group.mode").as_ref());
+    let test = construct!(TestGroup {
+        count,
+        interval,
+        quiet,
+        histogram,
+        warmup,
+        parallel
+    })
+    .group_help(t!("help.group.test").as_ref());
+    let output = construct!(OutputGroup {
+        lang,
+        pretty,
+        graph,
+        json
+    })
+    .group_help(t!("help.group.output").as_ref());
+    let network = construct!(NetworkGroup { v4, v6 }).group_help(t!("help.group.network").as_ref());
+    let server_grp =
+        construct!(ServerGroup { server }).group_help(t!("help.group.server").as_ref());
+    let other = construct!(OtherGroup { version }).group_help(t!("help.group.other").as_ref());
+
     construct!(Command {
         help_icmp,
         help_tcp,
@@ -141,24 +170,12 @@ fn cmd() -> impl Parser<Command> {
         help_bandwidth,
         help_udp,
         help_server,
-        server,
-        bandwidth,
-        count,
-        interval,
-        req_size,
-        lang,
-        receive,
-        udp,
-        quiet,
-        histogram,
-        warmup,
-        parallel,
-        v4,
-        v6,
-        pretty,
-        graph,
-        json,
-        version,
+        mode,
+        test,
+        output,
+        network,
+        server_grp,
+        other,
         target,
     })
 }
@@ -192,6 +209,48 @@ fn parse_count(s: &str) -> anyhow::Result<(u64, Option<f64>)> {
 }
 
 /// UDP 数据报负载上限（IPv4 65507 / IPv6 65527，取保守值），超限时 clamp 并提示。
+/// 模式组（自动识别）：-b 带宽 / -l 延迟 / -r 接收 / -u UDP
+struct ModeGroup {
+    bandwidth: bool,
+    req_size: Option<String>,
+    receive: bool,
+    udp: bool,
+}
+
+/// 测试控制组
+struct TestGroup {
+    count: Option<String>,
+    interval: f64,
+    quiet: bool,
+    histogram: Option<String>,
+    warmup: u64,
+    parallel: u32,
+}
+
+/// 输出组
+struct OutputGroup {
+    lang: Option<String>,
+    pretty: bool,
+    graph: bool,
+    json: bool,
+}
+
+/// 网络组
+struct NetworkGroup {
+    v4: bool,
+    v6: bool,
+}
+
+/// 服务端组
+struct ServerGroup {
+    server: Option<String>,
+}
+
+/// 其他组
+struct OtherGroup {
+    version: bool,
+}
+
 struct Command {
     help_icmp: bool,
     help_tcp: bool,
@@ -199,24 +258,12 @@ struct Command {
     help_bandwidth: bool,
     help_udp: bool,
     help_server: bool,
-    server: Option<String>,
-    bandwidth: bool,
-    count: Option<String>,
-    interval: f64,
-    req_size: Option<String>,
-    lang: Option<String>,
-    udp: bool,
-    quiet: bool,
-    histogram: Option<String>,
-    warmup: u64,
-    parallel: u32,
-    v4: bool,
-    v6: bool,
-    pretty: bool,
-    graph: bool,
-    json: bool,
-    version: bool,
-    receive: bool,
+    mode: ModeGroup,
+    test: TestGroup,
+    output: OutputGroup,
+    network: NetworkGroup,
+    server_grp: ServerGroup,
+    other: OtherGroup,
     target: Option<String>,
 }
 
@@ -280,14 +327,17 @@ fn main() -> anyhow::Result<()> {
     detect_locale();
     install_interrupt_handler()?;
 
-    let cmd = cmd().run();
+    let cmd = cmd()
+        .to_options()
+        .footer(t!("help.mode_guide").as_ref())
+        .run();
 
     // --lang 参数（--help 的本地化已由 detect_locale 预扫描保证）
-    if let Some(loc) = &cmd.lang {
+    if let Some(loc) = &cmd.output.lang {
         rust_i18n::set_locale(&normalize_locale(loc));
     }
 
-    if cmd.version {
+    if cmd.other.version {
         println!("prping {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
@@ -319,12 +369,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Set output modes before any output
-    set_pretty(cmd.pretty);
-    set_json(cmd.json);
+    set_pretty(cmd.output.pretty);
+    set_json(cmd.output.json);
 
     // No args: show summary (bpaf handles -h/--help with i18n descriptions)
     if cmd.target.is_none()
-        && cmd.server.is_none()
+        && cmd.server_grp.server.is_none()
         && !cmd.help_icmp
         && !cmd.help_tcp
         && !cmd.help_latency
@@ -336,7 +386,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if let Some(addr) = &cmd.server {
+    if let Some(addr) = &cmd.server_grp.server {
         let addr: SocketAddr = addr
             .parse()
             .map_err(|_| anyhow::anyhow!(t!("errors.invalid_bind", addr = addr.as_str())))?;
@@ -361,10 +411,10 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!(t!("errors.host_port_required")))?;
 
     let (host, port) = parse_target(target)?;
-    let hist = cmd.histogram.as_deref().and_then(parse_histogram);
+    let hist = cmd.test.histogram.as_deref().and_then(parse_histogram);
 
     // 次数/时长解析（-n 10 或 -n 10s），非法值直接报错
-    let (cnt, dur) = match cmd.count.as_deref() {
+    let (cnt, dur) = match cmd.test.count.as_deref() {
         Some(s) => parse_count(s)?,
         None => (0, None),
     };
@@ -374,18 +424,18 @@ fn main() -> anyhow::Result<()> {
         port: port.unwrap_or(0),
         count: cnt,
         duration: dur,
-        interval: cmd.interval,
-        size: cmd.req_size.as_deref().map(parse_size).transpose()?,
-        quiet: cmd.quiet,
+        interval: cmd.test.interval,
+        size: cmd.mode.req_size.as_deref().map(parse_size).transpose()?,
+        quiet: cmd.test.quiet,
         histogram: hist,
-        warmup: cmd.warmup,
-        v4: cmd.v4,
-        v6: cmd.v6,
-        parallel: cmd.parallel,
-        udp: cmd.udp,
-        receive: cmd.receive,
-        bandwidth: cmd.bandwidth,
-        graph: cmd.graph,
+        warmup: cmd.test.warmup,
+        v4: cmd.network.v4,
+        v6: cmd.network.v6,
+        parallel: cmd.test.parallel,
+        udp: cmd.mode.udp,
+        receive: cmd.mode.receive,
+        bandwidth: cmd.mode.bandwidth,
+        graph: cmd.output.graph,
     };
 
     // 统一入口：模式识别、clamp、忽略提示都在 lib 的 run() 内
