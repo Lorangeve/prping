@@ -9,7 +9,7 @@
 - Windows 7 兼容构建：`x86_64-win7-windows-gnu` 目标 + nightly `build-std`（MSVCRT 链接，见 README）
 - `-g`/`--graph`：显式显示时间线图（默认不再自动打印；`-gp` 用 ploot 渲染）
 - `-p`/`--pretty` 改用 [ploot](https://github.com/ploot-rs/ploot) 渲染：Unicode 柱状图直方图 + Braille 散点时间线（管道下自动剥离 ANSI）
-- `--json` 机器可读统计输出（ping 带 `type` 字段，带宽带 `bytes`/`mbps`）
+- `--json` 改为 JSONL：每次测量一行（含 seq/rtt_ms 或 error），末尾汇总行带 `summary:true`；带宽带 `direction` 字段
 - `--version` / `-V`
 - `-H` 自定义阈值直方图（逗号分隔毫秒阈值，如 `-H "1,5,10,50"`）
 - 服务端聚合统计（Ctrl+C 退出时打印连接数/字节/平均吞吐）

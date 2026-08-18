@@ -100,6 +100,17 @@ async fn run_tcp_client(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Res
                     }
                     if !stats::json() {
                         print_latency(&mut w, addrs[0], rtt, cfg.size.unwrap(), is_warmup)?;
+                    } else if !is_warmup {
+                        let tgt = format!("{}:{}", cfg.host, cfg.port);
+                        stats::json_sample(
+                            &mut w,
+                            "latency",
+                            &tgt,
+                            run.seq(),
+                            true,
+                            Some(rtt),
+                            None,
+                        )?;
                     }
                 }
                 Err(_) => {
@@ -108,6 +119,17 @@ async fn run_tcp_client(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Res
                     }
                     if !stats::json() {
                         output::writeln_red(&mut w, t!("common.timeout"))?;
+                    } else if !is_warmup {
+                        let tgt = format!("{}:{}", cfg.host, cfg.port);
+                        stats::json_sample(
+                            &mut w,
+                            "latency",
+                            &tgt,
+                            run.seq(),
+                            false,
+                            None,
+                            Some("timeout"),
+                        )?;
                     }
                 }
             }
@@ -135,6 +157,9 @@ async fn run_tcp_client(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Res
                 }
                 if !stats::json() {
                     print_latency(&mut w, addrs[0], rtt, cfg.size.unwrap(), is_warmup)?;
+                } else if !is_warmup {
+                    let tgt = format!("{}:{}", cfg.host, cfg.port);
+                    stats::json_sample(&mut w, "latency", &tgt, run.seq(), true, Some(rtt), None)?;
                 }
             }
             Err(_) => {
@@ -143,6 +168,17 @@ async fn run_tcp_client(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Res
                 }
                 if !stats::json() {
                     output::writeln_red(&mut w, t!("common.timeout"))?;
+                } else if !is_warmup {
+                    let tgt = format!("{}:{}", cfg.host, cfg.port);
+                    stats::json_sample(
+                        &mut w,
+                        "latency",
+                        &tgt,
+                        run.seq(),
+                        false,
+                        None,
+                        Some("timeout"),
+                    )?;
                 }
             }
         }
@@ -202,6 +238,9 @@ async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<St
                 }
                 if !stats::json() {
                     print_latency(&mut w, addr, rtt, n, is_warmup)?;
+                } else if !is_warmup {
+                    let tgt = format!("{}:{}", cfg.host, cfg.port);
+                    stats::json_sample(&mut w, "latency", &tgt, run.seq(), true, Some(rtt), None)?;
                 }
             }
             _ => {
@@ -210,6 +249,17 @@ async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<St
                 }
                 if !stats::json() {
                     output::writeln_red(&mut w, t!("common.timeout"))?;
+                } else if !is_warmup {
+                    let tgt = format!("{}:{}", cfg.host, cfg.port);
+                    stats::json_sample(
+                        &mut w,
+                        "latency",
+                        &tgt,
+                        run.seq(),
+                        false,
+                        None,
+                        Some("timeout"),
+                    )?;
                 }
             }
         }

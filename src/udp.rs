@@ -92,6 +92,7 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stat
             }
         };
 
+        let target_str = format!("{}:{}", cfg.host, cfg.port);
         match result {
             Ok((rtt, src, n)) => {
                 if !is_warmup {
@@ -99,6 +100,16 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stat
                 }
                 if !cfg.quiet && !stats::json() {
                     print_reply(&mut w, src, n, rtt, is_warmup)?;
+                } else if stats::json() && !is_warmup {
+                    stats::json_sample(
+                        &mut w,
+                        "udp",
+                        &target_str,
+                        run.seq(),
+                        true,
+                        Some(rtt),
+                        None,
+                    )?;
                 }
             }
             Err(_) => {
@@ -107,6 +118,16 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stat
                 }
                 if !cfg.quiet && !stats::json() {
                     output::writeln_red(&mut w, t!("common.timeout"))?;
+                } else if stats::json() && !is_warmup {
+                    stats::json_sample(
+                        &mut w,
+                        "udp",
+                        &target_str,
+                        run.seq(),
+                        false,
+                        None,
+                        Some("timeout"),
+                    )?;
                 }
             }
         }

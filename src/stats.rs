@@ -134,6 +134,38 @@ impl Stats {
     }
 }
 
+/// 输出 JSONL 逐次测量行：`{"type","target","ts","seq","ok","rtt_ms"|"error"}`。
+///
+/// `--json` 时每次 ping 实时输出一行，结束后另有汇总行（print_summary）。
+pub fn json_sample(
+    w: &mut StandardStream,
+    mode: &str,
+    target: &str,
+    seq: u64,
+    ok: bool,
+    rtt: Option<Duration>,
+    err: Option<&str>,
+) -> Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let target = target.replace('"', "\\\"");
+    if ok {
+        let ms = rtt.map(|r| r.as_secs_f64() * 1000.0).unwrap_or(0.0);
+        writeln!(
+            w,
+            "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"seq\":{seq},\"ok\":true,\"rtt_ms\":{ms:.2}}}"
+        )
+    } else {
+        let err = err.unwrap_or("error").replace('"', "\\\"");
+        writeln!(
+            w,
+            "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"seq\":{seq},\"ok\":false,\"error\":\"{err}\"}}"
+        )
+    }
+}
+
 /// `mode` 用于 JSON 输出（如 "icmp"/"tcp"/"udp"/"latency"），`target` 为被测主机。
 pub fn print_summary(
     w: &mut StandardStream,
@@ -149,7 +181,7 @@ pub fn print_summary(
             .unwrap_or(0);
         let target = target.replace('"', "\\\"");
         let mut line = format!(
-            "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"sent\":{},\"received\":{},\"lost\":{},\"loss_pct\":{:.1}",
+            "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"summary\":true,\"sent\":{},\"received\":{},\"lost\":{},\"loss_pct\":{:.1}",
             stats.sent,
             stats.received,
             stats.sent - stats.received,

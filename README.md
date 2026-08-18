@@ -131,12 +131,15 @@ $ prping -n 20 -i 0.1 -gp 127.0.0.1:22
 Latency timeline:（-gp 时 ploot Braille 散点 + 图例）
 ```
 
-`--json` 机器可读输出（脚本/监控）：
+`--json` 输出 JSONL（每行一条记录，实时可 tail -f；最后一行是汇总）：
 
 ```
 $ prping -n 3 -w 0 --json 127.0.0.1:22
-{"type":"tcp","target":"127.0.0.1:22","ts":1787030898,"sent":3,"received":3,"lost":0,
- "loss_pct":0.0,"min_ms":0.12,"max_ms":0.17,"avg_ms":0.15,"stddev_ms":0.02,
+{"type":"tcp","target":"127.0.0.1:22","ts":1787031710,"seq":0,"ok":true,"rtt_ms":0.26}
+{"type":"tcp","target":"127.0.0.1:22","ts":1787031711,"seq":1,"ok":true,"rtt_ms":0.31}
+{"type":"tcp","target":"127.0.0.1:22","ts":1787031711,"seq":2,"ok":true,"rtt_ms":0.28}
+{"type":"tcp","target":"127.0.0.1:22","ts":1787031712,"summary":true,"sent":3,"received":3,
+ "lost":0,"loss_pct":0.0,"min_ms":0.12,"max_ms":0.17,"avg_ms":0.15,"stddev_ms":0.02,
  "p50_ms":0.15,"p95_ms":0.17,"p99_ms":0.17}
 ```
 

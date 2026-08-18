@@ -73,6 +73,7 @@ async fn ping_async(addrs: Vec<std::net::SocketAddr>, cfg: &PingConfig) -> anyho
         }
         let is_warmup = run.is_warmup();
         let start = Instant::now();
+        let target = format!("{}:{}", cfg.host, cfg.port);
         // 5 秒 connect 超时 + 多地址回退
         match util::connect_first(&addrs).await {
             Ok(stream) => {
@@ -84,6 +85,8 @@ async fn ping_async(addrs: Vec<std::net::SocketAddr>, cfg: &PingConfig) -> anyho
                 }
                 if !cfg.quiet && !stats::json() {
                     print_connected(&mut w, peer, local, rtt, is_warmup)?;
+                } else if stats::json() && !is_warmup {
+                    stats::json_sample(&mut w, "tcp", &target, run.seq(), true, Some(rtt), None)?;
                 }
             }
             Err(e) => {
@@ -94,6 +97,16 @@ async fn ping_async(addrs: Vec<std::net::SocketAddr>, cfg: &PingConfig) -> anyho
                     output::writeln_red(
                         &mut w,
                         &t!("common.connect_failed", error = e.to_string()),
+                    )?;
+                } else if stats::json() && !is_warmup {
+                    stats::json_sample(
+                        &mut w,
+                        "tcp",
+                        &target,
+                        run.seq(),
+                        false,
+                        None,
+                        Some("connect failed"),
                     )?;
                 }
             }
