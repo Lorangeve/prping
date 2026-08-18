@@ -64,7 +64,7 @@ help:
     count: "发送/接收次数（默认无限）。追加 's' 表示秒数（如 '10s'）"
     interval: "间隔秒数（0 = 快速 ping）"
     size: "请求/负载大小（如 64, 8k, 1m）。有端口时触发延迟测试。"
-    lang: "设置语言（如 en, zh-CN）。默认从系统自动检测。"
+    lang: "设置语言（如 en-US, zh-CN）。默认从系统自动检测。"
     udp: "UDP 模式（默认 TCP）"
     quiet: "不输出每次测试结果"
     histogram: "直方图: 桶数（如 20）或逗号分隔的毫秒阈值（如 1,5,10,50）"
@@ -77,6 +77,8 @@ help:
     help_tcp: "TCP ping 用法"
     help_latency: "延迟测试用法"
     help_bandwidth: "带宽测试用法"
+    help_udp: "UDP ping 用法"
+    help_server: "服务端用法"
 
   overview: |-
     prping — ping, 延迟, 带宽测量工具
@@ -84,7 +86,7 @@ help:
     实现 ICMP ping, TCP ping, UDP ping, TCP/UDP 延迟测试,
     以及 TCP/UDP 带宽测试。
 
-  usage_line: "帮助: prping -h | --help [--help-icmp|--help-tcp|--help-latency|--help-bandwidth]\n   -h, --help            显示全部选项。\n   --help-icmp           ICMP ping 用法。\n   --help-tcp            TCP ping 用法。\n   --help-latency        延迟测试用法。\n   --help-bandwidth      带宽测试用法。"
+  usage_line: "帮助: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]\n   -h, --help            显示全部选项。\n   --help-icmp           ICMP ping 用法。\n   --help-tcp            TCP ping 用法。\n   --help-udp            UDP ping 用法。\n   --help-latency        延迟测试用法。\n   --help-bandwidth      带宽测试用法。\n   --help-server         服务端用法。"
 
   icmp: |-
     ICMP ping:
@@ -140,6 +142,31 @@ help:
       -s           服务端监听地址和端口
 
       服务端同时处理延迟和带宽测试，Ctrl+C 终止。
+
+  udp: |-
+    UDP ping:
+      prping -u [-n 次数] [-i 间隔] [-w 预热] [--histogram 桶数] [-4] [-6] 主机:端口
+
+      -u           UDP 模式（必选）
+      -n           次数，追加 's' 表示秒数（如 '10s'）
+      -i           间隔秒数（0 = 快速 ping）
+      -w           预热迭代次数（默认 4）
+      --histogram  打印直方图（默认 20 个桶）
+      -4           强制使用 IPv4
+      -6           强制使用 IPv6
+
+      测试 UDP 端口可达性和往返延迟，回包按内嵌序号校验。
+
+  server: |-
+    服务端:
+      prping [-4] [-6] -s 地址:端口
+
+      同一端口上同时服务延迟/带宽测试（TCP + UDP）：
+        TCP 回显    每个收到的包原样回送（单个 0xFF 字节触发流模式）
+        UDP 回显    每个数据报原样回送
+        UDP 触发    [0xFF,0xFF,size(2B BE),count(4B BE)] -> 回送 count 个 size 字节数据报
+
+      Ctrl+C 退出时打印每连接日志与聚合汇总。TCP 并发连接上限 1024。
 
   examples: |-
     示例:

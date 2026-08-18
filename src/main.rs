@@ -45,6 +45,14 @@ fn cmd() -> impl Parser<Command> {
         .switch()
         .help(t!("help.options.help_bandwidth").as_ref())
         .hide();
+    let help_udp = long("help-udp")
+        .switch()
+        .help(t!("help.options.help_udp").as_ref())
+        .hide();
+    let help_server = long("help-server")
+        .switch()
+        .help(t!("help.options.help_server").as_ref())
+        .hide();
 
     let server = long("server")
         .short('s')
@@ -131,6 +139,8 @@ fn cmd() -> impl Parser<Command> {
         help_tcp,
         help_latency,
         help_bandwidth,
+        help_udp,
+        help_server,
         server,
         bandwidth,
         count,
@@ -187,6 +197,8 @@ struct Command {
     help_tcp: bool,
     help_latency: bool,
     help_bandwidth: bool,
+    help_udp: bool,
+    help_server: bool,
     server: Option<String>,
     bandwidth: bool,
     count: Option<String>,
@@ -208,27 +220,60 @@ struct Command {
     target: Option<String>,
 }
 
-/// Auto-detect locale from env vars or --lang arg.
+/// 把 BCP-47 语言标识（en-US / zh-CN / en_US / zh）规范化到 rust-i18n 实际 locale。
+///
+/// locales 目录只有 `en.yml` 与 `zh-CN.yml`，所有输入统一映射：
+/// 中文系 → `zh-CN`，其余（含 en-US/en/en_GB...）→ `en`。
+fn normalize_locale(s: &str) -> String {
+    let s = s.trim().to_lowercase().replace('_', "-");
+    if s.starts_with("zh") {
+        "zh-CN".to_string()
+    } else {
+        "en".to_string()
+    }
+}
+
+/// Auto-detect locale from --lang / env vars / 系统 UI 语言（Windows）。
 fn detect_locale() {
     // Check raw args for --lang before parser construction (for --help i18n)
     let args: Vec<String> = std::env::args().collect();
     if let Some(pos) = args.iter().position(|a| a == "--lang")
         && let Some(loc) = args.get(pos + 1)
     {
-        rust_i18n::set_locale(loc);
+        rust_i18n::set_locale(&normalize_locale(loc));
         return;
     }
     for a in &args {
         if let Some(loc) = a.strip_prefix("--lang=") {
-            rust_i18n::set_locale(loc);
+            rust_i18n::set_locale(&normalize_locale(loc));
             return;
         }
     }
     if let Ok(loc) = std::env::var("RUST_I18N_LOCALE") {
-        rust_i18n::set_locale(&loc);
-    } else if let Ok(loc) = std::env::var("LANG") {
-        let loc = loc.split('.').next().unwrap_or("en").replace('_', "-");
-        rust_i18n::set_locale(&loc);
+        rust_i18n::set_locale(&normalize_locale(&loc));
+        return;
+    }
+    if let Ok(loc) = std::env::var("LANG") {
+        let loc = loc.split('.').next().unwrap_or("en");
+        rust_i18n::set_locale(&normalize_locale(loc));
+        return;
+    }
+    // Windows：无 LANG 环境变量，用系统 UI 语言
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetUserDefaultUILanguage() -> u16;
+        }
+        // SAFETY: 无参数、无指针，纯查询 API，任何线程安全。
+        let langid = unsafe { GetUserDefaultUILanguage() };
+        let primary = langid & 0x3FF;
+        let loc = match primary {
+            0x04 => "zh-CN", // 中文（含繁体，项目无繁体 locale，归入 zh-CN）
+            0x09 => "en-US", // 英语
+            _ => "en-US",
+        };
+        rust_i18n::set_locale(&normalize_locale(loc));
     }
 }
 fn main() -> anyhow::Result<()> {
@@ -241,7 +286,7 @@ fn main() -> anyhow::Result<()> {
 
     // --lang 参数（--help 的本地化已由 detect_locale 预扫描保证）
     if let Some(loc) = &cmd.lang {
-        rust_i18n::set_locale(loc);
+        rust_i18n::set_locale(&normalize_locale(loc));
     }
 
     if cmd.version {
@@ -266,6 +311,14 @@ fn main() -> anyhow::Result<()> {
         println!("{}", t!("help.bandwidth"));
         return Ok(());
     }
+    if cmd.help_udp {
+        println!("{}", t!("help.udp"));
+        return Ok(());
+    }
+    if cmd.help_server {
+        println!("{}", t!("help.server"));
+        return Ok(());
+    }
 
     // Set output modes before any output
     set_pretty(cmd.pretty);
@@ -278,6 +331,8 @@ fn main() -> anyhow::Result<()> {
         && !cmd.help_tcp
         && !cmd.help_latency
         && !cmd.help_bandwidth
+        && !cmd.help_udp
+        && !cmd.help_server
     {
         print_summary_help();
         return Ok(());

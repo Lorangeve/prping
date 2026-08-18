@@ -64,7 +64,7 @@ help:
     count: "Number of sends/receives (default: infinite). Append 's' for seconds e.g. '10s'"
     interval: "Interval in seconds (0 = fast ping)"
     size: "Request/payload size (e.g. 64, 8k, 1m). Triggers latency test when port present."
-    lang: "Set language (e.g. en, zh-CN). Default: auto-detect from system."
+    lang: "Set language (e.g. en-US, zh-CN). Default: auto-detect from system."
     udp: "UDP mode (default is TCP)"
     quiet: "Suppress per-ping output"
     histogram: "Histogram: bucket count (e.g. 20) or comma-separated thresholds in ms (e.g. 1,5,10,50)"
@@ -77,6 +77,8 @@ help:
     help_tcp: "TCP ping usage"
     help_latency: "Latency test usage"
     help_bandwidth: "Bandwidth test usage"
+    help_udp: "UDP ping usage"
+    help_server: "Server usage"
 
   overview: |-
     prping — ping, latency, bandwidth measurement utility
@@ -84,7 +86,7 @@ help:
     Implements ICMP ping, TCP ping, UDP ping, UDP/TCP latency,
     and UDP/TCP bandwidth measurement.
 
-  usage_line: "Help: prping -h | --help [--help-icmp|--help-tcp|--help-latency|--help-bandwidth]\n   -h, --help            Show all options.\n   --help-icmp           ICMP ping usage.\n   --help-tcp            TCP ping usage.\n   --help-latency        Latency test usage.\n   --help-bandwidth      Bandwidth test usage."
+  usage_line: "Help: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]\n   -h, --help            Show all options.\n   --help-icmp           ICMP ping usage.\n   --help-tcp            TCP ping usage.\n   --help-udp            UDP ping usage.\n   --help-latency        Latency test usage.\n   --help-bandwidth      Bandwidth test usage.\n   --help-server         Server usage."
 
   icmp: |-
     ICMP ping:
@@ -140,6 +142,33 @@ help:
       -s           Server listening address and port.
 
       Server handles both latency and bandwidth tests. Ctrl+C to stop.
+
+  udp: |-
+    UDP ping:
+      prping -u [-n count] [-i interval] [-w warmup] [--histogram buckets] [-4] [-6] host:port
+
+      -u           UDP mode (required).
+      -n           Number of pings. Append 's' for seconds e.g. '10s'.
+      -i           Interval in seconds (0 = fast ping).
+      -w           Warmup iterations (default 4).
+      --histogram  Print histogram (default 20 buckets).
+      -4           Force IPv4.
+      -6           Force IPv6.
+
+      Tests UDP port reachability and round-trip latency.
+      Replies are validated by an embedded sequence number.
+
+  server: |-
+    Server:
+      prping [-4] [-6] -s address:port
+
+      Serves latency and bandwidth tests over TCP and UDP on the same port:
+        TCP echo      Every packet echoed back (single 0xFF byte triggers stream mode)
+        UDP echo      Every datagram echoed back
+        UDP trigger   [0xFF,0xFF,size(2B BE),count(4B BE)] -> send count datagrams of size bytes
+
+      Prints per-connection lines and an aggregate summary on Ctrl+C.
+      Concurrent TCP connection cap: 1024.
 
   examples: |-
     Examples:
