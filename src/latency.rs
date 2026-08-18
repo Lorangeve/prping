@@ -13,7 +13,7 @@ use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
 pub fn run_client(cfg: &PingConfig) -> anyhow::Result<Stats> {
-    let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
+    let addrs = util::resolve_vec(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
     if cfg.host.parse::<IpAddr>().is_err() {
         let stripped = cfg
             .host
@@ -28,23 +28,23 @@ pub fn run_client(cfg: &PingConfig) -> anyhow::Result<Stats> {
                 t!(
                     "common.resolving",
                     host = cfg.host,
-                    ip = addr.ip().to_string()
+                    ip = addrs[0].ip().to_string()
                 )
             )?;
         }
     }
-    smol::block_on(run_client_async(addr, cfg))
+    smol::block_on(run_client_async(addrs, cfg))
 }
 
-async fn run_client_async(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
+async fn run_client_async(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Result<Stats> {
     if cfg.udp {
-        run_udp_client(addr, cfg).await
+        run_udp_client(addrs[0], cfg).await
     } else {
-        run_tcp_client(addr, cfg).await
+        run_tcp_client(addrs, cfg).await
     }
 }
 
-async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
+async fn run_tcp_client(addrs: Vec<SocketAddr>, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
     let mut w = output::stdout();
     let payload = vec![0x42u8; cfg.size.unwrap()];
@@ -60,7 +60,7 @@ async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<St
         }
         let is_warmup = run.is_warmup();
         let start = Instant::now();
-        let mut stream = match util::connect_timeout(addr).await {
+        let mut stream = match util::connect_first(&addrs).await {
             Ok(s) => s,
             Err(e) => {
                 if !is_warmup {
@@ -99,7 +99,7 @@ async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<St
                         stats.record(rtt);
                     }
                     if !stats::json() {
-                        print_latency(&mut w, addr, rtt, cfg.size.unwrap(), is_warmup)?;
+                        print_latency(&mut w, addrs[0], rtt, cfg.size.unwrap(), is_warmup)?;
                     }
                 }
                 Err(_) => {
@@ -134,7 +134,7 @@ async fn run_tcp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<St
                     stats.record(rtt);
                 }
                 if !stats::json() {
-                    print_latency(&mut w, addr, rtt, cfg.size.unwrap(), is_warmup)?;
+                    print_latency(&mut w, addrs[0], rtt, cfg.size.unwrap(), is_warmup)?;
                 }
             }
             Err(_) => {
@@ -246,7 +246,12 @@ fn print_result(w: &mut StandardStream, stats: &Stats, cfg: &PingConfig) -> anyh
     if !stats::json() {
         println!();
     }
-    stats::print_summary(w, stats, "latency")?;
+    let target = if cfg.port > 0 {
+        format!("{}:{}", cfg.host, cfg.port)
+    } else {
+        cfg.host.clone()
+    };
+    stats::print_summary(w, stats, "latency", &target)?;
     if !stats::json()
         && stats.received > 0
         && let Some(spec) = &cfg.histogram

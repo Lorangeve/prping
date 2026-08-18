@@ -4,7 +4,8 @@
 //! 内用 std 阻塞 socket 与其交互，最后 `set_interrupted(true)` 注入优雅退出。
 
 use prping::{
-    PingConfig, PrpingError, PrpingWarning, reset_interrupt, run, serve, set_interrupted,
+    OutcomeKind, PingConfig, PrpingError, PrpingWarning, reset_interrupt, run, serve,
+    set_interrupted,
 };
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
@@ -212,4 +213,75 @@ fn ping_config() -> PingConfig {
         bandwidth: false,
         graph: false,
     }
+}
+
+// ---------- 带宽客户端四方向（进程内，run() 同步 + serve 全局 executor） ----------
+
+/// 起 serve（全局 executor）+ 客户端 run() 带宽模式，返回（客户端报告, 服务端报告）。
+fn bw_client(
+    count: u64,
+    size: usize,
+    udp: bool,
+    receive: bool,
+) -> (prping::BandwidthReport, prping::ServerReport) {
+    let _guard = SERVER_LOCK.lock().unwrap();
+    reset_interrupt();
+    let port = alloc_port();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let handle = smol::spawn(async move { serve(addr).await.expect("serve") });
+    wait_port(port);
+    let cfg = PingConfig {
+        host: "127.0.0.1".into(),
+        port,
+        count,
+        duration: None,
+        interval: 1.0,
+        size: Some(size),
+        quiet: true,
+        histogram: None,
+        warmup: 0,
+        v4: false,
+        v6: false,
+        parallel: 1,
+        udp,
+        receive,
+        bandwidth: true,
+        graph: false,
+    };
+    let kind = run(&cfg, |_| {}).expect("run");
+    let report = match kind {
+        OutcomeKind::Bandwidth(r) => r,
+        _ => panic!("expected bandwidth outcome"),
+    };
+    set_interrupted(true);
+    let server_report = smol::block_on(handle);
+    reset_interrupt();
+    (report, server_report)
+}
+
+#[test]
+fn bandwidth_tcp_send_client() {
+    let (r, srv) = bw_client(100, 8192, false, false);
+    assert_eq!(r.total_bytes, 819200);
+    assert!(srv.connections >= 1);
+}
+
+#[test]
+fn bandwidth_tcp_receive_client() {
+    let (r, srv) = bw_client(100, 8192, false, true);
+    assert_eq!(r.total_bytes, 819200);
+    assert!(srv.sent > 0, "server should send data in receive mode");
+}
+
+#[test]
+fn bandwidth_udp_send_client() {
+    let (r, _srv) = bw_client(100, 8192, true, false);
+    assert_eq!(r.total_bytes, 819200);
+}
+
+#[test]
+fn bandwidth_udp_receive_client() {
+    let (r, srv) = bw_client(100, 8192, true, true);
+    assert_eq!(r.total_bytes, 819200);
+    assert!(srv.sent > 0);
 }

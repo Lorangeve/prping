@@ -11,33 +11,38 @@ use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
 pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
-    let addr = util::resolve(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
+    let addrs = util::resolve_vec(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
     if cfg.host.parse::<IpAddr>().is_err() {
         let stripped = cfg
             .host
             .strip_prefix('[')
             .and_then(|s| s.strip_suffix(']'))
             .unwrap_or(&cfg.host);
-        if stripped.parse::<IpAddr>().is_err() && !stats::json() {
+        if stripped.parse::<IpAddr>().is_err()
+            && !stats::json()
+            && let Some(first) = addrs.first()
+        {
             println!(
                 "{}",
                 t!(
                     "common.resolving",
                     host = cfg.host,
-                    ip = addr.ip().to_string()
+                    ip = first.ip().to_string()
                 )
             );
         }
     }
     if !stats::json() {
-        println!(
-            "{}",
-            t!(
-                "tcp.connect_to",
-                addr = addr.ip().to_string(),
-                port = addr.port()
-            )
-        );
+        if let Some(first) = addrs.first() {
+            println!(
+                "{}",
+                t!(
+                    "tcp.connect_to",
+                    addr = first.ip().to_string(),
+                    port = first.port()
+                )
+            );
+        }
         if let Some(d) = cfg.duration {
             println!("{}", t!("tcp.duration", secs = d, warmup = cfg.warmup));
         } else {
@@ -51,10 +56,10 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
             );
         }
     }
-    smol::block_on(ping_async(addr, cfg))
+    smol::block_on(ping_async(addrs, cfg))
 }
 
-async fn ping_async(addr: std::net::SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
+async fn ping_async(addrs: Vec<std::net::SocketAddr>, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
     let mut w = output::stdout();
     let mut run = Run::new(cfg.count, cfg.warmup, cfg.duration);
@@ -68,16 +73,17 @@ async fn ping_async(addr: std::net::SocketAddr, cfg: &PingConfig) -> anyhow::Res
         }
         let is_warmup = run.is_warmup();
         let start = Instant::now();
-        // 5 秒 connect 超时：黑洞地址（静默丢包）不会挂死 OS 超时
-        match util::connect_timeout(addr).await {
+        // 5 秒 connect 超时 + 多地址回退
+        match util::connect_first(&addrs).await {
             Ok(stream) => {
                 let rtt = start.elapsed();
                 let local = stream.local_addr().ok();
+                let peer = stream.peer_addr().unwrap_or(addrs[0]);
                 if !is_warmup {
                     stats.record(rtt);
                 }
                 if !cfg.quiet && !stats::json() {
-                    print_connected(&mut w, addr, local, rtt, is_warmup)?;
+                    print_connected(&mut w, peer, local, rtt, is_warmup)?;
                 }
             }
             Err(e) => {
@@ -98,7 +104,12 @@ async fn ping_async(addr: std::net::SocketAddr, cfg: &PingConfig) -> anyhow::Res
     if !cfg.quiet && !stats::json() {
         println!();
     }
-    stats::print_summary(&mut w, &stats, "tcp")?;
+    let target = if cfg.port > 0 {
+        format!("{}:{}", cfg.host, cfg.port)
+    } else {
+        cfg.host.clone()
+    };
+    stats::print_summary(&mut w, &stats, "tcp", &target)?;
     if !stats::json()
         && stats.received > 0
         && let Some(spec) = &cfg.histogram

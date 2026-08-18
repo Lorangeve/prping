@@ -231,6 +231,7 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
 
     // UDP：回显服务 + 接收模式触发协议（大缓冲 socket，避免突发丢包）
     let udp_socket = Arc::new(util::bind_udp(addr)?);
+    let udp_agg = agg.clone();
     smol::spawn(async move {
         let mut buf: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::new(0u8); 65536];
         loop {
@@ -244,6 +245,7 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
                 let count = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
                 let sock = udp_socket.clone();
                 let payload = vec![0x42u8; size.max(1)];
+                let agg = udp_agg.clone();
                 smol::spawn(async move {
                     let mut sent = 0u64;
                     while sent < count as u64 {
@@ -259,6 +261,7 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
                             }
                             Err(_) => break, // 端口不可达等致命错误
                         }
+                        agg.sent.fetch_add(payload.len() as u64, Ordering::Relaxed);
                         sent += 1;
                     }
                 })

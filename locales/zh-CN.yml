@@ -98,6 +98,7 @@ help:
     实现 ICMP ping, TCP ping, UDP ping, TCP/UDP 延迟测试,
     以及 TCP/UDP 带宽测试。
 
+  usage: "prping [选项] <HOST[:PORT]>   （或: -s <ADDR:PORT> 启动服务端）"
   mode_guide: |-
     模式（自动识别）: host → ICMP | host:port → TCP | -u → UDP | -l SIZE → 延迟 | -b → 带宽 | -s → 服务端
     详细用法: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
@@ -264,9 +265,12 @@ help:
 
   examples: |-
     示例:
-      prping 8.8.8.8                      ICMP ping
-      prping www.baidu.com:80              TCP ping
-      prping -u 8.8.8.8:53                 UDP ping
-      prping -l 64 -n 100 server:8080      延迟测试（TCP，64 字节）
-      prping -b -l 8k -n 10000 server:8080 带宽测试（TCP，8KB）
-      prping -s 0.0.0.0:8080              启动服务端
+      prping 8.8.8.8                            ICMP ping（无限）
+      prping -n 10 -gp 8.8.8.8                  ICMP，10 次，ploot 图
+      prping 192.168.1.1:22                     TCP ping
+      prping -u 8.8.8.8:53                      UDP ping
+      prping -l 64 -n 100 server:8080            延迟测试（TCP，64 字节）
+      prping -b -l 8k -n 10000 -P 4 server:8080  带宽（TCP，8KB，4 并发）
+      prping -b -l 8k -n 10s -u -r server:8080   带宽（UDP 下行，10 秒）
+      prping -s 0.0.0.0:8080                    启动服务端
+      prping --help-icmp                        ICMP 详细用法（还有 --help-tcp/udp/latency/bandwidth/server）

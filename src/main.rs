@@ -329,6 +329,7 @@ fn main() -> anyhow::Result<()> {
 
     let cmd = cmd()
         .to_options()
+        .usage(t!("help.usage").as_ref())
         .footer(t!("help.mode_guide").as_ref())
         .run();
 

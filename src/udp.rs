@@ -116,7 +116,12 @@ async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stat
     if !cfg.quiet && !stats::json() {
         println!();
     }
-    stats::print_summary(&mut w, &stats, "udp")?;
+    let target = if cfg.port > 0 {
+        format!("{}:{}", cfg.host, cfg.port)
+    } else {
+        cfg.host.clone()
+    };
+    stats::print_summary(&mut w, &stats, "udp", &target)?;
     if !stats::json()
         && stats.received > 0
         && let Some(spec) = &cfg.histogram

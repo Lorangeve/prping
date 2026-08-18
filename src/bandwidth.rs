@@ -107,6 +107,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             cfg.histogram.as_ref(),
             &[],
             cfg.quiet,
+            &format!("{}:{}", cfg.host, cfg.port),
         );
     }
 
@@ -143,6 +144,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             cfg.histogram.as_ref(),
             &times,
             cfg.quiet,
+            &format!("{}:{}", cfg.host, cfg.port),
         )
     } else {
         // 并行连接：全局配额保证总量精确等于 count（修复 count < parallel 时发 0 包）
@@ -203,6 +205,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             cfg.histogram.as_ref(),
             &[],
             cfg.quiet,
+            &format!("{}:{}", cfg.host, cfg.port),
         )
     }
 }
@@ -275,6 +278,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             cfg.histogram.as_ref(),
             &[],
             cfg.quiet,
+            &format!("{}:{}", cfg.host, cfg.port),
         );
     }
 
@@ -306,6 +310,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         cfg.histogram.as_ref(),
         &times,
         cfg.quiet,
+        &format!("{}:{}", cfg.host, cfg.port),
     )
 }
 
@@ -316,6 +321,7 @@ fn report(
     histogram: Option<&HistogramSpec>,
     times: &[Duration],
     quiet: bool,
+    target: &str,
 ) -> anyhow::Result<crate::BandwidthReport> {
     let label = label.as_ref();
     let secs = elapsed.as_secs_f64();
@@ -335,9 +341,14 @@ fn report(
     if stats::json() {
         // label 可能含引号/反斜杠，做最小转义保证 JSON 合法
         let escaped = label.replace('\\', "\\\\").replace('"', "\\\"");
+        let target = target.replace('"', "\\\"");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         writeln!(
             &mut w,
-            "{{\"type\":\"bandwidth\",\"label\":\"{escaped}\",\"bytes\":{total_bytes},\"secs\":{secs:.2},\"mbps\":{mbits:.2}}}"
+            "{{\"type\":\"bandwidth\",\"target\":\"{target}\",\"ts\":{ts},\"label\":\"{escaped}\",\"bytes\":{total_bytes},\"secs\":{secs:.2},\"mbps\":{mbits:.2}}}"
         )?;
         return Ok(report);
     }

@@ -126,12 +126,22 @@ impl Stats {
     }
 }
 
-/// `mode` 用于 JSON 输出（如 "icmp"/"tcp"/"udp"/"latency"）。
-pub fn print_summary(w: &mut StandardStream, stats: &Stats, mode: &str) -> Result<()> {
+/// `mode` 用于 JSON 输出（如 "icmp"/"tcp"/"udp"/"latency"），`target` 为被测主机。
+pub fn print_summary(
+    w: &mut StandardStream,
+    stats: &Stats,
+    mode: &str,
+    target: &str,
+) -> Result<()> {
     if json() {
         let loss = stats.loss_pct();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let target = target.replace('"', "\\\"");
         let mut line = format!(
-            "{{\"type\":\"{mode}\",\"sent\":{},\"received\":{},\"lost\":{},\"loss_pct\":{:.1}",
+            "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"sent\":{},\"received\":{},\"lost\":{},\"loss_pct\":{:.1}",
             stats.sent,
             stats.received,
             stats.sent - stats.received,
@@ -470,7 +480,9 @@ pub fn print_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
             // 用 height-1 做乘数：max_y → norm=15（最顶行），min_y → 0，
             // 避免 norm=16 越界导致最高延迟点丢失
             let norm = ((*y - min_y) / y_range * (height - 1) as f64).round() as usize;
-            let idx = if norm == row { 7 } else { 0 };
+            // 柱状渲染：从底部（row 0）到延迟高度（norm）逐行填充，
+            // 替代原来的单点散点，形态更直观
+            let idx = if row <= norm { 7 } else { 0 };
             write!(w, "{}", bar_char[idx])?;
         }
         writeln!(w)?;

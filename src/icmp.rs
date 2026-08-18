@@ -125,7 +125,12 @@ async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     if !cfg.quiet && !stats::json() {
         println!();
     }
-    stats::print_summary(&mut w, &stats, "icmp")?;
+    let target = if cfg.port > 0 {
+        format!("{}:{}", cfg.host, cfg.port)
+    } else {
+        cfg.host.clone()
+    };
+    stats::print_summary(&mut w, &stats, "icmp", &target)?;
     if !stats::json()
         && stats.received > 0
         && let Some(spec) = &cfg.histogram

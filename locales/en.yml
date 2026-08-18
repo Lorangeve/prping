@@ -98,6 +98,7 @@ help:
     Implements ICMP ping, TCP ping, UDP ping, UDP/TCP latency,
     and UDP/TCP bandwidth measurement.
 
+  usage: "prping [OPTIONS] <HOST[:PORT]>   (or: -s <ADDR:PORT> for server)"
   mode_guide: |-
     Modes (auto-detected): host → ICMP | host:port → TCP | -u → UDP | -l SIZE → Latency | -b → Bandwidth | -s → Server
     Detailed help: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
@@ -266,9 +267,12 @@ help:
 
   examples: |-
     Examples:
-      prping 8.8.8.8                      ICMP ping
-      prping www.example.com:80            TCP ping
-      prping -u 8.8.8.8:53                 UDP ping
-      prping -l 64 -n 100 server:8080       Latency test (TCP, 64 bytes)
-      prping -b -l 8k -n 10000 server:8080  Bandwidth test (TCP, 8KB)
-      prping -s 0.0.0.0:8080               Start server for latency/bandwidth
+      prping 8.8.8.8                            ICMP ping (infinite)
+      prping -n 10 -gp 8.8.8.8                  ICMP, 10 pings, ploot graph
+      prping 192.168.1.1:22                     TCP ping
+      prping -u 8.8.8.8:53                      UDP ping
+      prping -l 64 -n 100 server:8080            Latency test (TCP, 64 bytes)
+      prping -b -l 8k -n 10000 -P 4 server:8080  Bandwidth (TCP, 8KB, 4 conns)
+      prping -b -l 8k -n 10s -u -r server:8080   Bandwidth (UDP download, 10s)
+      prping -s 0.0.0.0:8080                    Start server
+      prping --help-icmp                        ICMP details (also --help-tcp/udp/latency/bandwidth/server)

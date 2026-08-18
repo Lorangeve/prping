@@ -88,18 +88,19 @@ pub fn configure_executor_threads() {
 }
 
 /// 解析主机名（支持 `[IPv6]` 括号格式与 -4/-6 强制），返回单个地址。
-pub fn resolve(
+/// 解析主机名，返回全部匹配地址（按系统顺序，v4/v6 可选过滤）。
+pub fn resolve_vec(
     host: &str,
     port: u16,
     force_v4: bool,
     force_v6: bool,
-) -> anyhow::Result<SocketAddr> {
+) -> anyhow::Result<Vec<SocketAddr>> {
     let raw = host
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host);
     if let Ok(ip) = raw.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, port));
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
     let host = raw.to_string();
     Ok(smol::block_on(async {
@@ -110,15 +111,23 @@ pub fn resolve(
             } else if force_v6 {
                 addrs.retain(|a| a.is_ipv6());
             }
-            addrs.into_iter().next().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    t!("errors.cannot_resolve", host = host),
-                )
-            })
+            Ok::<_, std::io::Error>(addrs)
         })
         .await
     })?)
+}
+
+/// 解析主机名，返回第一个匹配地址。
+pub fn resolve(
+    host: &str,
+    port: u16,
+    force_v4: bool,
+    force_v6: bool,
+) -> anyhow::Result<SocketAddr> {
+    resolve_vec(host, port, force_v4, force_v6)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!(t!("errors.cannot_resolve", host = host)))
 }
 
 /// 解析主机名，返回全部匹配地址（ICMP 模式使用）。
@@ -217,6 +226,20 @@ pub async fn connect_timeout(addr: SocketAddr) -> std::io::Result<smol::net::Tcp
         ))
     })
     .await
+}
+
+/// 逐个尝试连接（多地址回退），全部失败返回最后一个错误。
+pub async fn connect_first(addrs: &[SocketAddr]) -> std::io::Result<smol::net::TcpStream> {
+    let mut last = None;
+    for a in addrs {
+        match connect_timeout(*a).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no addresses to connect")
+    }))
 }
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
