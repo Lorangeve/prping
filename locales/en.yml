@@ -106,10 +106,16 @@ help:
         --lang          Language (en-US | zh-CN), default auto-detect
 
       Examples:
-        prping 8.8.8.8                       ICMP ping (infinite, Ctrl+C to stop)
-        prping -n 10 8.8.8.8                  Ping 10 times
-        prping -n 5s -i 0.2 -gp 8.8.8.8       Run 5s at 0.2s interval with ploot graph
-        prping -l 64 -H "1,5,10,50" 8.8.8.8   64B payload with threshold histogram
+        prping -n 10 8.8.8.8
+            -n 10       send 10 pings, then stop
+        prping -n 5s -i 0.2 -gp 8.8.8.8
+            -n 5s       stop after 5 seconds
+            -i 0.2      0.2s interval between pings
+            -g          print the latency timeline graph
+            -p          render graphs with ploot
+        prping -l 64 -H "1,5,10,50" 8.8.8.8
+            -l 64       64-byte payload
+            -H "1,5,10,50"  histogram buckets split at 1/5/10/50 ms
 
       Requires root or cap_net_raw on Linux.
 
@@ -122,13 +128,16 @@ help:
         -r       ignored for plain TCP ping
 
       Examples:
-        prping 192.168.1.1:22                 TCP ping (infinite)
-        prping -n 30 -i 0.1 -gp 192.168.1.1:22   30 pings, ploot graph
-        prping -n 10s server:80               Run for 10 seconds
-
-      With server (echo):
-        server: prping -s 0.0.0.0:8080
-        client: prping -n 100 -gp server:8080
+        prping -n 30 -i 0.1 -gp 192.168.1.1:22
+            -n 30       send 30 connection attempts
+            -i 0.1      0.1s interval
+            -g          print the latency timeline graph
+            -p          render graphs with ploot
+        prping -n 10s server:80
+            -n 10s      run for 10 seconds, then stop
+        prping -n 100 -gp server:8080        (with server: prping -s 0.0.0.0:8080)
+            -n 100      connect 100 times
+            -g -p       ploot-rendered timeline graph
 
   udp: |-
     UDP ping:
@@ -150,12 +159,14 @@ help:
       Replies are validated by an embedded sequence number.
 
       Examples:
-        prping -u -n 10 192.168.1.1:53           UDP ping 10 times
-        prping -u -n 5s -gp 192.168.1.1:53       UDP ping 5s with ploot graph
-
-      With server (echo):
-        server: prping -s 0.0.0.0:8080
-        client: prping -u -n 100 -gp server:8080
+        prping -u -n 10 192.168.1.1:53
+            -u          UDP mode
+            -n 10       send 10 probes
+        prping -u -n 5s -gp 192.168.1.1:53
+            -n 5s       stop after 5 seconds
+            -g -p       ploot-rendered timeline graph
+        prping -u -n 100 server:8080        (with server: prping -s 0.0.0.0:8080)
+            -n 100      send 100 probes (server echoes)
 
   latency: |-
     TCP/UDP latency test (echo round-trip):
@@ -175,9 +186,16 @@ help:
         --json       Machine-readable JSON statistics
 
       Examples:
-        server: prping -s 0.0.0.0:8080
-        client: prping -l 64 -n 100 -gp server:8080        TCP latency, 64B payload
-        client: prping -l 64 -n 10s -u -r server:8080       UDP receive-mode latency, 10s
+        (server: prping -s 0.0.0.0:8080)
+        prping -l 64 -n 100 -gp server:8080
+            -l 64       64-byte request payload
+            -n 100      100 round-trips
+            -g -p       ploot-rendered timeline graph
+        prping -l 64 -n 10s -u -r server:8080
+            -l 64       64-byte payload
+            -n 10s      run for 10 seconds
+            -u          UDP mode
+            -r          receive mode (server sends, client receives)
 
   bandwidth: |-
     TCP/UDP bandwidth test:
@@ -197,9 +215,17 @@ help:
         --json       JSON: {"type":"bandwidth","bytes":...,"secs":...,"mbps":...}
 
       Examples:
-        server: prping -s 0.0.0.0:8080
-        client: prping -b -l 8k -n 20000 -P 4 server:8080   TCP upload, 4 connections
-        client: prping -b -l 8k -n 10s -u -r server:8080     UDP download, 10 seconds
+        (server: prping -s 0.0.0.0:8080)
+        prping -b -l 8k -n 20000 -P 4 server:8080
+            -b          bandwidth mode
+            -l 8k       8 KiB packets
+            -n 20000    20000 packets total
+            -P 4        4 parallel TCP connections
+        prping -b -l 8k -n 10s -u -r server:8080
+            -l 8k       8 KiB packets
+            -n 10s      run for 10 seconds
+            -u          UDP mode
+            -r          receive mode (download direction)
 
   server: |-
     Server (serves latency & bandwidth clients):
@@ -214,9 +240,13 @@ help:
       Concurrent TCP connection cap: 1024.
 
       Examples:
-        prping -s 0.0.0.0:8080                    Listen on all interfaces
-        prping -s 0.0.0.0:8080 -6                  Force IPv6 listener
+        prping -s 0.0.0.0:8080
+            -s 0.0.0.0:8080  listen on all interfaces, TCP+UDP port 8080
+        prping -s [::]:8080 -6
+            -s [::]:8080    IPv6 wildcard listener
+            -6             force IPv6
         client: prping -b -l 8k -n 10000 -P 4 host:8080
+            -b -l 8k -n 10000 -P 4   bandwidth test against the server
 
   examples: |-
     Examples:
