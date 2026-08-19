@@ -1,0 +1,29 @@
+# ICMP echo 探测（裸 IP 版：无 eth 层，走内核路由 —— 代理/Clash fake-ip 环境可用）
+#
+# 用法：
+#   sudo prping --pkg examples/network_icmp_bare.pkt --wait 3
+#   sudo prping --pkg examples/network_icmp_bare.pkt --params dst=www.baidu.com --wait 3
+#
+# 与 network_icmp.pkt（eth 原始帧）的区别：最外层是 ipv4/ipv6 → 走 IPPROTO_RAW /
+# IPV6_HDRINCL，包经内核路由表（代理环境经 TUN），src=0.0.0.0/:: 由内核按路由填源地址；
+# 回包经内核 ICMP 套接字收到。eth 原始帧会绕过路由/代理，fake-ip 环境下不可达。
+#
+# 默认目标 www.baidu.com（域名自动解析；地址字段/ip4/ip6 支持域名，也可用 dns("host")）。
+# 备选 223.5.5.5（阿里公共 DNS，稳定回 ICMP echo reply；百度部分地区禁 ICMP）。
+
+payload = raw(bytes="prping icmp probe")
+
+# full4：ICMPv4 echo request（type=8，回包 type=0）
+full4 = use(payload) |> icmp(type=8, id=rand16(), seq=1)
+                    |> ipv4(src=params("src", "0.0.0.0"), dst=params("dst", "www.baidu.com"))
+# full6：ICMPv6 echo request（type=128，回包 type=129）
+full6 = use(payload) |> icmp(type=128, id=rand16(), seq=1)
+                    |> ipv6(src=params("src6", "::"), dst=params("dst6", "2400:da00::6666"))
+
+# 回包校验（--pkg --wait）：回包必须是 ICMP 且 id/seq 与发包一致（v4/v6 通用）
+sniffer:
+  - match icmp(id=id, seq=seq)
+
+export:
+- full4
+- full6

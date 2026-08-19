@@ -66,6 +66,14 @@ prping -u HOST:PORT            # UDP ping
 prping -l SIZE HOST:PORT       # 延迟测试（触发条件：-l + 端口）
 prping -b -l SIZE HOST:PORT    # 带宽测试
 prping -s ADDR:PORT            # 服务端（同时支持延迟/带宽/接收模式）
+prping --mtu HOST              # 路径 MTU 探测（ICMP DF + 变长载荷二分）
+prping -I 192.168.1.10 HOST    # 指定源地址/网卡（Linux 网卡名 → IPv4）
+prping --help-pkg              # 完整使用手册（tty 自动分页）
+prping --help-pkg 16           # 跳转手册第 16 章（MTU 探测）
+# 包构造引擎（同一 binary，--eng/--pkg 与测量模式互斥）：
+prping --eng FILE.pkt          # .pkt 分析（层栈 + hexdump）
+prping --eng --lsp             # .pkt 语言服务器（JSON-RPC over stdio）
+prping --pkg FILE.pkt [HOST:PORT]  # 构建并发送（目标可省略）
 ```
 
 ### 常用选项
@@ -88,6 +96,68 @@ prping -s ADDR:PORT            # 服务端（同时支持延迟/带宽/接收模
 | `-V` / `--version` | 版本号 |
 | `--lang en\|zh-CN` | 语言 |
 | `--help-icmp` 等 | 各模式详细帮助 |
+| `-I ADDR\|IFACE` | 指定源地址/网卡（Linux 网卡名取 IPv4；多网卡/策略路由场景） |
+| `-M, --mtu` | 路径 MTU 探测：ICMP DF + 变长载荷二分（仅 IPv4，raw socket） |
+| `--help-pkg [章节]` | 完整使用手册（tty 自动分页，`## N. 标题` 章节）；`--help-pkg 编号\|标题` 跳转章节（双语随 `--lang`） |
+
+### hex/raw 为基 + 层 bytes 直喂
+
+`hex`/`raw` 是唯一字节原语；`eth`/`ipv4`/... 层头函数基于 hex 字节模板 + 字节原语
+构建（引擎自动补 checksum/length）。任何层还支持 **`bytes=hex("...")` 直喂**——
+整层头字节完全由你指定（绕过语义字段与自动校验和），载荷仍可语义组合：
+
+```
+use(payload) |> ipv4(bytes=hex("4500001c0001000040010000...")) |> eth(bytes=hex("ffff..."))
+```
+
+### pkglang 标准库（eng_lib → 发布为 `lib/`）
+
+packet-dsl 引擎内置只保留字节原语（`hex`/`raw` + `concat`/`be16`/`cksum`/`ip4`/... 与
+`layer(kind, bytes)` 层标注原语）；层头函数（`eth`/`arp`/`ipv4`/`ipv6`/`icmp`/`tcp`/`udp`/`http`/
+`dns`）与组合/数据组装函数统一放标准库 [eng_lib/](eng_lib/)（`headers.pkt`：层头函数；
+`bytes.pkt`：`*_bytes` 层标注包装；`net.pkt`：net4/net6 一次生成 IP+Eth 层；`data.pkt`：
+`eth_frame`/`ip4_packet`/`net4_packet`/`net6_packet` 把 raw/hex 字节载荷直接组装成包）。
+`hex("...")` 也可在参数值位置使用（hex 字符串 → 字节列表）。
+
+- 库搜索：import 先查入口文件目录递归，再从库目录兜底。**默认 eng_lib 自动加载**——
+  路径在编译期烘焙（packet-dsl 的 `CARGO_MANIFEST_DIR/../eng_lib`），源码构建时指向
+  仓库标准库；运行时 `is_dir()` 校验，不存在则返回空。显式库 = 默认「当前目录/lib」
+  （发布时 `just publish` 把 eng_lib 复制为 `target/release/lib/`）+ `--lib PATH`
+  （可多次，需 `--eng` 或 `--pkg`），排在默认 eng_lib 之后（`effective_libs` 合并，
+  `--eng` 头部的 `libs: ...` 行即展示这一列表）。发布机上默认路径失效，由运行时
+  `./lib` + `--lib` 顶替。
+- **库导出隐式可见**：eng_lib 模块的 `export:` 无需 `import` 直接可用
+  （如直接写 `net4(dst=...)`、`eth_frame(payload=hex("..."))`）；
+  显式 `import` 仍支持，本地定义优先遮蔽。
+- 示例：`prping --eng examples/data_demo.pkt`。
+
+### 包构造引擎（同一 binary 的 `--eng` / `--pkg` 模式）
+
+packet-dsl（`.pkt` 网络包构建 DSL）是独立子项目；引擎侧 CLI（`--eng` / `--pkg` /
+LSP / pcap）集成在 prping 同一 binary 中（与测量模式互斥）：
+
+- `prping --eng FILE.pkt`：模块概览 + 逐包层栈（字段 + `auto` 标注）+ 字节 hexdump。
+- `prping --eng --lsp`：.pkt 语言服务器——诊断 / 补全 / 悬停 / 文档符号。
+- `prping --pkg FILE.pkt [HOST:PORT]`：求值展开全部变体包并发送（默认提取 TCP/UDP
+  载荷，`--raw` 原始套接字；`--wait` 应答匹配 + RTT，`--fuzz` 全字段随机，
+  `--out` 写 pcap；`--ls`/`--hex`/`--pcap` 反解展示）。详见 [packet-dsl](packet-dsl/)。
+
+### 测量功能（万用表）
+
+- **统计**：min/max/avg/stddev、**抖动 jitter（相邻 RTT 差均值/最大）**、P50/P95/P99、
+  直方图（`-H`）、时间线（`-g/-p`）；`--json` 输出含 `jitter_ms`/`jitter_max_ms`。
+- **路径 MTU**：`-M`（`--mtu`）用 ICMP DF + 变长载荷二分，报告最大不分片载荷与路径 MTU
+  （IPv4；途中 Fragmentation Needed 报回的 MTU 一并展示）。
+- **源绑定**：`-I ADDR|IFACE` 指定探测源地址（TCP/UDP/ICMP/延迟/带宽全模式；
+  Linux 网卡名自动取 IPv4）。
+- 用户函数 / net4 模块等 DSL 能力见 [packet-dsl](packet-dsl/) 与 `examples/net.pkt`。
+
+## 使用手册
+
+`prping --help-pkg` 输出完整双语使用手册（[docs/manual-zh.md](docs/manual-zh.md) /
+[docs/manual-en.md](docs/manual-en.md)，随 `--lang` 选择）：25 章覆盖全部模式/选项/
+统计（含 jitter）/JSON/MTU/`-I`/退出码/FAQ/示例。长文在 tty 下经 `less` 自动分页，
+文档头部有目录，`prping --help-pkg <编号或标题>` 直接跳转章节学习。
 
 ## 示例
 

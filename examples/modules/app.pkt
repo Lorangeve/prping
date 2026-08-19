@@ -1,0 +1,9 @@
+# 模块系统 demo 第 1 层：应用层元件（包名 = 文件名 app）
+# 运行：prping --eng examples/modules/stack.pkt   （从最外层入口）
+
+export:
+- http_get
+- dns_query
+
+http_get = http(method="GET", path="/")
+dns_query = dns(id=0x1234, questions=["example.com"])

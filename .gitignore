@@ -2,3 +2,4 @@
 .claude/
 !.claude/settings.json
 /yak_linux_amd64
+/.cargo-home

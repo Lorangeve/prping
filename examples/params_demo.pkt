@@ -1,0 +1,13 @@
+# 运行时参数 demo：dport/dst/payload 都来自 --params
+# 运行：prping --eng examples/params_demo.pkt --params port=5353,host=8.8.8.8,tag=hello
+#      prping --pkg examples/params_demo.pkt --params port=5353,host=8.8.8.8,tag=hello
+#      未传时用默认值：port=53 / host=1.1.1.1
+
+payload = raw(bytes=params("tag", "default"))
+
+full = use(payload) |> udp(dport=params("port", "53"))
+                   |> ipv4(src="127.0.0.1", dst=params("host", "1.1.1.1"))
+                   |> eth(src_mac="00:11:22:33:44:55", dst_mac="66:77:88:99:aa:bb")
+
+export:
+- full

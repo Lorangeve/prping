@@ -1,76 +1,110 @@
+---
 _version: 1
-
 icmp:
-  pinging: "正在 Ping %{addr}，数据大小 %{size} 字节:"
+  pinging: '正在 Ping %{addr}，数据大小 %{size} 字节:'
   iterations: "%{total} 次迭代 (预热 %{warmup}) ping 测试:"
   duration: "%{secs} 秒时长 (预热 %{warmup}) ping 测试:"
-
 tcp:
-  connect_to: "TCP 连接到 %{addr}:%{port}:"
+  connect_to: 'TCP 连接到 %{addr}:%{port}:'
   iterations: "%{total} 次迭代 (预热 %{warmup}) ping 测试:"
   duration: "%{secs} 秒时长 (预热 %{warmup}) ping 测试:"
-
 udp:
-  pinging: "UDP ping 目标 %{addr}:%{port}，负载 %{size} 字节:"
+  pinging: 'UDP ping 目标 %{addr}:%{port}，负载 %{size} 字节:'
   iterations: "%{total} 次迭代 (预热 %{warmup}) ping 测试:"
   duration: "%{secs} 秒时长 (预热 %{warmup}) ping 测试:"
-  echo_hint: "提示: 目标端口需有回显服务（如 prping -s ADDR:PORT）才会回包"
-
+  echo_hint: '提示: 目标端口需有回显服务（如 prping -s ADDR:PORT）才会回包'
 common:
-  resolving: "解析 %{host} -> %{ip}"
-  reply_from: "来自 "
-  bytes: "字节="
-  time: "时间="
-  ttl: "TTL="
+  resolving: 解析 %{host} -> %{ip}
+  reply_from: '来自 '
+  bytes: 字节=
+  time: 时间=
+  ttl: TTL=
   warmup: "(预热)"
-  connecting_to: "连接到 "
-  from: "从"
-  timeout: "请求超时。"
-  connect_failed: "连接失败: %{error}"
-  dest_unreachable: "目标主机不可达。"
-  ttl_expired: "传输中 TTL 超时。"
-
+  connecting_to: '连接到 '
+  from: 从
+  timeout: 请求超时。
+  connect_failed: '连接失败: %{error}'
+  dest_unreachable: 目标主机不可达。
+  ttl_expired: 传输中 TTL 超时。
 stats:
-  sent_received: "发送 = %{sent}，接收 = %{received}，丢失 = %{lost} (%{pct}% 丢失),"
-  min_max_avg: "最小 = %{min}ms，最大 = %{max}ms，平均 = %{avg}ms，标准差 = %{stddev}ms"
-  percentiles: "P50 = %{p50}ms, P95 = %{p95}ms, P99 = %{p99}ms"
-  latency_dist: "延迟分布:"
-
+  ok: ok（可过）
+  frag: 分片需要
+  fail: 无回复/超限
+  unreachable: 目标不可达
+  ttl_exceeded: TTL 超时
+  timeout_note: payload=%{size} 探测两次超时（%{timeout}s），按超限处理
+  summary: 路径 MTU = %{mtu} 字节（最大不分片载荷 %{payload} 字节，目标 %{host}）
+  frag_needed_mtu: 途中 Fragmentation Needed 报回 MTU = %{mtu}
+  sent_received: 发送 = %{sent}，接收 = %{received}，丢失 = %{lost} (%{pct}% 丢失),
+  min_max_avg: 最小 = %{min}ms，最大 = %{max}ms，平均 = %{avg}ms，标准差 = %{stddev}ms
+  percentiles: P50 = %{p50}ms, P95 = %{p95}ms, P99 = %{p99}ms
+  jitter: 抖动 = %{avg}ms（最大 %{max}ms）
+  latency_dist: '延迟分布:'
 bandwidth:
-  warmup_complete: "预热完成: %{count} 次发送"
-  tcp_test: "TCP 带宽测试:"
-  udp_test: "UDP 带宽测试:"
-  sent_bytes: "已发送 = %{bytes} 字节，耗时 %{secs}秒"
-  received_bytes: "已接收 = %{bytes} 字节，耗时 %{secs}秒"
-  bandwidth: "带宽 = %{mbps} Mbps"
+  warmup_complete: '预热完成: %{count} 次发送'
+  tcp_test: 'TCP 带宽测试:'
+  udp_test: 'UDP 带宽测试:'
+  sent_bytes: 已发送 = %{bytes} 字节，耗时 %{secs}秒
+  received_bytes: 已接收 = %{bytes} 字节，耗时 %{secs}秒
+  bandwidth: 带宽 = %{mbps} Mbps
   progress:
     packets: "%{done}/%{total} 包（%{done_bytes}/%{total_bytes}）  %{mbps} Mbps"
     bytes: "%{done_bytes}/%{total_bytes}  %{mbps} Mbps"
     time: "%{bytes}  %{mbps} Mbps"
-
 server:
-  bandwidth_listening: "带宽测试服务端正在监听 %{addr}"
-  connect_tag: "连接 "
-  sent_tag: "发送 "
-  recv_tag: "接收 "
-  udp_trigger: "UDP 接收模式触发：来自 "
-  summary: "服务端汇总: %{conns} 个连接，接收 %{bytes} 字节、发送 %{sent} 字节，耗时 %{secs}秒（平均 %{mbps} Mbps）"
-
+  bandwidth_listening: 带宽测试服务端正在监听 %{addr}
+  connect_tag: '连接 '
+  sent_tag: '发送 '
+  recv_tag: '接收 '
+  udp_trigger: 'UDP 接收模式触发：来自 '
+  summary: '服务端汇总: %{conns} 个连接，接收 %{bytes} 字节、发送 %{sent} 字节，耗时 %{secs}秒（平均 %{mbps} Mbps）'
 errors:
-  raw_socket: "无法创建 raw socket: %{error}。需要 root 权限或 cap_net_raw"
-  cannot_resolve: "无法解析主机: %{host}"
-  invalid_bind: "无效的绑定地址: %{addr}。格式: host:port"
-  host_port_required: "需要 HOST[:PORT]，或 -s ADDR:PORT 启动服务端"
-  udp_requires_port: "UDP 模式需要端口: HOST:PORT"
-  bandwidth_requires_port: "带宽测试需要 HOST:PORT"
-  invalid_count: "无效的次数: %{value}（使用 N 或 Ns）"
-  invalid_histogram: "无效的直方图参数: %{value}（使用 N 或 t1,t2,...）"
-  udp_size_clamped: "UDP 负载已截断为 %{max} 字节（请求 %{size}）"
-  interval_min: "间隔已截断为最小 1ms（请求 %{value}s）"
-  parallel_udp_ignored: "UDP 模式忽略 -P（UDP 带宽为单连接）"
-  parallel_ignored: "本模式忽略 -P（仅带宽测试支持）"
-  receive_ignored_ping: "普通 ping 模式忽略 -r（延迟/带宽测试请用 -l/-b）"
-  invalid_ipv6: "无效的 IPv6 格式: [host] 或 [host]:port"
+  raw_socket: '无法创建 raw socket: %{error}。需要 root 权限或 cap_net_raw'
+  cannot_resolve: '无法解析主机: %{host}'
+  invalid_bind: '无效的绑定地址: %{addr}。格式: host:port'
+  host_port_required: 需要 HOST[:PORT]，或 -s ADDR:PORT 启动服务端
+  conflict_eng_pkg: "--eng 与 --pkg 互斥"
+  lsp_requires_eng: "--lsp 只能与 --eng 一起使用"
+  raw_requires_pkg: "--raw 只能与 --pkg 一起使用"
+  iface_requires_raw: "--iface 只能与 --pkg --raw 一起使用"
+  params_requires_eng_pkg: "--params 只能与 --eng 或 --pkg 一起使用"
+  params_format: "--params 需要 k=v 格式: `%{value}`"
+  wait_requires_pkg: "--wait 只能与 --pkg 一起使用"
+  fuzz_requires_pkg: "--fuzz 只能与 --pkg 一起使用"
+  out_requires_pkg: "--out 只能与 --pkg 一起使用"
+  eng_sub_conflict: "--ls / --hex / --pcap 互斥"
+  eng_sub_requires_eng: "--ls / --hex / --pcap 只能与 --eng 一起使用"
+  eng_sub_conflict_lsp: "--ls / --hex / --pcap 不能与 --lsp 一起使用"
+  eng_sub_no_file: "--ls / --hex / --pcap 不接受文件参数"
+  conflict_engine_mode: "%{flag} 不能与以下参数同时使用: %{opts}"
+  eng_requires_file: "--eng 需要 .pkt 文件（或 --eng --lsp）"
+  eng_lsp_no_file: "--lsp 不接受文件参数"
+  pkg_requires_target: "--pkg 需要目标 HOST:PORT"
+  pkg_requires_port: "--pkg 需要目标端口（HOST:PORT）"
+  udp_requires_port: 'UDP 模式需要端口: HOST:PORT'
+  bandwidth_requires_port: 带宽测试需要 HOST:PORT
+  invalid_count: '无效的次数: %{value}（使用 N 或 Ns）'
+  invalid_histogram: '无效的直方图参数: %{value}（使用 N 或 t1,t2,...）'
+  udp_size_clamped: UDP 负载已截断为 %{max} 字节（请求 %{size}）
+  interval_min: 间隔已截断为最小 1ms（请求 %{value}s）
+  parallel_udp_ignored: UDP 模式忽略 -P（UDP 带宽为单连接）
+  parallel_ignored: 本模式忽略 -P（仅带宽测试支持）
+  receive_ignored_ping: 普通 ping 模式忽略 -r（延迟/带宽测试请用 -l/-b）
+  invalid_ipv6: '无效的 IPv6 格式: [host] 或 [host]:port'
+  conflict_source_server: "-I 不能与服务端模式（-s）一起使用"
+  conflict_source_engine: "-I 不能与引擎/包模式（--eng/--pkg）一起使用"
+  mtu_ipv4_only: MTU 探测目前仅支持 IPv4（IPv6 路径 MTU 需 ICMPv6 Packet Too Big，暂未支持）
+  mtu_no_reply: 无回显：ICMP 可能被防火墙丢弃（%{target}）
+  conflict_mtu_mode: "--mtu 不能与其他模式参数一起使用：%{opts}"
+  mtu_requires_no_port: "--mtu 不接受端口：--mtu HOST"
+  conflict_mtu_histogram: "--mtu 不支持 -H 直方图"
+  resolve_failed: 无法解析 %{host}
+  engine_mode_required: 未指定模式：请用 --eng / --pkg / --ls / --hex / --pcap
+  help_pkg_not_found: |-
+    未找到匹配的章节：「%{section}」
+    用 `prping --help-pkg` 查看目录：
+  help_pkg_ambiguous: 命中 %{count} 个章节，请用编号或更精确的标题：
+  help_pkg_toc_hint: 目录（用 `prping --help-pkg <编号或标题>` 跳转）：
   conflict_v4_v6: "-4 与 -6 不能同时使用"
   conflict_server_target: "-s（服务端模式）不能与目标 HOST[:PORT] 同时使用"
   conflict_server_mode: "-s（服务端模式）不能与客户端测试参数同时使用: %{opts}"
@@ -78,55 +112,75 @@ errors:
   conflict_json_graph: "--json 与 -g/--graph 不能同时使用"
   conflict_json_histogram: "--json 与 -H/--histogram 不能同时使用"
   receive_requires_latency_bandwidth: "-r 需要配合 -b（带宽测试）或 -l + HOST:PORT（延迟测试）使用"
-
+  lib_requires_eng_pkg: "--lib 需要 --eng 或 --pkg"
 help:
   group:
-    mode: "模式（自动识别）"
-    test: "测试控制"
-    output: "输出"
-    network: "网络"
-    server: "服务端"
-    other: "其他"
+    mode: 模式（自动识别）
+    test: 测试控制
+    output: 输出
+    network: 网络
+    server: 服务端
+    other: 其他
+    engine: 引擎 / 包构建
   options:
-    server: "服务端监听地址和端口"
-    bandwidth: "带宽测试模式"
-    count: "发送/接收次数（默认无限）。追加 's' 表示秒数（如 '10s'）"
-    interval: "间隔秒数（默认 1，0 = 快速 ping）"
-    size: "请求/负载大小（如 64, 8k, 1m）。有端口时触发延迟测试。"
-    lang: "设置语言（如 en-US, zh-CN）。默认从系统自动检测。"
-    udp: "UDP 模式（默认 TCP）"
-    quiet: "不输出每次测试结果"
-    histogram: "直方图: 桶数（如 20）或逗号分隔的毫秒阈值（如 1,5,10,50）"
-    warmup: "预热迭代次数（默认 4）"
-    parallel: "并发连接数（默认 1）"
-    v4: "强制使用 IPv4"
-    v6: "强制使用 IPv6"
-    json: "输出机器可读的 JSON 统计"
-    receive: "接收模式：测下载方向（配合 -l 延迟或 -b 带宽测试使用）"
-    pretty: "用 ploot 渲染图表（Unicode/Braille）"
-    graph: "显示延迟时间线图（配合 -p 用 ploot 渲染）"
-    version: "显示版本号"
-    help_icmp: "ICMP ping 用法"
-    help_tcp: "TCP ping 用法"
-    help_latency: "延迟测试用法"
-    help_bandwidth: "带宽测试用法"
-    help_udp: "UDP ping 用法"
-    help_server: "服务端用法"
-
+    server: 服务端监听地址和端口
+    bandwidth: 带宽测试模式
+    count: 发送/接收次数（默认无限）。追加 's' 表示秒数（如 '10s'）
+    interval: 间隔秒数（默认 1，0 = 快速 ping）
+    size: 请求/负载大小（如 64, 8k, 1m）。有端口时触发延迟测试。
+    lang: 设置语言（如 en-US, zh-CN）。默认从系统自动检测。
+    udp: UDP 模式（默认 TCP）
+    mtu: MTU 探测：ICMP DF + 变长载荷二分
+    eng: 引擎模式：分析 .pkt 文件并精美输出（加 --lsp 启动语言服务器）
+    lsp: 为 .pkt 文件启动 LSP 语言服务器（配合 --eng；JSON-RPC over stdio）
+    pkg: 从 .pkt 文件构建网络包并发送到 HOST:PORT（可省略，省略时按包内 dst/dport 推导；加 --raw 用原始套接字）
+    raw: 用原始套接字发送完整序列化包（Linux 需 root/cap_net_raw；Windows 需安装 Npcap）
+    iface: 原始以太网帧使用的网卡（默认 lo）
+    params: 传给 .pkt 脚本的运行时参数（k=v,k2=v2；脚本内用 params("name") 读取）
+    wait: 发送后等待最多 SECS 秒的匹配应答（对标 scapy sr1），打印 RTT 并反解展示（配合 --pkg）
+    fuzz: 发送前把未填字段全部随机化（对标 scapy fuzz()，配合 --pkg）
+    out: 把构建的包存成 pcap 文件（对标 scapy wrpcap，配合 --pkg）
+    ls: 列出全部内置层函数的字段表与自动行为（配合 --eng）
+    hex: 反解并展示十六进制字符串对应的包（配合 --eng）
+    pcap: 读取 pcap 文件并逐条反解展示（配合 --eng）
+    quiet: 不输出每次测试结果
+    histogram: '直方图: 桶数（如 20）或逗号分隔的毫秒阈值（如 1,5,10,50）'
+    warmup: 预热迭代次数（默认 4）
+    parallel: 并发连接数（默认 1）
+    v4: 强制使用 IPv4
+    v6: 强制使用 IPv6
+    source: 源地址或网卡（Linux 网卡名 → IPv4 地址）
+    json: 输出机器可读的 JSON 统计
+    receive: 接收模式：测下载方向（配合 -l 延迟或 -b 带宽测试使用）
+    pretty: 用 ploot 渲染图表（Unicode/Braille）
+    graph: 显示延迟时间线图（配合 -p 用 ploot 渲染）
+    version: 显示版本号
+    help_icmp: ICMP ping 用法
+    help_tcp: TCP ping 用法
+    help_latency: 延迟测试用法
+    help_bandwidth: 带宽测试用法
+    help_udp: UDP ping 用法
+    help_server: 服务端用法
+    help_pkg: 使用手册（分页）；--help-pkg 章节标题 跳转（编号或标题）
   overview: |-
     prping — ping, 延迟, 带宽测量工具
 
     实现 ICMP ping, TCP ping, UDP ping, TCP/UDP 延迟测试,
     以及 TCP/UDP 带宽测试。
-
-  usage: "prping [选项] <HOST[:PORT]>   （或: -s <ADDR:PORT> 启动服务端）"
+  usage: 'prping [选项] <HOST[:PORT]>   （或: -s <ADDR:PORT> 启动服务端）'
   mode_guide: |-
     模式（自动识别）: host → ICMP | host:port → TCP | -u → UDP | -l SIZE → 延迟 | -b → 带宽 | -s → 服务端
     详细用法: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
     互斥参数会直接报错: -4/-6、-s 与目标或客户端参数、--json 与 -p/-g/-H、无 -b/-l 时使用 -r
-
-  usage_line: "帮助: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]\n   -h, --help            显示全部选项。\n   --help-icmp           ICMP ping 用法。\n   --help-tcp            TCP ping 用法。\n   --help-udp            UDP ping 用法。\n   --help-latency        延迟测试用法。\n   --help-bandwidth      带宽测试用法。\n   --help-server         服务端用法。"
-
+  usage_line: |-
+    帮助: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]
+       -h, --help            显示全部选项。
+       --help-icmp           ICMP ping 用法。
+       --help-tcp            TCP ping 用法。
+       --help-udp            UDP ping 用法。
+       --help-latency        延迟测试用法。
+       --help-bandwidth      带宽测试用法。
+       --help-server         服务端用法。
   icmp: |-
     ICMP ping:
       prping [-n 次数] [-i 秒] [-l 大小] [-g] [-p] [-H N|t1,t2,...] [-w 预热] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] 主机
@@ -142,6 +196,8 @@ help:
         -q              不输出每次测试结果
         -4 / -6         强制 IPv4 / IPv6
         --json          输出机器可读 JSON 统计
+        -I ADDR|IFACE   指定源地址/网卡（Linux 网卡名取 IPv4）
+        -M, --mtu       路径 MTU 探测（独立模式，见 prping --help-pkg 16）
         --lang          语言（en-US | zh-CN），默认自动检测
 
       示例:
@@ -158,6 +214,8 @@ help:
 
       Linux 下需要 root 或 cap_net_raw。
 
+      更多:
+        prping --help-pkg [章节]    完整手册（pager 分页 + 目录跳转）
   tcp: |-
     TCP ping:
       prping [-n 次数] [-i 秒] [-g] [-p] [-H N|t1,t2,...] [-w 预热] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] 主机:端口
@@ -178,6 +236,8 @@ help:
             -n 100      连接 100 次
             -g -p       ploot 渲染的时间线图
 
+      更多:
+        prping --help-pkg [章节]    完整手册（pager 分页 + 目录跳转）
   udp: |-
     UDP ping:
       prping -u [-n 次数] [-i 秒] [-g] [-p] [-H N|t1,t2,...] [-w 预热] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] 主机:端口
@@ -206,6 +266,8 @@ help:
         prping -u -n 100 server:8080      （配合服务端: prping -s 0.0.0.0:8080）
             -n 100     发送 100 次探测（服务端回显）
 
+      更多:
+        prping --help-pkg [章节]    完整手册（pager 分页 + 目录跳转）
   latency: |-
     TCP/UDP 延迟测试（echo 往返）:
       服务端: prping [-4] [-6] -s 地址:端口
@@ -235,6 +297,8 @@ help:
             -u          UDP 模式
             -r          接收模式（服务端发送、客户端接收）
 
+      更多:
+        prping --help-pkg [章节]    完整手册（pager 分页 + 目录跳转）
   bandwidth: |-
     TCP/UDP 带宽测试:
       服务端: prping [-4] [-6] -s 地址:端口
@@ -265,6 +329,8 @@ help:
             -u          UDP 模式
             -r          接收模式（测下载方向）
 
+      更多:
+        prping --help-pkg [章节]    完整手册（pager 分页 + 目录跳转）
   server: |-
     服务端（同时服务延迟/带宽客户端）:
       prping [-4] [-6] -s 地址:端口
@@ -284,7 +350,6 @@ help:
             -6               强制 IPv6
         客户端: prping -b -l 8k -n 10000 -P 4 主机:8080
             -b -l 8k -n 10000 -P 4   对服务端跑带宽测试
-
   examples: |-
     示例:
       prping 8.8.8.8                            ICMP ping（无限）

@@ -2,8 +2,9 @@ rust_i18n::i18n!("locales");
 
 use bpaf::*;
 use prping::{
-    OutcomeKind, PingConfig, PrpingError, PrpingWarning, configure_executor_threads,
-    parse_histogram, run, serve, set_json, set_pretty, stderr, writeln_orange, writeln_red,
+    OutcomeKind, PingConfig, PrpingError, PrpingWarning, configure_executor_threads, find_sections,
+    manual_for, parse_histogram, print_paged, resolve_source, run, serve, set_json, set_pretty,
+    stderr, toc, writeln_orange, writeln_red,
 };
 use rust_i18n::t;
 use std::net::SocketAddr;
@@ -53,6 +54,11 @@ fn cmd() -> impl Parser<Command> {
         .switch()
         .help(t!("help.options.help_server").as_ref())
         .hide();
+    let help_pkg = long("help-pkg")
+        .argument::<String>("[SECTION]")
+        .help(t!("help.options.help_pkg").as_ref())
+        .hide()
+        .optional();
 
     let server = long("server")
         .short('s')
@@ -96,6 +102,10 @@ fn cmd() -> impl Parser<Command> {
         .short('u')
         .switch()
         .help(t!("help.options.udp").as_ref());
+    let mtu = long("mtu")
+        .short('M')
+        .switch()
+        .help(t!("help.options.mtu").as_ref());
     let quiet = long("quiet")
         .short('q')
         .switch()
@@ -117,6 +127,11 @@ fn cmd() -> impl Parser<Command> {
         .optional();
     let v4 = short('4').switch().help(t!("help.options.v4").as_ref());
     let v6 = short('6').switch().help(t!("help.options.v6").as_ref());
+    let source = long("source")
+        .short('I')
+        .help(t!("help.options.source").as_ref())
+        .argument::<String>("ADDR|IFACE")
+        .optional();
     let pretty = long("pretty")
         .short('p')
         .switch()
@@ -132,6 +147,47 @@ fn cmd() -> impl Parser<Command> {
         .short('V')
         .flag(true, false)
         .help(t!("help.options.version").as_ref());
+
+    // 引擎 / 包构建组（--eng / --pkg 与常规测试模式互斥）
+    let eng = long("eng").switch().help(t!("help.options.eng").as_ref());
+    let lsp = long("lsp").switch().help(t!("help.options.lsp").as_ref());
+    let pkg = long("pkg")
+        .argument::<String>("FILE")
+        .help(t!("help.options.pkg").as_ref())
+        .optional();
+    let raw = long("raw").switch().help(t!("help.options.raw").as_ref());
+    let iface = long("iface")
+        .argument::<String>("IFACE")
+        .help(t!("help.options.iface").as_ref())
+        .optional();
+    let params = long("params")
+        .argument::<String>("k=v,...")
+        .help(t!("help.options.params").as_ref())
+        .many();
+    let wait = long("wait")
+        .argument::<f64>("SECS")
+        .help(t!("help.options.wait").as_ref())
+        .optional();
+    let fuzz = long("fuzz").switch().help(t!("help.options.fuzz").as_ref());
+    let out = long("out")
+        .argument::<String>("FILE.pcap")
+        .help(t!("help.options.out").as_ref())
+        .optional();
+    let ls = long("ls").switch().help(t!("help.options.ls").as_ref());
+    let hex = long("hex")
+        .argument::<String>("0102...")
+        .help(t!("help.options.hex").as_ref())
+        .optional();
+    let pcap = long("pcap")
+        .argument::<String>("FILE.pcap")
+        .help(t!("help.options.pcap").as_ref())
+        .optional();
+    let lib = long("lib")
+        .argument::<String>("PATH")
+        .help(t!("help.options.lib").as_ref())
+        .many();
+
+    // 位置参数：HOST[:PORT]（测量模式）或 FILE.pkt [HOST:PORT]（--pkg）
     let target = positional::<String>("HOST[:PORT]").optional();
 
     // 按语义分组，帮助中分组展示（group_help 应用于内层组合）
@@ -139,7 +195,8 @@ fn cmd() -> impl Parser<Command> {
         bandwidth,
         req_size,
         receive,
-        udp
+        udp,
+        mtu
     })
     .group_help(t!("help.group.mode").as_ref());
     let test = construct!(TestGroup {
@@ -158,10 +215,27 @@ fn cmd() -> impl Parser<Command> {
         json
     })
     .group_help(t!("help.group.output").as_ref());
-    let network = construct!(NetworkGroup { v4, v6 }).group_help(t!("help.group.network").as_ref());
+    let network =
+        construct!(NetworkGroup { v4, v6, source }).group_help(t!("help.group.network").as_ref());
     let server_grp =
         construct!(ServerGroup { server }).group_help(t!("help.group.server").as_ref());
     let other = construct!(OtherGroup { version }).group_help(t!("help.group.other").as_ref());
+    let engine = construct!(EngineGroup {
+        eng,
+        lsp,
+        pkg,
+        raw,
+        iface,
+        params,
+        wait,
+        fuzz,
+        out,
+        ls,
+        hex,
+        pcap,
+        lib
+    })
+    .group_help(t!("help.group.engine").as_ref());
 
     construct!(Command {
         help_icmp,
@@ -170,12 +244,14 @@ fn cmd() -> impl Parser<Command> {
         help_bandwidth,
         help_udp,
         help_server,
+        help_pkg,
         mode,
         test,
         output,
         network,
         server_grp,
         other,
+        engine,
         target,
     })
 }
@@ -215,6 +291,7 @@ struct ModeGroup {
     req_size: Option<String>,
     receive: bool,
     udp: bool,
+    mtu: bool,
 }
 
 /// 校验互斥参数组合，返回本地化错误文案（None = 通过）。
@@ -234,6 +311,9 @@ fn validate(cmd: &Command, port_present: Option<bool>) -> Option<String> {
         }
         let mut opts: Vec<&str> = Vec::new();
         let m = &cmd.mode;
+        if m.mtu {
+            opts.push("--mtu");
+        }
         if m.bandwidth {
             opts.push("-b");
         }
@@ -304,6 +384,40 @@ fn validate(cmd: &Command, port_present: Option<bool>) -> Option<String> {
         }
     }
 
+    // --mtu 与其他模式参数互斥（ICMP 基础模式；-4/-6 可用）
+    if cmd.mode.mtu {
+        let m = &cmd.mode;
+        let bad: Vec<&str> = [
+            ("bandwidth", m.bandwidth),
+            ("req_size", m.req_size.is_some()),
+            ("receive", m.receive),
+            ("udp", m.udp),
+        ]
+        .iter()
+        .filter(|(_, on)| *on)
+        .map(|(n, _)| match *n {
+            "bandwidth" => "-b",
+            "req_size" => "-l",
+            "receive" => "-r",
+            _ => "-u",
+        })
+        .collect();
+        if !bad.is_empty() {
+            return Some(t!("errors.conflict_mtu_mode", opts = bad.join(" ")).to_string());
+        }
+        if cmd.test.histogram.is_some() {
+            return Some(t!("errors.conflict_mtu_histogram").to_string());
+        }
+    }
+
+    // 源绑定 -I：与服务端模式互斥；引擎/包模式不接受（无意义）
+    if let Some(src) = &cmd.network.source {
+        if cmd.server_grp.server.is_some() {
+            return Some(t!("errors.conflict_source_server").to_string());
+        }
+        let _ = src;
+    }
+
     None
 }
 
@@ -330,6 +444,7 @@ struct OutputGroup {
 struct NetworkGroup {
     v4: bool,
     v6: bool,
+    source: Option<String>,
 }
 
 /// 服务端组
@@ -342,6 +457,23 @@ struct OtherGroup {
     version: bool,
 }
 
+/// 引擎 / 包构建组（--eng / --pkg：packet-dsl 的宿主 CLI）。
+struct EngineGroup {
+    eng: bool,
+    lsp: bool,
+    pkg: Option<String>,
+    raw: bool,
+    iface: Option<String>,
+    params: Vec<String>,
+    wait: Option<f64>,
+    fuzz: bool,
+    out: Option<String>,
+    ls: bool,
+    hex: Option<String>,
+    pcap: Option<String>,
+    lib: Vec<String>,
+}
+
 struct Command {
     help_icmp: bool,
     help_tcp: bool,
@@ -349,12 +481,14 @@ struct Command {
     help_bandwidth: bool,
     help_udp: bool,
     help_server: bool,
+    help_pkg: Option<String>,
     mode: ModeGroup,
     test: TestGroup,
     output: OutputGroup,
     network: NetworkGroup,
     server_grp: ServerGroup,
     other: OtherGroup,
+    engine: EngineGroup,
     target: Option<String>,
 }
 
@@ -412,21 +546,62 @@ fn detect_locale() {
         }
     }
 }
+/// 预处理裸 `--help-pkg`（不带值）→ `--help-pkg=`（空标题 = 全文）；
+/// 带值（`--help-pkg 安装` 或 `--help-pkg=安装`）原样保留。
+/// 返回的列表不含 argv[0]（与 bpaf `Args::current_args` 一致）。
+fn normalize_help_pkg_args() -> Vec<String> {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut it = raw.iter().peekable();
+    while let Some(a) = it.next() {
+        if a == "--help-pkg" {
+            let next_is_value = it.peek().map(|n| !n.starts_with('-')).unwrap_or(false);
+            if next_is_value {
+                out.push(a.clone());
+            } else {
+                out.push("--help-pkg=".to_string());
+            }
+        } else {
+            out.push(a.clone());
+        }
+    }
+    out
+}
+
 fn main() -> anyhow::Result<()> {
     // 多线程 executor：smol 全局 executor 默认单线程，-P 并发无法真正并行
     configure_executor_threads();
     detect_locale();
     install_interrupt_handler()?;
 
-    let cmd = cmd()
+    let args = normalize_help_pkg_args();
+    let cmd = match cmd()
         .to_options()
         .usage(t!("help.usage").as_ref())
         .footer(t!("help.mode_guide").as_ref())
-        .run();
+        .run_inner(args.as_slice())
+    {
+        Ok(c) => c,
+        Err(f) => {
+            // 帮助/错误打印与 .run() 一致（ParseFailure 自行选择 stdout/stderr）
+            f.print_message(100);
+            std::process::exit(f.exit_code());
+        }
+    };
 
     // --lang 参数（--help 的本地化已由 detect_locale 预扫描保证）
     if let Some(loc) = &cmd.output.lang {
         rust_i18n::set_locale(&normalize_locale(loc));
+    }
+
+    // 引擎 / 包构建模式（--eng / --pkg / --ls / --hex / --pcap）
+    let engine_used = cmd.engine.eng
+        || cmd.engine.pkg.is_some()
+        || cmd.engine.ls
+        || cmd.engine.hex.is_some()
+        || cmd.engine.pcap.is_some();
+    if engine_used {
+        return run_engine(&cmd);
     }
 
     if cmd.other.version {
@@ -458,6 +633,41 @@ fn main() -> anyhow::Result<()> {
     if cmd.help_server {
         println!("{}", t!("help.server"));
         return Ok(());
+    }
+
+    // 使用手册（--help-pkg [SECTION]）：全文分页 / 章节跳转
+    if let Some(section) = &cmd.help_pkg {
+        let manual = manual_for(&rust_i18n::locale());
+        match section.as_str() {
+            "" => {
+                // 全文：tty 时 pager 自动分页
+                print_paged(manual)?;
+                return Ok(());
+            }
+            q => {
+                let hits = find_sections(manual, q);
+                match hits.len() {
+                    0 => {
+                        let mut w = stderr();
+                        let _ = writeln_red(&mut w, t!("errors.help_pkg_not_found", section = q));
+                        println!("{}", t!("errors.help_pkg_toc_hint"));
+                        println!("{}", toc(manual));
+                        std::process::exit(1);
+                    }
+                    1 => {
+                        println!("{}", hits[0].body);
+                        return Ok(());
+                    }
+                    n => {
+                        println!("{}", t!("errors.help_pkg_ambiguous", count = n));
+                        for h in &hits {
+                            println!("  {}. {}", h.number, h.title);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
 
     // 互斥参数校验：-r 的合法性依赖目标端口，先轻量解析（失败则跳过该项检查）
@@ -556,10 +766,17 @@ fn main() -> anyhow::Result<()> {
         warmup: cmd.test.warmup.unwrap_or(4),
         v4: cmd.network.v4,
         v6: cmd.network.v6,
+        source: cmd
+            .network
+            .source
+            .as_deref()
+            .map(resolve_source)
+            .transpose()?,
         parallel: cmd.test.parallel.unwrap_or(1),
         udp: cmd.mode.udp,
         receive: cmd.mode.receive,
         bandwidth: cmd.mode.bandwidth,
+        mtu: cmd.mode.mtu,
         graph: cmd.output.graph,
     };
 
@@ -572,7 +789,7 @@ fn main() -> anyhow::Result<()> {
         Ok(kind) => {
             let has_loss = match &kind {
                 OutcomeKind::Ping(stats) => stats.has_loss(),
-                OutcomeKind::Bandwidth(_) => false,
+                OutcomeKind::Bandwidth(_) | OutcomeKind::Mtu(_) => false,
             };
             // 有丢包时以非零退出码结束（脚本友好）
             if has_loss {
@@ -598,6 +815,12 @@ fn main() -> anyhow::Result<()> {
             let _ = writeln_red(&mut w, t!("errors.conflict_v4_v6"));
             std::process::exit(1);
         }
+        Err(PrpingError::MtuRequiresNoPort) => {
+            drop(_ctrl_echo);
+            let mut w = stderr();
+            let _ = writeln_red(&mut w, t!("errors.mtu_requires_no_port"));
+            std::process::exit(1);
+        }
         Err(e) => return Err(e.into()),
     }
     Ok(())
@@ -616,6 +839,172 @@ fn render_warning(w: PrpingWarning) -> String {
             t!("errors.udp_size_clamped", size = requested, max = max).to_string()
         }
     }
+}
+
+// ── 引擎 / 包构建模式（--eng / --pkg / --ls / --hex / --pcap）────────────────
+
+/// 引擎互斥校验（与测量参数无关，只在引擎模式启用时调用）。
+fn validate_engine(cmd: &Command) -> anyhow::Result<()> {
+    let e = &cmd.engine;
+    if e.eng && e.pkg.is_some() {
+        anyhow::bail!(t!("errors.conflict_eng_pkg"));
+    }
+    if e.lsp && !e.eng {
+        anyhow::bail!(t!("errors.lsp_requires_eng"));
+    }
+    if e.raw && e.pkg.is_none() {
+        anyhow::bail!(t!("errors.raw_requires_pkg"));
+    }
+    if e.iface.is_some() && !(e.pkg.is_some() && e.raw) {
+        anyhow::bail!(t!("errors.iface_requires_raw"));
+    }
+    if !e.params.is_empty() && !e.eng && e.pkg.is_none() {
+        anyhow::bail!(t!("errors.params_requires_eng_pkg"));
+    }
+    if e.wait.is_some() && e.pkg.is_none() {
+        anyhow::bail!(t!("errors.wait_requires_pkg"));
+    }
+    if e.fuzz && e.pkg.is_none() {
+        anyhow::bail!(t!("errors.fuzz_requires_pkg"));
+    }
+    if e.out.is_some() && e.pkg.is_none() {
+        anyhow::bail!(t!("errors.out_requires_pkg"));
+    }
+    if !e.lib.is_empty() && !e.eng && e.pkg.is_none() {
+        anyhow::bail!(t!("errors.lib_requires_eng_pkg"));
+    }
+    let eng_sub = e.ls || e.hex.is_some() || e.pcap.is_some();
+    if (e.ls as u8 + e.hex.is_some() as u8 + e.pcap.is_some() as u8) > 1 {
+        anyhow::bail!(t!("errors.eng_sub_conflict"));
+    }
+    if eng_sub && !e.eng {
+        anyhow::bail!(t!("errors.eng_sub_requires_eng"));
+    }
+    if eng_sub && e.lsp {
+        anyhow::bail!(t!("errors.eng_sub_conflict_lsp"));
+    }
+    if eng_sub && cmd.target.is_some() {
+        anyhow::bail!(t!("errors.eng_sub_no_file"));
+    }
+    if e.eng && e.lsp && cmd.target.is_some() {
+        anyhow::bail!(t!("errors.eng_lsp_no_file"));
+    }
+    // -I 与引擎模式冲突（引擎/包模式不接受源绑定）
+    if cmd.network.source.is_some() {
+        anyhow::bail!(t!("errors.conflict_source_engine"));
+    }
+    Ok(())
+}
+
+/// 引擎 / 包构建模式分发（--eng 分析/LSP/--ls/--hex/--pcap；--pkg 构建发送）。
+fn run_engine(cmd: &Command) -> anyhow::Result<()> {
+    validate_engine(cmd)?;
+    let e = &cmd.engine;
+
+    // 引擎模式（--eng）：.pkt 分析（精美输出）或 LSP 服务器
+    if e.eng {
+        if e.lsp {
+            return prping::run_lsp(&resolve_libs(&e.lib));
+        }
+        if e.ls {
+            return prping::ls_builtins(&resolve_libs(&e.lib));
+        }
+        if let Some(hex) = &e.hex {
+            return prping::decode_hex(hex);
+        }
+        if let Some(pcap) = &e.pcap {
+            return prping::decode_pcap(std::path::Path::new(pcap));
+        }
+        let file = cmd
+            .target
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!(t!("errors.eng_requires_file")))?;
+        let params = parse_params(&e.params)?;
+        return prping::analyze_file(std::path::Path::new(file), &params, &resolve_libs(&e.lib));
+    }
+
+    // 包发送（--pkg FILE [HOST:PORT]；目标省略时逐包从包内推导）
+    if let Some(file) = &e.pkg {
+        let target = match cmd.target.as_deref() {
+            Some(t) => {
+                let (host, port) = parse_target(t)?;
+                let port = port.ok_or_else(|| anyhow::anyhow!(t!("errors.pkg_requires_port")))?;
+                Some(resolve_target(&host, port)?)
+            }
+            None => None,
+        };
+        let opts = prping::PkgOptions {
+            target,
+            mode: if e.raw {
+                prping::SendMode::Raw {
+                    iface: e.iface.clone(),
+                }
+            } else {
+                prping::SendMode::Payload
+            },
+            params: parse_params(&e.params)?,
+            wait: e.wait,
+            fuzz: e.fuzz,
+            out: e.out.as_ref().map(std::path::PathBuf::from),
+            libs: resolve_libs(&e.lib),
+        };
+        return prping::send_packets(std::path::Path::new(file), &opts);
+    }
+
+    // 没有 --eng / --pkg / 子模式：打印用法并报错
+    let mut w = stderr();
+    let _ = writeln_orange(&mut w, t!("errors.engine_mode_required"));
+    let _ = writeln_red(
+        &mut w,
+        "--eng FILE.pkt | --eng --lsp | --pkg FILE.pkt [HOST:PORT]",
+    );
+    std::process::exit(2);
+}
+
+/// 库目录列表：默认当前目录 `lib/`（存在时）+ `--lib` 追加的路径。
+fn resolve_libs(extra: &[String]) -> Vec<std::path::PathBuf> {
+    let mut libs = Vec::new();
+    let default = std::path::Path::new("lib");
+    if default.is_dir() {
+        libs.push(default.to_path_buf());
+    }
+    for l in extra {
+        libs.push(std::path::PathBuf::from(l));
+    }
+    libs
+}
+
+/// 解析 `--pkg` 目标（DNS 解析）。
+fn resolve_target(host: &str, port: u16) -> anyhow::Result<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let mut addrs: Vec<std::net::SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .ok()
+        .map(|it| it.collect())
+        .ok_or_else(|| anyhow::anyhow!(t!("errors.resolve_failed", host = host)))?;
+    if addrs.is_empty() {
+        anyhow::bail!(t!("errors.resolve_failed", host = host));
+    }
+    addrs.sort_by_key(|a| u8::from(a.is_ipv6()));
+    Ok(addrs[0])
+}
+
+/// 解析 `--params k=v,k2=v2`。
+fn parse_params(list: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for s in list {
+        for pair in s.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = pair
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!(t!("errors.params_format", value = pair)))?;
+            out.push((k.trim().to_string(), v.trim().to_string()));
+        }
+    }
+    Ok(out)
 }
 
 /// 运行期间隐藏终端回显 `^C` 的 guard：构造时关闭 stdin tty 的 ECHOCTL，
@@ -641,6 +1030,13 @@ impl Drop for CtrlCEchoGuard {
 
 #[cfg(not(unix))]
 struct CtrlCEchoGuard;
+
+// Windows 控制台不回显 `^C`，guard 是空操作；实现 Drop 让 `drop(_ctrl_echo)`
+// 在 `process::exit` 前的调用保持类型一致（clippy drop_non_drop 门禁）。
+#[cfg(not(unix))]
+impl Drop for CtrlCEchoGuard {
+    fn drop(&mut self) {}
+}
 
 /// `--json` 模式隐藏终端回显的 `^C`（Unix 且 stdin 为 tty 时；Windows 控制台不回显 `^C`）。
 ///

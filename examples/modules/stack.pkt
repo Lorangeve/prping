@@ -1,0 +1,11 @@
+# 模块系统 demo 第 3 层：完整协议栈（import 传输层组合元件，再包 IP/以太网）
+# 运行：prping --eng examples/modules/stack.pkt
+
+import transport { web, dns }
+
+# use(包组) → 逐包包裹：web、dns 各自再包 ipv4 + eth（2 包）
+out = use(web, dns) |> ipv4(src="10.0.0.1", dst="10.0.0.2")
+                   |> eth(src_mac="00:11:22:33:44:55", dst_mac="66:77:88:99:aa:bb")
+
+export:
+- out

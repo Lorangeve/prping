@@ -1,0 +1,13 @@
+# 应用层 demo：DNS 查询（A/AAAA 多问题 + 带响应标志的查询）
+# 运行：prping --eng examples/app_dns.pkt
+#   prping --pkg examples/app_dns.pkt HOST:PORT   （发 DNS 载荷）
+#
+# 注意：headers.dns 的 questions 是纯名字列表（qtype 固定 A/IN）；
+# 答案区（answers）需用 hex/raw 直喂 dns_bytes 自拼。
+
+q = dns(id=0xabcd, questions=["example.com", "www.example.com"])
+r = dns(id=0xabcd, flags=0x8180, questions=["example.com"])
+
+export:
+- q
+- r

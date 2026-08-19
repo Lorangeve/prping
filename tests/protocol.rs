@@ -142,6 +142,8 @@ fn run_udp_requires_port() {
         receive: false,
         bandwidth: false,
         graph: false,
+        mtu: false,
+        source: None,
     };
     let err = run(&cfg, |_| {}).expect_err("should fail");
     assert!(matches!(err, PrpingError::UdpRequiresPort));
@@ -235,7 +237,37 @@ fn ping_config() -> PingConfig {
         receive: false,
         bandwidth: false,
         graph: false,
+        mtu: false,
+        source: None,
     }
+}
+
+// ---------- 源绑定 -I ----------
+
+/// TCP ping 指定源地址：本地监听 + 源绑定 127.0.0.1，连接来自该地址。
+#[test]
+fn tcp_ping_with_source_bind() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut s, peer) = listener.accept().unwrap();
+        assert_eq!(peer.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+        let mut buf = [0u8; 16];
+        let _ = s.read(&mut buf);
+    });
+    reset_interrupt();
+    let mut cfg = ping_config();
+    cfg.host = "127.0.0.1".into();
+    cfg.port = port;
+    cfg.count = 1;
+    cfg.source = Some("127.0.0.1".parse().unwrap());
+    let outcome = run(&cfg, |_| {}).expect("run");
+    let prping::OutcomeKind::Ping(stats) = outcome else {
+        panic!("期望 Ping 统计");
+    };
+    assert_eq!(stats.received, 1, "应收到 1 次成功");
+    server.join().unwrap();
 }
 
 // ---------- 带宽客户端四方向（进程内，run() 同步 + serve 全局 executor） ----------
@@ -269,7 +301,9 @@ fn bw_client(
         udp,
         receive,
         bandwidth: true,
+        source: None,
         graph: false,
+        mtu: false,
     };
     let kind = run(&cfg, |_| {}).expect("run");
     let report = match kind {

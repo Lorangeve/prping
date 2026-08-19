@@ -206,8 +206,8 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
     );
 
     if warmup > 0 && !receive {
-        let mut stream = util::connect_timeout(addr).await?;
-        stream.set_nodelay(true)?;
+        let mut stream = util::connect_timeout(addr, cfg.source).await?;
+        stream.get_ref().set_nodelay(true)?;
         let payload = vec![0u8; size];
         for _ in 0..warmup {
             if util::interrupted() {
@@ -221,8 +221,8 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
     }
 
     if receive {
-        let mut stream = util::connect_timeout(addr).await?;
-        stream.set_nodelay(true)?;
+        let mut stream = util::connect_timeout(addr, cfg.source).await?;
+        stream.get_ref().set_nodelay(true)?;
         stream.write_all(&[0xFF]).await?;
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
         let target_bytes = deadline.map(|_| u64::MAX).unwrap_or(count * size as u64);
@@ -267,8 +267,8 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
     }
 
     if parallel <= 1 {
-        let mut stream = util::connect_timeout(addr).await?;
-        stream.set_nodelay(true)?;
+        let mut stream = util::connect_timeout(addr, cfg.source).await?;
+        stream.get_ref().set_nodelay(true)?;
         let payload = vec![0u8; size];
         let mut times = Vec::new();
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
@@ -318,14 +318,15 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let done = Arc::new(AtomicU64::new(0));
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
         let want_times = cfg.histogram.is_some();
+        let source = cfg.source;
         let mut tasks = Vec::new();
         for _ in 0..parallel {
             let a = addr;
             let rem = remaining.clone();
             let done = done.clone();
             tasks.push(smol::spawn(async move {
-                let mut stream = util::connect_timeout(a).await?;
-                stream.set_nodelay(true)?;
+                let mut stream = util::connect_timeout(a, source).await?;
+                stream.get_ref().set_nodelay(true)?;
                 let payload = vec![0u8; size];
                 let mut sent = 0u64;
                 let mut times = Vec::new();
@@ -426,12 +427,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         cfg.warmup,
         cfg.duration,
     );
-    let bind_addr: SocketAddr = if addr.is_ipv4() {
-        "0.0.0.0:0".parse()?
-    } else {
-        "[::]:0".parse()?
-    };
-    let sock = util::bind_udp(bind_addr)?;
+    let sock = util::bind_udp(util::local_bind(addr.is_ipv4(), cfg.source))?;
     let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
 
     if warmup > 0 && !receive {

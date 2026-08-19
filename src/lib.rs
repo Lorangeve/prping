@@ -50,6 +50,8 @@
 //!     receive: false,
 //!     bandwidth: false,
 //!     graph: false,
+//!     mtu: false,
+//!     source: None,
 //! };
 //! let kind = run(&cfg, |_| {}).expect("run");
 //! ```
@@ -58,9 +60,15 @@ rust_i18n::i18n!("locales");
 
 mod bandwidth;
 mod drive;
+mod eng;
 mod icmp;
 mod latency;
+mod manual;
+mod mtu;
 mod output;
+mod pcap;
+mod pkg;
+mod rawwin;
 mod stats;
 mod tcp;
 mod udp;
@@ -68,10 +76,23 @@ mod util;
 
 pub use stats::{HistogramSpec, Stats, parse_histogram, set_json, set_pretty};
 pub use util::{
-    PingConfig, configure_executor_threads, interrupted, reset_interrupt, set_interrupted,
+    PingConfig, configure_executor_threads, interrupted, reset_interrupt, resolve_source,
+    set_interrupted,
 };
 // bin 侧错误/警告渲染用（颜色统一在 output.rs 管理）
+pub use manual::{Section, find_sections, manual_for, print_paged, sections, toc};
+pub use mtu::{MtuReport, probe_mtu};
 pub use output::{stderr, writeln_orange, writeln_red};
+// 引擎侧（--eng / --pkg / LSP / pcap）：packet-dsl 的宿主 CLI
+pub use eng::{
+    analyze_file, decode_hex, decode_pcap, ls_builtins, render_dissected, render_hexdump,
+    render_layers, render_packet, render_packet_fields, run_lsp, run_lsp_on,
+};
+pub use pcap::{LinkType, PcapRecord, linktype_of, read_pcap, write_pcap};
+pub use pkg::{
+    PkgOptions, SendMode, SendOutcome, Transport, derive_target, extract_payload, patch_zero_src,
+    send_packets, sniffer_match,
+};
 
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
@@ -83,6 +104,8 @@ pub enum OutcomeKind {
     Ping(Stats),
     /// 带宽测试报告。
     Bandwidth(BandwidthReport),
+    /// MTU 探测报告。
+    Mtu(MtuReport),
 }
 
 /// 带宽测试报告。
@@ -134,6 +157,8 @@ pub enum PrpingError {
     BandwidthRequiresPort,
     #[error("-4 and -6 cannot be used together")]
     ConflictV4V6,
+    #[error("MTU probe does not take a port: --mtu HOST")]
+    MtuRequiresNoPort,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -166,6 +191,15 @@ pub fn run(
     // 非带宽模式 -P 无效（-b -u 的 -P 警告在带宽分支）
     if cfg.parallel > 1 && !cfg.bandwidth {
         on_warning(PrpingWarning::ParallelIgnored);
+    }
+
+    // MTU 探测模式（--mtu）
+    if cfg.mtu {
+        if cfg.port != 0 {
+            return Err(PrpingError::MtuRequiresNoPort);
+        }
+        let report = mtu::probe_mtu(&cfg)?;
+        return Ok(OutcomeKind::Mtu(report));
     }
 
     if cfg.bandwidth {

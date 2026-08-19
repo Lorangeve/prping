@@ -61,7 +61,7 @@ impl Probe for LatencyTcpProbe<'_> {
         is_warmup: bool,
     ) -> anyhow::Result<ProbeOutcome> {
         let start = Instant::now();
-        let mut stream = match util::connect_first(&self.addrs).await {
+        let mut stream = match util::connect_first(&self.addrs, self.cfg.source).await {
             Ok(s) => s,
             Err(e) => {
                 if !self.cfg.quiet && !stats::json() {
@@ -72,7 +72,7 @@ impl Probe for LatencyTcpProbe<'_> {
                 });
             }
         };
-        stream.set_nodelay(true)?;
+        stream.get_ref().set_nodelay(true)?;
 
         if self.cfg.receive {
             // 发送触发字节，服务器回送 size 字节
@@ -146,12 +146,7 @@ impl Probe for LatencyTcpProbe<'_> {
 }
 
 async fn run_udp_client(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
-    let bind_addr: SocketAddr = if addr.is_ipv4() {
-        "0.0.0.0:0".parse()?
-    } else {
-        "[::]:0".parse()?
-    };
-    let sock = util::bind_udp(bind_addr)?;
+    let sock = util::bind_udp(util::local_bind(addr.is_ipv4(), cfg.source))?;
     let payload = vec![0x42u8; cfg.size.unwrap()];
     let trigger = util::udp_receive_trigger(cfg.size.unwrap(), 1);
     let buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap() + 512];

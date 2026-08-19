@@ -121,6 +121,11 @@ pub struct Stats {
     times: Vec<Duration>,
     timeline: Vec<(f64, f64)>, // (seconds from start, latency ms)
     t0: Option<Instant>,
+    // 抖动：相邻接收样本 RTT 差的绝对值；丢包打断连续链（prev 重置）
+    prev_rtt: Option<Duration>,
+    jitter_sum: f64, // 秒
+    jitter_max: Duration,
+    jitter_pairs: u64,
 }
 
 impl Stats {
@@ -137,6 +142,13 @@ impl Stats {
         self.min = Some(self.min.map_or(rtt, |m| m.min(rtt)));
         self.max = Some(self.max.map_or(rtt, |m| m.max(rtt)));
         self.times.push(rtt);
+        if let Some(prev) = self.prev_rtt {
+            let d = rtt.abs_diff(prev);
+            self.jitter_sum += d.as_secs_f64();
+            self.jitter_max = self.jitter_max.max(d);
+            self.jitter_pairs += 1;
+        }
+        self.prev_rtt = Some(rtt);
         // 无限 ping 时内存有界：窗口上限 10000，超出丢弃最旧（min/max/loss 仍累计）
         if self.times.len() > MAX_SAMPLES {
             self.times.remove(0);
@@ -146,6 +158,7 @@ impl Stats {
 
     pub fn record_loss(&mut self) {
         self.sent += 1;
+        self.prev_rtt = None; // 丢包打断相邻样本链
     }
 
     pub fn loss_pct(&self) -> f64 {
@@ -165,6 +178,21 @@ impl Stats {
             return None;
         }
         Some(self.total / self.received as u32)
+    }
+
+    /// 抖动：相邻接收样本 RTT 差的平均绝对值（丢包链被重置）。
+    pub fn jitter(&self) -> Option<Duration> {
+        if self.jitter_pairs == 0 {
+            return None;
+        }
+        Some(Duration::from_secs_f64(
+            self.jitter_sum / self.jitter_pairs as f64,
+        ))
+    }
+
+    /// 最大相邻 RTT 差。
+    pub fn jitter_max(&self) -> Option<Duration> {
+        (self.jitter_pairs > 0).then_some(self.jitter_max)
     }
 
     pub fn stddev(&self) -> Option<Duration> {
@@ -265,6 +293,11 @@ pub fn print_summary(
             line += &format!(
                 ",\"min_ms\":{min:.2},\"max_ms\":{max:.2},\"avg_ms\":{avg:.2},\"stddev_ms\":{stddev:.2}"
             );
+            if let Some(j) = stats.jitter() {
+                let jitter = j.as_secs_f64() * 1000.0;
+                let jitter_max = stats.jitter_max().unwrap().as_secs_f64() * 1000.0;
+                line += &format!(",\"jitter_ms\":{jitter:.2},\"jitter_max_ms\":{jitter_max:.2}");
+            }
             if stats.received >= 2 {
                 let p50 = stats.percentile(50.0).unwrap().as_secs_f64() * 1000.0;
                 let p95 = stats.percentile(95.0).unwrap().as_secs_f64() * 1000.0;
@@ -333,6 +366,17 @@ pub fn print_summary(
                 w,
                 "  {}",
                 t!("stats.percentiles", p50 = p50, p95 = p95, p99 = p99)
+            )?;
+        }
+        if let (Some(j), Some(jm)) = (stats.jitter(), stats.jitter_max()) {
+            writeln!(
+                w,
+                "  {}",
+                t!(
+                    "stats.jitter",
+                    avg = format!("{:.2}", j.as_secs_f64() * 1000.0),
+                    max = format!("{:.2}", jm.as_secs_f64() * 1000.0)
+                )
             )?;
         }
     }
@@ -610,6 +654,37 @@ mod tests {
         assert_eq!(s.percentile(50.0), None);
         assert_eq!(s.loss_pct(), 0.0);
     }
+    #[test]
+    fn test_jitter() {
+        let mut s = Stats::default();
+        assert_eq!(s.jitter(), None, "无样本无抖动");
+        s.record(Duration::from_millis(10));
+        assert_eq!(s.jitter(), None, "单样本无抖动");
+        s.record(Duration::from_millis(30)); // 差 20
+        s.record(Duration::from_millis(35)); // 差 5
+        assert_eq!(
+            s.jitter(),
+            Some(Duration::from_secs_f64(0.0125)),
+            "平均差 (20+5)/2=12.5ms"
+        );
+        assert_eq!(s.jitter_max(), Some(Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn test_jitter_reset_on_loss() {
+        let mut s = Stats::default();
+        s.record(Duration::from_millis(10));
+        s.record(Duration::from_millis(30)); // 差 20
+        s.record_loss(); // 打断链
+        s.record(Duration::from_millis(100)); // 与前一个接收样本不再比较
+        assert_eq!(
+            s.jitter(),
+            Some(Duration::from_millis(20)),
+            "丢包后不再累计"
+        );
+        assert_eq!(s.jitter_max(), Some(Duration::from_millis(20)));
+    }
+
     #[test]
     fn test_sorted_times() {
         let mut s = Stats::default();

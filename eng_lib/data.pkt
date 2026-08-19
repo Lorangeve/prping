@@ -1,0 +1,77 @@
+# eng_lib/data.pkt —— pkglang 标准库：底层数据组装（raw/hex 载荷 → IP/Eth 层）
+#
+# 引擎内置的 raw()/hex() 是数据原语（原样字节载荷）；本库在其之上提供
+# 「字节数据直接组装成包」的函数：把 payload（字符串/字节列表/params 引用）
+# 作为数据参数，产出 [raw, ...] 层片段，可直接 `use()` 或作为 def 出包。
+#
+# 用法：import data { eth_frame, ip4_packet, net4_packet, net6_packet }
+#
+# 与 net.pkt 的区别：net4/net6 是「包裹 use 载荷」的组合层；data 库的函数
+# 把载荷作为显式参数，一次给出完整的「数据 → 包」栈。
+#
+# doc 注释约定同 net.pkt：摘要 + `@param`/`@auto` 标签行，`--eng --ls` 展示。
+
+# 字节载荷 → [raw, eth]（以太网帧）
+# @param payload: 载荷（字符串/字节列表/params 引用）
+# @param src_mac: 源 MAC；默认全零（raw 发送时网关不认，建议显式指定或随机）
+# @param dst_mac: 目标 MAC；默认广播
+# @param ethertype: 以太网类型；省略按内层推导
+# @auto: 自动补 eth ethertype；IP 层字段需内层函数处理
+func eth_frame(payload, src_mac="00:00:00:00:00:00", dst_mac="ff:ff:ff:ff:ff:ff", ethertype) {
+    raw(bytes=payload) |> eth(src_mac=src_mac, dst_mac=dst_mac, ethertype=ethertype)
+}
+
+# 字节载荷 → [raw, ipv4]（IPv4 包，无链路层）
+# @param payload: 载荷（字符串/字节列表/params 引用）
+# @param dst: 目标 IPv4 地址（必填；可域名）
+# @param src: 源 IPv4 地址；默认 0.0.0.0（raw 发送时自动填本地地址）
+# @param ttl: IP 生存时间
+# @param proto: 内层协议号；省略按内层推导
+# @param tos: 服务类型
+# @param id: IP 标识
+# @param flags: IP 标志
+# @auto: 自动补 total_length/header checksum；proto 按内层推导
+func ip4_packet(payload, dst, src="0.0.0.0", ttl=64, proto, tos, id=0, flags) {
+    raw(bytes=payload) |> ipv4(src=src, dst=dst, ttl=ttl, proto=proto, tos=tos, id=id, flags=flags)
+}
+
+# 字节载荷 → [raw, ipv4, eth]（IPv4 完整包）
+# @param payload: 载荷（字符串/字节列表/params 引用）
+# @param dst: 目标 IPv4 地址（必填；可域名）
+# @param src: 源 IPv4 地址；默认 0.0.0.0（raw 发送时自动填本地地址）
+# @param ttl: IP 生存时间
+# @param proto: 内层协议号；省略按内层推导
+# @param tos: 服务类型
+# @param id: IP 标识
+# @param flags: IP 标志
+# @param src_mac: 源 MAC；默认全零（raw 发送时网关不认，建议显式指定或随机）
+# @param dst_mac: 目标 MAC；默认广播
+# @param ethertype: 以太网类型；省略按内层推导
+# @auto: 自动补 IPv4 total_length/header checksum、eth ethertype；proto 按内层推导
+func net4_packet(payload, dst, src="0.0.0.0", ttl=64, proto, tos, id=0, flags,
+                 src_mac="00:00:00:00:00:00", dst_mac="ff:ff:ff:ff:ff:ff", ethertype) {
+    raw(bytes=payload) |> ipv4(src=src, dst=dst, ttl=ttl, proto=proto, tos=tos, id=id, flags=flags)
+        |> eth(src_mac=src_mac, dst_mac=dst_mac, ethertype=ethertype)
+}
+
+# 字节载荷 → [raw, ipv6, eth]（IPv6 完整包）
+# @param payload: 载荷（字符串/字节列表/params 引用）
+# @param dst: 目标 IPv6 地址（必填；可域名）
+# @param src: 源 IPv6 地址；默认 ::（raw 发送时自动填本地地址）
+# @param hop_limit: 跳数限制
+# @param next_header: 内层协议头类型；省略按内层推导
+# @param src_mac: 源 MAC；默认全零（raw 发送时网关不认，建议显式指定或随机）
+# @param dst_mac: 目标 MAC；默认广播
+# @param ethertype: 以太网类型；省略按内层推导
+# @auto: 自动补 IPv6 payload_length、eth ethertype；next_header 按内层推导
+func net6_packet(payload, dst, src="::", hop_limit=64, next_header,
+                 src_mac="00:00:00:00:00:00", dst_mac="ff:ff:ff:ff:ff:ff", ethertype) {
+    raw(bytes=payload) |> ipv6(src=src, dst=dst, hop_limit=hop_limit, next_header=next_header)
+        |> eth(src_mac=src_mac, dst_mac=dst_mac, ethertype=ethertype)
+}
+
+export:
+- eth_frame
+- ip4_packet
+- net4_packet
+- net6_packet

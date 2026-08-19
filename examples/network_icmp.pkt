@@ -1,0 +1,44 @@
+# 网络层 demo：ICMP echo 探测（IPv4 / IPv6 两个变体，测试目标用百度）
+#
+# 用法（测试对 www.baidu.com）：
+#   prping --eng examples/network_icmp.pkt           # 分析（src MAC 每次随机）
+#   sudo prping --pkg examples/network_icmp.pkt \
+#       --params dst=www.baidu.com --wait 3          # 域名自动解析；src 自动用本机地址
+#   # 地址也可显式注入（a=1,b=2 形式；v4 用 src/dst，v6 用 src6/dst6）：
+#   sudo prping --pkg examples/network_icmp.pkt \
+#       --params src=192.168.1.1,dst=223.5.5.5,dst6=2400:da00::6666 --wait 3
+#   # 默认 dst/dst6 是域名：ip4/ip6/地址字段会自动解析（也可用 dns("host") 值原语）
+#
+# 注意：本文件是 eth 原始帧（AF_PACKET 直发物理网卡，绕过内核路由/代理）。
+# 走 Clash 等代理 fake-ip（198.18.0.0/15）的网络请用 network_icmp_bare.pkt
+# （裸 IP 走内核路由，源地址由内核按路由填）。
+#
+# v6 默认地址显式给出：域名解析 v6 依赖本机 AAAA 记录（多数代理/家庭 DNS 无 AAAA），
+# 无 AAAA 时用 --params dst6=<v6 地址> 显式提供。
+#
+# 随机源 MAC：6 个构建期随机字节（rand8() 是整数，用 u8() 转字节；mac() 接受
+# 字节列表直通）。目标 MAC 用广播 ff:ff:ff:ff:ff:ff：原始帧要经网关转发，
+# 随机单播 MAC 交换机可能不泛洪；广播帧必达网关，网关按 IP 层转发。
+func rand_mac() -> bytes {
+    concat(u8(rand8()), u8(rand8()), u8(rand8()), u8(rand8()), u8(rand8()), u8(rand8()))
+}
+
+payload = raw(bytes="prping icmp probe")
+
+# full4：ICMPv4 echo request（type=8，回包 type=0）
+# src=0.0.0.0 = 发送时自动填本机到目标的源地址（raw 原始帧内核不填，prping 补）
+full4 = use(payload) |> icmp(type=8, id=0x1234, seq=1)
+                    |> ipv4(src=params("src", "0.0.0.0"), dst=params("dst", "www.baidu.com"))
+                    |> eth(src_mac=rand_mac(), dst_mac="ff:ff:ff:ff:ff:ff")
+# full6：ICMPv6 echo request（type=128，回包 type=129）
+full6 = use(payload) |> icmp(type=128, id=0x1234, seq=1)
+                    |> ipv6(src=params("src6", "::"), dst=params("dst6", "2400:da00::6666"))
+                    |> eth(src_mac=rand_mac(), dst_mac="ff:ff:ff:ff:ff:ff")
+
+# 回包校验（--pkg --wait）：回包必须是 ICMP 且 id/seq 与发包一致（v4/v6 通用）
+sniffer:
+  - match icmp(id=id, seq=seq)
+
+export:
+- full4
+- full6

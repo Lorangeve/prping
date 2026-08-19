@@ -26,8 +26,63 @@ pub struct PingConfig {
     pub receive: bool,
     /// 带宽测试模式（`-b`）。
     pub bandwidth: bool,
+    /// MTU 探测模式（`--mtu`）。
+    pub mtu: bool,
     /// 是否打印时间线图（`-g`）。
     pub graph: bool,
+    /// 源地址/网卡绑定（`-I`，None = 内核自动选）。
+    pub source: Option<IpAddr>,
+}
+
+/// 解析 `-I` 参数：IP 地址，或 Linux 网卡名（取该网卡 IPv4 地址）。
+pub fn resolve_source(s: &str) -> anyhow::Result<IpAddr> {
+    if let Ok(ip) = s.parse::<IpAddr>() {
+        return Ok(ip);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(ip) = iface_to_ipv4(s)? {
+        return Ok(IpAddr::V4(ip));
+    }
+    anyhow::bail!(
+        "无法解析源地址 `{s}`：请用 IP 地址（如 192.168.1.10）；网卡名仅 Linux 支持（取 IPv4 地址）"
+    )
+}
+
+/// Linux：`ioctl(SIOCGIFADDR)` 取网卡 IPv4 地址；网卡不存在/无 IPv4 → None。
+#[cfg(target_os = "linux")]
+fn iface_to_ipv4(name: &str) -> std::io::Result<Option<std::net::Ipv4Addr>> {
+    use std::mem;
+    // 接口名最长 IFNAMSIZ-1
+    if name.len() >= libc::IFNAMSIZ {
+        return Ok(None);
+    }
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut ifr: libc::ifreq = unsafe { mem::zeroed() };
+    for (i, b) in name.bytes().enumerate() {
+        ifr.ifr_name[i] = b as libc::c_char;
+    }
+    let r = unsafe { libc::ioctl(fd, libc::SIOCGIFADDR as libc::c_ulong, &mut ifr) };
+    unsafe { libc::close(fd) };
+    if r < 0 {
+        return Ok(None);
+    }
+    let sin =
+        unsafe { &*(&ifr.ifr_ifru.ifru_addr as *const libc::sockaddr as *const libc::sockaddr_in) };
+    Ok(Some(std::net::Ipv4Addr::from(u32::from_be(
+        sin.sin_addr.s_addr,
+    ))))
+}
+
+/// 源绑定用的本地地址（0 端口）；`-I` 未给时按目标族取通配地址。
+pub fn local_bind(target_is_v4: bool, source: Option<IpAddr>) -> SocketAddr {
+    match source {
+        Some(s) => SocketAddr::new(s, 0),
+        None if target_is_v4 => "0.0.0.0:0".parse().unwrap(),
+        None => "[::]:0".parse().unwrap(),
+    }
 }
 
 /// 创建带大收发缓冲的 UDP socket（socket2 设置后包成 smol::Async）。
@@ -212,22 +267,40 @@ impl Run {
 }
 
 /// 带 5 秒超时的 TCP 连接（黑洞地址不会挂死 OS 超时）。
-pub async fn connect_timeout(addr: SocketAddr) -> std::io::Result<smol::net::TcpStream> {
-    smol::future::or(smol::net::TcpStream::connect(addr), async {
-        smol::Timer::after(Duration::from_secs(5)).await;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "connect timeout",
-        ))
-    })
-    .await
+pub async fn connect_timeout(
+    addr: SocketAddr,
+    source: Option<IpAddr>,
+) -> std::io::Result<smol::Async<std::net::TcpStream>> {
+    // socket2 建 socket →（可选）绑定源地址 → 阻塞 connect_timeout（5s，unblock 线程），
+    // 再转非阻塞 + smol::Async。smol::net::TcpStream 无法从已绑定的 socket 构造，统一走此路径。
+    let std_stream: std::net::TcpStream =
+        smol::unblock(move || -> std::io::Result<std::net::TcpStream> {
+            let domain = if addr.is_ipv4() {
+                socket2::Domain::IPV4
+            } else {
+                socket2::Domain::IPV6
+            };
+            let sock =
+                socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+            if let Some(src) = source {
+                sock.bind(&socket2::SockAddr::from(SocketAddr::new(src, 0)))?;
+            }
+            sock.connect_timeout(&socket2::SockAddr::from(addr), Duration::from_secs(5))?;
+            Ok(sock.into())
+        })
+        .await?;
+    std_stream.set_nonblocking(true)?;
+    smol::Async::new(std_stream)
 }
 
 /// 逐个尝试连接（多地址回退），全部失败返回最后一个错误。
-pub async fn connect_first(addrs: &[SocketAddr]) -> std::io::Result<smol::net::TcpStream> {
+pub async fn connect_first(
+    addrs: &[SocketAddr],
+    source: Option<IpAddr>,
+) -> std::io::Result<smol::Async<std::net::TcpStream>> {
     let mut last = None;
     for a in addrs {
-        match connect_timeout(*a).await {
+        match connect_timeout(*a, source).await {
             Ok(s) => return Ok(s),
             Err(e) => last = Some(e),
         }
@@ -240,9 +313,9 @@ pub async fn connect_first(addrs: &[SocketAddr]) -> std::io::Result<smol::net::T
 ///
 /// 带宽发送方向客户端不回读服务端回显，直接 drop 会因接收缓冲未读数据触发 RST，
 /// 导致服务端统计的接收量偏小；shutdown + drain 让服务端完整处理后再关闭。
-pub async fn drain_after_send(stream: &mut smol::net::TcpStream) {
+pub async fn drain_after_send(stream: &mut smol::Async<std::net::TcpStream>) {
     use smol::io::AsyncReadExt;
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.get_ref().shutdown(std::net::Shutdown::Write);
     let mut buf = [0u8; 65536];
     loop {
         match stream.read(&mut buf).await {

@@ -1,0 +1,16 @@
+# 应用层 demo：HTTP 请求变体（GET / POST / PUT，头与 body）
+# 运行：prping --eng examples/app_http.pkt
+#   prping --pkg examples/app_http.pkt HOST:PORT   （发 HTTP 载荷）
+
+get  = http(method="GET", path="/")
+post = http(method="POST", path="/login",
+            headers=["Content-Type: application/json", "User-Agent: prping/0.1"],
+            body="{\"user\":\"admin\",\"pass\":\"123456\"}")
+put  = http(method="PUT", path="/api/items/1",
+            headers=["Content-Type: application/json"],
+            body="{\"name\":\"probe\"}")
+
+export:
+- get
+- post
+- put

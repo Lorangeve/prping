@@ -1,0 +1,27 @@
+# 随机字段 + 组合函数 demo：net4/net6 一次生成 IP+以太网层
+# 运行：prping --eng examples/random_demo.pkt
+#      prping --pkg examples/random_demo.pkt   （目标从包内推导）
+
+# 引擎内置只剩原语；net4/net6 与 eth/ipv4/udp/... 层头函数都在 pkglang 标准库
+# eng_lib（发布为 lib/），默认库自动加载，库导出隐式可见：无需 import 直接可用
+
+p1 = raw(bytes="probe")
+p2 = raw(bytes="hi")
+p3 = raw(bytes="v6")
+
+# 随机值用构建期字节原语：sport=rand16()（udp 默认即随机端口）、id=rand16()
+# （"random" 关键字已随内置层函数移除；目标地址固定）
+probe = use(p1) |> udp(sport=rand16(), dport=5353)
+               |> ipv4(src="10.0.0.1", dst="8.8.8.8", ttl=64, id=rand16())
+               |> eth(src_mac="02:00:00:00:00:01", dst_mac="ff:ff:ff:ff:ff:ff")
+
+# 组合函数 net4：一条调用给出 ipv4+eth，默认 src=0.0.0.0、TTL 64、广播 dst_mac
+quick = use(p2) |> udp(dport=53) |> net4(dst="1.1.1.1")
+
+# 组合函数 net6
+v6 = use(p3) |> udp(dport=53) |> net6(dst="2001:4860:4860::8888")
+
+export:
+- probe
+- quick
+- v6

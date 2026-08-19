@@ -1,0 +1,145 @@
+# eng_lib/headers.pkt —— pkglang 标准库：层头构建函数（由 hex/raw + 字节原语拼出）
+#
+# 引擎只留 hex/raw（数据原语）与字节原语（concat/u8/be16/ip4/mac/cksum/...）；
+# eth/ipv4/... 层头由这里用 func + 原语构建。这些函数与引擎内置同名，
+# 库导出优先（作用域遮蔽内置）。
+#
+# 自动字段：total_length / header checksum / TCP·UDP checksum 依赖载荷长度与伪头部，
+# 函数内无法算——序列化时引擎按层类型自动补（`layer` 层标注原语，见 bytes.pkt）。
+#
+# 参数约定与内置一致：未给默认值 = 自动值（引擎补）；这里给出合理的默认。
+#
+# doc 注释约定同 net.pkt：摘要 + `@param`/`@auto` 标签行，`--eng --ls` 展示。
+
+# ── 链路层 ─────────────────────────────────────────────────
+
+# 14B 以太网头
+# @param dst_mac: 目标 MAC；默认广播
+# @param src_mac: 源 MAC；默认全零（raw 发送时网关不认，建议显式指定或随机）
+# @param ethertype: 以太网类型；默认 0x0800（IPv4）
+# @auto: ethertype 仍是默认占位 0x0800 而内层是 ARP/IPv6 时按内层推导（0x0806/0x86dd）
+func eth(dst_mac="ff:ff:ff:ff:ff:ff", src_mac="00:00:00:00:00:00", ethertype=0x0800) {
+    eth_bytes(concat(mac(dst_mac), mac(src_mac), be16(ethertype)))
+}
+
+# 28B ARP 头（htype=1 ptype=0x0800 hlen=6 plen=4）
+# @param op: 操作码："request"/"reply"（或数字）
+# @param sha: 发送方硬件地址（源 MAC）
+# @param spa: 发送方协议地址（源 IPv4；可域名）
+# @param tha: 目标硬件地址（目标 MAC）
+# @param tpa: 目标协议地址（目标 IPv4；可域名）
+# @auto: 无自动字段（ARP 无校验和）
+func arp(op="request", sha="00:00:00:00:00:00", spa="0.0.0.0", tha="00:00:00:00:00:00", tpa="0.0.0.0") {
+    arp_bytes(concat(be16(1), be16(0x0800), u8(6), u8(4), be16(arpop(op)), mac(sha), ip4(spa), mac(tha), ip4(tpa)))
+}
+
+# ── 网络层 ─────────────────────────────────────────────────
+
+# 20B IPv4 头；total_length（offset 2-3）与 header checksum（offset 10-11）由引擎自动补
+# @param src: 源 IPv4 地址；默认 0.0.0.0（raw 发送时自动填本地地址；可域名）
+# @param dst: 目标 IPv4 地址；默认广播；可域名
+# @param ttl: IP 生存时间
+# @param proto: 内层协议号；省略按内层推导（icmp→1/tcp→6/udp→17）
+# @param tos: 服务类型（Type of Service）
+# @param id: IP 标识（分片用）
+# @param flags: IP 标志（"df"/"mf"，默认无）
+# @auto: 自动补 total_length 与 header checksum；proto 占位 0 且内层 TCP/UDP/ICMP 时推导
+func ipv4(src="0.0.0.0", dst="255.255.255.255", ttl=64, proto=0, tos=0, id=0, flags=0) {
+    ipv4_bytes(concat(hex("45"), u8(tos), be16(0), be16(id), be16(ip4flags(flags)), u8(ttl), u8(proto), be16(0), ip4(src), ip4(dst)), src=src, dst=dst)
+}
+
+# 40B IPv6 头；payload_length（offset 4-5）由引擎自动补
+# @param src: 源 IPv6 地址；默认 ::（raw 发送时自动填本地地址；可域名）
+# @param dst: 目标 IPv6 地址；默认 ::；可域名
+# @param hop_limit: 跳数限制
+# @param next_header: 内层协议头类型；省略按内层推导（icmp→58/tcp→6/udp→17）
+# @auto: 自动补 payload_length；next_header 占位 59 时按内层推导
+func ipv6(src="::", dst="::", hop_limit=64, next_header=59) {
+    ipv6_bytes(concat(hex("60000000"), be16(0), u8(next_header), u8(hop_limit), ip6(src), ip6(dst)), src=src, dst=dst)
+}
+
+# ICMP 头（+可选载荷）；checksum（offset 2-3）由引擎自动补（覆盖头+载荷）
+# @param type: ICMP 类型；默认 8（echo request）
+# @param code: ICMP 代码
+# @param id: 标识（echo 用；可 rand16()）
+# @param seq: 序号（echo 用；可 rand16()）
+# @param payload: 载荷字节（字符串或字节列表）
+# @auto: 自动补 checksum（覆盖头+载荷）
+func icmp(type=8, code=0, id=0, seq=0, payload="") {
+    icmp_bytes(concat(u8(type), u8(code), be16(0), be16(id), be16(seq), bytes(payload)))
+}
+
+# ── 传输层 ─────────────────────────────────────────────────
+
+# 20B TCP 头（MSS option 需条件能力，留待）
+# flags：u8（bit 序 syn=0x02/ack=0x10/...）；data offset 固定 5（20B）
+# checksum（offset 16-17，含外层 IP 伪头部）由引擎自动补
+# @param sport: 源端口；默认随机
+# @param dport: 目标端口
+# @param seq: 序列号
+# @param ack: 确认号
+# @param flags: 标志（"syn"/"ack"/"syn,ack"/"fin"/... 或数字）
+# @param window: 窗口大小
+# @auto: 自动补 checksum（含外层 IP 伪头部）
+func tcp(sport=rand16(), dport=0, seq=0, ack=0, flags="syn", window=65535) {
+    tcp_bytes(concat(
+        be16(sport), be16(dport), be32(seq), be32(ack),
+        u8(0x50), u8(tcpflags(flags)), be16(window), be16(0), be16(0)
+    ))
+}
+
+# 8B UDP 头；length（offset 4-5）与 checksum（offset 6-7）引擎自动补
+# @param sport: 源端口；默认随机
+# @param dport: 目标端口
+# @auto: 自动补 length 与 checksum（含外层 IP 伪头部）
+func udp(sport=rand16(), dport=0) {
+    udp_bytes(concat(be16(sport), be16(dport), be16(0), be16(0)))
+}
+
+# ── 应用层 ─────────────────────────────────────────────────
+
+# HTTP/1.1 文本报文；headers 为行列表，逐行 "\r\n" 拼接（reduce）
+# @param method: 请求方法；默认 GET
+# @param path: 请求路径；默认 /
+# @param version: 协议版本；默认 HTTP/1.1
+# @param headers: 头行列表（如 ["Host: example.com"]）
+# @param body: 报文体
+# @auto: 原样字节，无自动字段
+func hdr_line(acc, item) -> bytes {
+    concat(acc, bytes(item), bytes("\r\n"))
+}
+func http(method="GET", path="/", version="HTTP/1.1", headers=[], body="") {
+    http_bytes(concat(
+        bytes(method), bytes(" "), bytes(path), bytes(" "), bytes(version), bytes("\r\n"),
+        reduce(headers, bytes(""), hdr_line),
+        bytes("\r\n"), bytes(body)
+    ))
+}
+
+# DNS 报文（头 12B + 问题区）
+# questions 为名字列表，逐条 dns_name + qtype(A)/qclass(IN) 编码（reduce）
+# @param id: 事务 ID（应答匹配用；可 rand16()）
+# @param flags: 标志位；默认 0x0100（RD）
+# @param questions: 查询名字列表（如 ["www.baidu.com"]）
+# @auto: 原样字节，无自动字段
+func q(acc, item) -> bytes {
+    concat(acc, dns_name(item), be16(1), be16(1))
+}
+func dns(id=0, flags=0x0100, questions=[]) {
+    dns_bytes(concat(
+        be16(id), be16(flags),
+        be16(count(questions)), be16(0), be16(0), be16(0),
+        reduce(questions, bytes(""), q)
+    ))
+}
+
+export:
+- eth
+- arp
+- ipv4
+- ipv6
+- icmp
+- tcp
+- udp
+- http
+- dns

@@ -1,0 +1,14 @@
+# 传输层 demo：UDP（DNS 查询 / VNC 原始载荷 两个变体）
+# 运行：prping --eng examples/transport_udp.pkt
+#   prping --pkg examples/transport_udp.pkt HOST:PORT   （发 UDP 载荷，目标需回显）
+
+q   = dns(id=0x1234, questions=["example.com"])
+vnc = raw(bytes="RFB 003.008\n")
+
+# 两个 use 元件 × 一个层位 → 2 包；再包 IP/以太网
+full = use(q, vnc) |> udp(sport=12345, dport=53)
+                  |> ipv4(src="1.1.1.1", dst="8.8.8.8")
+                  |> eth(src_mac="00:11:22:33:44:55", dst_mac="66:77:88:99:aa:bb")
+
+export:
+- full

@@ -139,6 +139,8 @@ mod tests {
             receive: false,
             bandwidth: false,
             graph: false,
+            mtu: false,
+            source: None,
         }
     }
 

@@ -56,7 +56,7 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
 }
 
 async fn ping_async(addr: IpAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
-    let (sock, target) = create_socket(addr)?;
+    let (sock, target) = create_socket(addr, cfg.source)?;
     let async_sock = smol::Async::new(sock)?;
     let ident = rand_id();
     let mut probe = IcmpProbe {
@@ -122,16 +122,22 @@ impl Probe for IcmpProbe<'_> {
     }
 }
 
-fn create_socket(addr: IpAddr) -> anyhow::Result<(Socket, SockAddr)> {
+fn create_socket(addr: IpAddr, source: Option<IpAddr>) -> anyhow::Result<(Socket, SockAddr)> {
     match addr {
         IpAddr::V4(v4) => {
             let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
                 .map_err(|e| anyhow::anyhow!(t!("errors.raw_socket", error = e.to_string())))?;
+            if let Some(src) = source.filter(IpAddr::is_ipv4) {
+                sock.bind(&SockAddr::from(SocketAddr::new(src, 0)))?;
+            }
             Ok((sock, SockAddr::from(SocketAddr::new(IpAddr::V4(v4), 0))))
         }
         IpAddr::V6(v6) => {
             let sock = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
                 .map_err(|e| anyhow::anyhow!(t!("errors.raw_socket", error = e.to_string())))?;
+            if let Some(src) = source.filter(IpAddr::is_ipv6) {
+                sock.bind(&SockAddr::from(SocketAddr::new(src, 0)))?;
+            }
             Ok((sock, SockAddr::from(SocketAddr::new(IpAddr::V6(v6), 0))))
         }
     }
@@ -289,7 +295,7 @@ fn build_v6(ident: u16, seq: u16, payload_size: usize) -> Vec<u8> {
     }
     b
 }
-fn icmp_cksum(data: &[u8]) -> u16 {
+pub(crate) fn icmp_cksum(data: &[u8]) -> u16 {
     let mut s = 0u32;
     for c in data.chunks(2) {
         s += if c.len() == 2 {

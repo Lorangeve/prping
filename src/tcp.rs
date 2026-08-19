@@ -69,11 +69,11 @@ impl Probe for TcpProbe<'_> {
     ) -> anyhow::Result<ProbeOutcome> {
         let start = Instant::now();
         // 5 秒 connect 超时 + 多地址回退
-        match util::connect_first(&self.addrs).await {
+        match util::connect_first(&self.addrs, self.cfg.source).await {
             Ok(stream) => {
                 let rtt = start.elapsed();
-                let local = stream.local_addr().ok();
-                let peer = stream.peer_addr().unwrap_or(self.addrs[0]);
+                let local = stream.get_ref().local_addr().ok();
+                let peer = stream.get_ref().peer_addr().unwrap_or(self.addrs[0]);
                 if !self.cfg.quiet && !stats::json() {
                     print_connected(w, peer, local, rtt, is_warmup)?;
                 }

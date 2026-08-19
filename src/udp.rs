@@ -43,12 +43,7 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
 }
 
 async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
-    let bind_addr: SocketAddr = if target.is_ipv4() {
-        "0.0.0.0:0".parse()?
-    } else {
-        "[::]:0".parse()?
-    };
-    let sock = util::bind_udp(bind_addr)?;
+    let sock = util::bind_udp(util::local_bind(target.is_ipv4(), cfg.source))?;
     // 前 2 字节放 seq，用于回包校验（#3：过滤杂包）
     let payload = vec![0u8; cfg.size.unwrap_or(32).max(2)];
     let buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap_or(32) + 512];

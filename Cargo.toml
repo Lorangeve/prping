@@ -7,6 +7,10 @@ edition = "2024"
 name = "prping"
 path = "src/lib.rs"
 
+[workspace]
+members = ["packet-dsl"]
+resolver = "3"
+
 [dependencies]
 smol = "2"
 bpaf = "0.9"
@@ -17,3 +21,9 @@ rust-i18n = "3"
 libc = "0.2"
 thiserror = "2"
 ploot = "0.1"
+packet-dsl = { path = "packet-dsl" }
+serde_json = "1"
+
+# Windows raw 发送兼容层（--pkg --raw）：Npcap 的 wpcap.dll 绑定（仅 Windows 目标拉取）
+[target.'cfg(windows)'.dependencies]
+pcap = "2"

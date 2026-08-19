@@ -1,0 +1,67 @@
+# eng_lib/bytes.pkt —— 层标注具名包装：引擎 `layer(kind, bytes[, src, dst])` 的 9 个别名
+#
+# 引擎只留一个通用层标注原语 `layer`（字节 → 带类型层，kind 为闭集字面量）；
+# 这里为每种层提供具名包装，供 headers.pkt 与用户脚本直接使用。
+#
+# doc 注释约定同 net.pkt：摘要 + `@param`/`@auto` 标签行，`--eng --ls` 展示。
+
+# 字节 → eth 层（14B 以太网头直喂）
+# @param bytes: 该层完整头字节（hex("...") 或字节列表）
+# @auto: 整层头用给定字节；仅 ethertype 仍是默认 0x0800 且内层为 ARP/IPv6 时按内层推导
+func eth_bytes(bytes) { layer("eth", bytes) }
+
+# 字节 → arp 层（28B ARP 头直喂）
+# @param bytes: 该层完整头字节
+# @auto: 整层头用给定字节，无自动字段
+func arp_bytes(bytes) { layer("arp", bytes) }
+
+# 字节 → ipv4 层（20B IPv4 头直喂）
+# @param bytes: 该层完整头字节
+# @param src: 源 IPv4 地址（伪头部校验和用，可选）
+# @param dst: 目标 IPv4 地址（伪头部校验和用，可选）
+# @auto: 自动补 total_length（offset 2-3）与 header checksum（offset 10-11）；
+#        proto 占位 0 且内层 TCP/UDP/ICMP 时推导
+func ipv4_bytes(bytes, src, dst) { layer("ipv4", bytes, src=src, dst=dst) }
+
+# 字节 → ipv6 层（40B IPv6 头直喂）
+# @param bytes: 该层完整头字节
+# @param src: 源 IPv6 地址（伪头部校验和用，可选）
+# @param dst: 目标 IPv6 地址（伪头部校验和用，可选）
+# @auto: 自动补 payload_length（offset 4-5）；next_header 占位 59 时按内层推导
+func ipv6_bytes(bytes, src, dst) { layer("ipv6", bytes, src=src, dst=dst) }
+
+# 字节 → icmp 层（ICMP 头直喂）
+# @param bytes: 该层完整头字节
+# @auto: 自动补 checksum（offset 2-3，覆盖头+载荷）
+func icmp_bytes(bytes) { layer("icmp", bytes) }
+
+# 字节 → tcp 层（20B TCP 头直喂）
+# @param bytes: 该层完整头字节
+# @auto: 自动补 checksum（offset 16-17，含外层 IP 伪头部）
+func tcp_bytes(bytes) { layer("tcp", bytes) }
+
+# 字节 → udp 层（8B UDP 头直喂）
+# @param bytes: 该层完整头字节
+# @auto: 自动补 length（offset 4-5）与 checksum（offset 6-7，含外层 IP 伪头部）
+func udp_bytes(bytes) { layer("udp", bytes) }
+
+# 字节 → http 层（应用层文本直喂）
+# @param bytes: 该层完整字节
+# @auto: 原样字节，无自动字段
+func http_bytes(bytes) { layer("http", bytes) }
+
+# 字节 → dns 层（DNS 报文直喂）
+# @param bytes: 该层完整字节
+# @auto: 原样字节，无自动字段
+func dns_bytes(bytes) { layer("dns", bytes) }
+
+export:
+- eth_bytes
+- arp_bytes
+- ipv4_bytes
+- ipv6_bytes
+- icmp_bytes
+- tcp_bytes
+- udp_bytes
+- http_bytes
+- dns_bytes

@@ -1,76 +1,110 @@
+---
 _version: 1
-
 icmp:
-  pinging: "Pinging %{addr} with %{size} bytes of data:"
+  pinging: 'Pinging %{addr} with %{size} bytes of data:'
   iterations: "%{total} iterations (warmup %{warmup}) ping test:"
   duration: "%{secs}s duration (warmup %{warmup}) ping test:"
-
 tcp:
-  connect_to: "TCP connect to %{addr}:%{port}:"
+  connect_to: 'TCP connect to %{addr}:%{port}:'
   iterations: "%{total} iterations (warmup %{warmup}) ping test:"
   duration: "%{secs}s duration (warmup %{warmup}) ping test:"
-
 udp:
-  pinging: "UDP ping to %{addr}:%{port} with %{size} bytes payload:"
+  pinging: 'UDP ping to %{addr}:%{port} with %{size} bytes payload:'
   iterations: "%{total} iterations (warmup %{warmup}) ping test:"
   duration: "%{secs}s duration (warmup %{warmup}) ping test:"
-  echo_hint: "Note: UDP gets a reply only if the target echoes it back — run prping -s ADDR:PORT on the target"
-
+  echo_hint: 'Note: UDP gets a reply only if the target echoes it back — run prping -s ADDR:PORT on the target'
 common:
-  resolving: "Resolving %{host} -> %{ip}"
-  reply_from: "Reply from "
-  bytes: "bytes="
-  time: "time="
-  ttl: "TTL="
+  resolving: Resolving %{host} -> %{ip}
+  reply_from: 'Reply from '
+  bytes: bytes=
+  time: time=
+  ttl: TTL=
   warmup: "(warmup)"
-  connecting_to: "Connecting to "
-  from: "from "
-  timeout: "Request timed out."
-  connect_failed: "connect failed: %{error}"
-  dest_unreachable: "Destination Host Unreachable."
-  ttl_expired: "TTL expired in transit."
-
+  connecting_to: 'Connecting to '
+  from: 'from '
+  timeout: Request timed out.
+  connect_failed: 'connect failed: %{error}'
+  dest_unreachable: Destination Host Unreachable.
+  ttl_expired: TTL expired in transit.
 stats:
-  sent_received: "Sent = %{sent}, Received = %{received}, Lost = %{lost} (%{pct}% loss),"
-  min_max_avg: "Minimum = %{min}ms, Maximum = %{max}ms, Average = %{avg}ms, StdDev = %{stddev}ms"
-  percentiles: "P50 = %{p50}ms, P95 = %{p95}ms, P99 = %{p99}ms"
-  latency_dist: "Latency distribution:"
-
+  ok: ok (fits)
+  frag: fragmentation needed
+  fail: no reply / too large
+  unreachable: destination unreachable
+  ttl_exceeded: TTL exceeded
+  timeout_note: payload=%{size} timed out twice (%{timeout}s), treated as too large
+  summary: path MTU = %{mtu} bytes (max non-fragmented payload %{payload} bytes, target %{host})
+  frag_needed_mtu: Fragmentation Needed reported MTU = %{mtu}
+  sent_received: Sent = %{sent}, Received = %{received}, Lost = %{lost} (%{pct}% loss),
+  min_max_avg: Minimum = %{min}ms, Maximum = %{max}ms, Average = %{avg}ms, StdDev = %{stddev}ms
+  percentiles: P50 = %{p50}ms, P95 = %{p95}ms, P99 = %{p99}ms
+  jitter: Jitter = %{avg}ms (max %{max}ms)
+  latency_dist: 'Latency distribution:'
 bandwidth:
-  warmup_complete: "warmup complete: %{count} sends"
-  tcp_test: "TCP Bandwidth test:"
-  udp_test: "UDP Bandwidth test:"
-  sent_bytes: "Sent = %{bytes} bytes in %{secs}s"
-  received_bytes: "Received = %{bytes} bytes in %{secs}s"
-  bandwidth: "Bandwidth = %{mbps} Mbps"
+  warmup_complete: 'warmup complete: %{count} sends'
+  tcp_test: 'TCP Bandwidth test:'
+  udp_test: 'UDP Bandwidth test:'
+  sent_bytes: Sent = %{bytes} bytes in %{secs}s
+  received_bytes: Received = %{bytes} bytes in %{secs}s
+  bandwidth: Bandwidth = %{mbps} Mbps
   progress:
     packets: "%{done}/%{total} pkts (%{done_bytes}/%{total_bytes})  %{mbps} Mbps"
     bytes: "%{done_bytes}/%{total_bytes}  %{mbps} Mbps"
     time: "%{bytes}  %{mbps} Mbps"
-
 server:
-  bandwidth_listening: "Bandwidth server listening on %{addr}"
-  connect_tag: "connect "
-  sent_tag: "sent "
-  recv_tag: "recv "
-  udp_trigger: "UDP receive-mode trigger from "
-  summary: "server summary: %{conns} connections, %{bytes} bytes received, %{sent} bytes sent in %{secs}s (avg %{mbps} Mbps)"
-
+  bandwidth_listening: Bandwidth server listening on %{addr}
+  connect_tag: 'connect '
+  sent_tag: 'sent '
+  recv_tag: 'recv '
+  udp_trigger: 'UDP receive-mode trigger from '
+  summary: 'server summary: %{conns} connections, %{bytes} bytes received, %{sent} bytes sent in %{secs}s (avg %{mbps} Mbps)'
 errors:
-  raw_socket: "cannot create raw socket: %{error}. Requires root or cap_net_raw"
-  cannot_resolve: "cannot resolve host: %{host}"
-  invalid_bind: "invalid bind address: %{addr}. Format: host:port"
-  host_port_required: "HOST[:PORT] required, or -s ADDR:PORT for server mode"
-  udp_requires_port: "UDP requires a port: HOST:PORT"
-  bandwidth_requires_port: "bandwidth requires HOST:PORT"
-  invalid_count: "invalid count value: %{value} (use N or Ns)"
-  invalid_histogram: "invalid histogram value: %{value} (use N or t1,t2,...)"
-  udp_size_clamped: "UDP payload clamped to %{max} bytes (requested %{size})"
-  interval_min: "interval clamped to minimum 1ms (requested %{value}s)"
+  raw_socket: 'cannot create raw socket: %{error}. Requires root or cap_net_raw'
+  cannot_resolve: 'cannot resolve host: %{host}'
+  invalid_bind: 'invalid bind address: %{addr}. Format: host:port'
+  host_port_required: HOST[:PORT] required, or -s ADDR:PORT for server mode
+  conflict_eng_pkg: "--eng and --pkg are mutually exclusive"
+  lsp_requires_eng: "--lsp only applies with --eng"
+  raw_requires_pkg: "--raw only applies with --pkg"
+  iface_requires_raw: "--iface only applies with --pkg --raw"
+  params_requires_eng_pkg: "--params only applies with --eng or --pkg"
+  params_format: "--params expects k=v format: `%{value}`"
+  wait_requires_pkg: "--wait only applies with --pkg"
+  fuzz_requires_pkg: "--fuzz only applies with --pkg"
+  out_requires_pkg: "--out only applies with --pkg"
+  eng_sub_conflict: "--ls / --hex / --pcap are mutually exclusive"
+  eng_sub_requires_eng: "--ls / --hex / --pcap only apply with --eng"
+  eng_sub_conflict_lsp: "--ls / --hex / --pcap cannot be combined with --lsp"
+  eng_sub_no_file: "--ls / --hex / --pcap do not take a file argument"
+  conflict_engine_mode: "%{flag} cannot be combined with: %{opts}"
+  eng_requires_file: "--eng needs a .pkt file to analyze (or --eng --lsp)"
+  eng_lsp_no_file: "--lsp does not take a file argument"
+  pkg_requires_target: "--pkg needs a HOST:PORT target"
+  pkg_requires_port: "--pkg needs a target port (HOST:PORT)"
+  udp_requires_port: 'UDP requires a port: HOST:PORT'
+  bandwidth_requires_port: bandwidth requires HOST:PORT
+  invalid_count: 'invalid count value: %{value} (use N or Ns)'
+  invalid_histogram: 'invalid histogram value: %{value} (use N or t1,t2,...)'
+  udp_size_clamped: UDP payload clamped to %{max} bytes (requested %{size})
+  interval_min: interval clamped to minimum 1ms (requested %{value}s)
   parallel_udp_ignored: "-P ignored in UDP mode (UDP bandwidth is single-connection)"
   parallel_ignored: "-P ignored in this mode (bandwidth test only)"
   receive_ignored_ping: "-r ignored for plain ping (use -l for latency or -b for bandwidth)"
-  invalid_ipv6: "invalid IPv6 format: [host] or [host]:port"
+  invalid_ipv6: 'invalid IPv6 format: [host] or [host]:port'
+  conflict_source_server: "-I cannot be used with server mode (-s)"
+  conflict_source_engine: "-I cannot be used with engine/package modes (--eng/--pkg)"
+  mtu_ipv4_only: MTU probe supports IPv4 only (IPv6 path MTU needs ICMPv6 Packet Too Big, not yet supported)
+  mtu_no_reply: 'no reply: ICMP may be dropped by a firewall (%{target})'
+  conflict_mtu_mode: "--mtu cannot be combined with: %{opts}"
+  mtu_requires_no_port: 'MTU probe does not take a port: --mtu HOST'
+  conflict_mtu_histogram: "--mtu does not support -H histogram"
+  resolve_failed: cannot resolve %{host}
+  engine_mode_required: 'no mode given: use --eng / --pkg / --ls / --hex / --pcap'
+  help_pkg_not_found: |-
+    no manual section matches "%{section}"
+    use `prping --help-pkg` to list the table of contents:
+  help_pkg_ambiguous: "%{count} sections match; use the number or a more specific title:"
+  help_pkg_toc_hint: 'table of contents (use `prping --help-pkg <number-or-title>` to jump):'
   conflict_v4_v6: "-4 and -6 cannot be used together"
   conflict_server_target: "-s (server mode) cannot be combined with a target HOST[:PORT]"
   conflict_server_mode: "-s (server mode) cannot be combined with client test options: %{opts}"
@@ -78,55 +112,77 @@ errors:
   conflict_json_graph: "--json and -g/--graph cannot be used together"
   conflict_json_histogram: "--json and -H/--histogram cannot be used together"
   receive_requires_latency_bandwidth: "-r requires -b (bandwidth) or -l (latency) with HOST:PORT"
-
+  lib_requires_eng_pkg: "--lib requires --eng or --pkg"
 help:
   group:
-    mode: "Mode (auto-detected)"
-    test: "Test control"
-    output: "Output"
-    network: "Network"
-    server: "Server"
-    other: "Other"
+    mode: Mode (auto-detected)
+    test: Test control
+    output: Output
+    network: Network
+    server: Server
+    other: Other
+    engine: Engine / packet build
   options:
-    server: "Server listening address and port"
-    bandwidth: "Bandwidth test mode"
-    count: "Number of sends/receives (default: infinite). Append 's' for seconds e.g. '10s'"
-    interval: "Interval in seconds (default 1, 0 = fast ping)"
-    size: "Request/payload size (e.g. 64, 8k, 1m). Triggers latency test when port present."
-    lang: "Set language (e.g. en-US, zh-CN). Default: auto-detect from system."
-    udp: "UDP mode (default is TCP)"
-    quiet: "Suppress per-ping output"
-    histogram: "Histogram: bucket count (e.g. 20) or comma-separated thresholds in ms (e.g. 1,5,10,50)"
-    warmup: "Warmup iterations (default 4)"
-    parallel: "Number of parallel connections (default 1)"
-    v4: "Force IPv4"
-    v6: "Force IPv6"
-    json: "Output machine-readable JSON statistics"
-    receive: "Receive from server instead of sending (download direction; used with -l latency or -b bandwidth)"
-    pretty: "Render graphs with ploot (Unicode/Braille)"
-    graph: "Print latency timeline graph (combine with -p for ploot rendering)"
-    version: "Show version"
-    help_icmp: "ICMP ping usage"
-    help_tcp: "TCP ping usage"
-    help_latency: "Latency test usage"
-    help_bandwidth: "Bandwidth test usage"
-    help_udp: "UDP ping usage"
-    help_server: "Server usage"
-
+    server: Server listening address and port
+    bandwidth: Bandwidth test mode
+    count: 'Number of sends/receives (default: infinite). Append ''s'' for seconds e.g. ''10s'''
+    interval: Interval in seconds (default 1, 0 = fast ping)
+    size: Request/payload size (e.g. 64, 8k, 1m). Triggers latency test when port present.
+    lang: 'Set language (e.g. en-US, zh-CN). Default: auto-detect from system.'
+    udp: UDP mode (default is TCP)
+    mtu: Probe path MTU via ICMP DF + binary search
+    eng: 'Engine mode: analyze a .pkt file with rich output (add --lsp for a language server)'
+    lsp: Start a Language Server for .pkt files (with --eng; JSON-RPC over stdio)
+    pkg: >-
+      Build packets from a .pkt file and send to HOST:PORT (optional; derived from packet dst/dport when omitted, add --raw
+      for raw sockets)
+    raw: 'Send full serialized packets via raw sockets (Linux: root/cap_net_raw; Windows: Npcap installed)'
+    iface: 'Network interface for raw ethernet frames (default: lo)'
+    params: Runtime parameters for the .pkt script (k=v,k2=v2; read via params("name") in the script)
+    wait: Wait up to SECS for a matching reply (like scapy sr1), print RTT and dissect it (with --pkg)
+    fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkg)
+    out: Save built packets to a pcap file (like scapy wrpcap, with --pkg)
+    ls: List all builtin layer functions with fields and auto behavior (with --eng)
+    hex: Dissect and show raw bytes from a hex string (with --eng)
+    pcap: Read a pcap file and dissect every record (with --eng)
+    quiet: Suppress per-ping output
+    histogram: 'Histogram: bucket count (e.g. 20) or comma-separated thresholds in ms (e.g. 1,5,10,50)'
+    warmup: Warmup iterations (default 4)
+    parallel: Number of parallel connections (default 1)
+    v4: Force IPv4
+    v6: Force IPv6
+    source: Source address or interface (Linux iface name → IPv4)
+    json: Output machine-readable JSON statistics
+    receive: Receive from server instead of sending (download direction; used with -l latency or -b bandwidth)
+    pretty: Render graphs with ploot (Unicode/Braille)
+    graph: Print latency timeline graph (combine with -p for ploot rendering)
+    version: Show version
+    help_icmp: ICMP ping usage
+    help_tcp: TCP ping usage
+    help_latency: Latency test usage
+    help_bandwidth: Bandwidth test usage
+    help_udp: UDP ping usage
+    help_server: Server usage
+    help_pkg: Full manual (paged); --help-pkg SECTION jumps to a chapter (number or title)
   overview: |-
     prping — ping, latency, bandwidth measurement utility
 
     Implements ICMP ping, TCP ping, UDP ping, UDP/TCP latency,
     and UDP/TCP bandwidth measurement.
-
-  usage: "prping [OPTIONS] <HOST[:PORT]>   (or: -s <ADDR:PORT> for server)"
+  usage: 'prping [OPTIONS] <HOST[:PORT]>   (or: -s <ADDR:PORT> for server | --eng [FILE] / --eng --lsp | --pkg FILE HOST:PORT)'
   mode_guide: |-
-    Modes (auto-detected): host → ICMP | host:port → TCP | -u → UDP | -l SIZE → Latency | -b → Bandwidth | -s → Server
+    Modes (auto-detected): host → ICMP | host:port → TCP | -u → UDP | -l SIZE → Latency | -b → Bandwidth | -s → Server | --eng → engine | --pkg FILE → build & send
     Detailed help: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
     Conflicting options are rejected with an error: -4/-6, -s with a target or client options, --json with -p/-g/-H, -r without -b/-l
-
-  usage_line: "Help: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]\n   -h, --help            Show all options.\n   --help-icmp           ICMP ping usage.\n   --help-tcp            TCP ping usage.\n   --help-udp            UDP ping usage.\n   --help-latency        Latency test usage.\n   --help-bandwidth      Bandwidth test usage.\n   --help-server         Server usage."
-
+  usage_line: |-
+    Help: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]
+       -h, --help            Show all options.
+       --help-icmp           ICMP ping usage.
+       --help-tcp            TCP ping usage.
+       --help-udp            UDP ping usage.
+       --help-latency        Latency test usage.
+       --help-bandwidth      Bandwidth test usage.
+       --help-server         Server usage.
   icmp: |-
     ICMP ping:
       prping [-n count] [-i sec] [-l size] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host
@@ -142,6 +198,8 @@ help:
         -q              Suppress per-ping output
         -4 / -6         Force IPv4 / IPv6
         --json          Machine-readable JSON statistics
+        -I ADDR|IFACE   Source address/interface (Linux iface name -> IPv4)
+        -M, --mtu       Path MTU probe (standalone mode; see prping --help-pkg 16)
         --lang          Language (en-US | zh-CN), default auto-detect
 
       Examples:
@@ -158,6 +216,8 @@ help:
 
       Requires root or cap_net_raw on Linux.
 
+      More:
+        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
   tcp: |-
     TCP ping:
       prping [-n count] [-i sec] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
@@ -178,6 +238,8 @@ help:
             -n 100      connect 100 times
             -g -p       ploot-rendered timeline graph
 
+      More:
+        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
   udp: |-
     UDP ping:
       prping -u [-n count] [-i sec] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
@@ -207,6 +269,8 @@ help:
         prping -u -n 100 server:8080        (with server: prping -s 0.0.0.0:8080)
             -n 100      send 100 probes (server echoes)
 
+      More:
+        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
   latency: |-
     TCP/UDP latency test (echo round-trip):
       server: prping [-4] [-6] -s address:port
@@ -236,6 +300,8 @@ help:
             -u          UDP mode
             -r          receive mode (server sends, client receives)
 
+      More:
+        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
   bandwidth: |-
     TCP/UDP bandwidth test:
       server: prping [-4] [-6] -s address:port
@@ -266,6 +332,8 @@ help:
             -u          UDP mode
             -r          receive mode (download direction)
 
+      More:
+        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
   server: |-
     Server (serves latency & bandwidth clients):
       prping [-4] [-6] -s address:port
@@ -286,7 +354,6 @@ help:
             -6             force IPv6
         client: prping -b -l 8k -n 10000 -P 4 host:8080
             -b -l 8k -n 10000 -P 4   bandwidth test against the server
-
   examples: |-
     Examples:
       prping 8.8.8.8                            ICMP ping (infinite)
