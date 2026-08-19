@@ -5,11 +5,24 @@ runner = ".cargo/run-with-cap.sh"
 # 产物不依赖 vcruntime140.dll / msvcp140.dll / ucrtbase.dll，
 # 无 VC++ Redistributable 的机器（如 Win7）也能直接运行。
 # rustc 默认 MSVC 走动态 CRT；开启 crt-static 后链接器改为静态库。
+#
+# /ignore:4099：xwin 分发的 MSVC 静态库内嵌 PDB 路径引用（编译 MS 库时的
+# 构建机路径），但 SDK 包不带 PDB——lld-link 找不到就刷 LNK4099 警告。
+# 链接本身成功，此选项抑制这条已知噪音。
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/ignore:4099",
+]
 
 [target.x86_64-win7-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/ignore:4099",
+]
 
 [target.i686-win7-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/ignore:4099",
+]
