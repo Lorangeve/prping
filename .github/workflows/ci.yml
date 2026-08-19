@@ -58,10 +58,19 @@ jobs:
           components: rust-src
       - name: Install cargo-xwin
         run: cargo install cargo-xwin
-      - name: Build Win7 MSVC target (build-std)
-        run: cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
-      - name: Upload artifact
+      # XWIN_ARCH 统一 x86,x86_64：cargo-xwin 默认只下载 x86_64+aarch64 库，
+      # 且 DONE 标记只记录最近一次架构，不统一指定会反复重下载
+      - name: Build Win7 MSVC x64 (build-std)
+        run: XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
+      - name: Build Win7 MSVC x86 (build-std)
+        run: XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target i686-win7-windows-msvc --release
+      - name: Upload artifact (x64)
         uses: actions/upload-artifact@v4
         with:
-          name: prping-win7
+          name: prping-win7-x64
           path: target/x86_64-win7-windows-msvc/release/prping.exe
+      - name: Upload artifact (x86)
+        uses: actions/upload-artifact@v4
+        with:
+          name: prping-win7-x86
+          path: target/i686-win7-windows-msvc/release/prping.exe

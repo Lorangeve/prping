@@ -33,9 +33,14 @@ Win7 基线目标（Tier 3）构建，**MSVC 版为首选**：
 rustup toolchain install nightly --profile minimal
 rustup component add rust-src --toolchain nightly
 cargo install cargo-xwin                        # 自动下载 Windows SDK
-cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
-# → target/x86_64-win7-windows-msvc/release/prping.exe
+XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
+# → target/x86_64-win7-windows-msvc/release/prping.exe   （x64 版）
+XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target i686-win7-windows-msvc --release
+# → target/i686-win7-windows-msvc/release/prping.exe     （x86/32 位版）
 ```
+
+> `XWIN_ARCH=x86,x86_64` 必须统一指定：cargo-xwin 默认只下载 x86_64+aarch64 库，
+> 且其 DONE 标记只记录最近一次架构，不统一会导致换架构构建时反复重下载 SDK。
 
 > MSVC 构建**静态链接 CRT 与 C++ 运行库**（`.cargo/config.toml` 的 `crt-static`）：
 > 产物不依赖 `vcruntime140.dll`/`msvcp140.dll`/`ucrtbase.dll`，目标机器无需安装
@@ -199,11 +204,12 @@ TCP Bandwidth test:
 ## 开发
 
 ```bash
-just test                  # 全部测试（49）
+just test                  # 全部测试（67）
 just lint                  # clippy 零警告
 just fmt-check             # 格式检查
 just bench                 # 本地回环基准（阈值断言）
-just build-win7            # Windows 7 兼容版
+just build-win7            # Windows 7 x64 兼容版
+just build-win7-32         # Windows 7 x86（32 位）兼容版
 just build-windows         # 全部 Windows 产物
 ```
 

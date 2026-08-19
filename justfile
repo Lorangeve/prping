@@ -28,10 +28,12 @@ build-release:
     cargo build --release
 
 # ── Windows 交叉编译（Linux 上；Windows 本机直接跑 build-release） ──
+# XWIN_ARCH=x86,x86_64：cargo-xwin 默认只下载 x86_64+aarch64 库，且 DONE 标记
+# 只记录最近一次架构——不统一指定会导致换架构时反复重下载；本项目只用 x86/x86_64。
 
 # Windows MSVC x86_64（Linux 需 xwin；.cargo/config.toml 已配 crt-static 静态链接 CRT/C++ 运行库）
 build-windows-msvc:
-    cargo xwin build --target x86_64-pc-windows-msvc --release
+    XWIN_ARCH=x86,x86_64 cargo xwin build --target x86_64-pc-windows-msvc --release
 
 # Windows GNU x86_64（mingw-w64）
 build-windows-gnu:
@@ -43,16 +45,20 @@ build-windows-gnu-32:
     CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER=i686-w64-mingw32-gcc \
         cargo build --target i686-pc-windows-gnu --release
 
-# Windows 7（官方 Win7 基线目标 MSVC；Linux 需 xwin，首次自动下载 SDK；静态链接 CRT/C++ 运行库）
+# Windows 7 x64（官方 Win7 基线目标 MSVC；Linux 需 xwin，首次自动下载 SDK；静态链接 CRT/C++ 运行库）
 build-win7:
-    cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
+    XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
+
+# Windows 7 x86（32 位 MSVC，同上）
+build-win7-32:
+    XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target i686-win7-windows-msvc --release
 
 # Windows 7 GNU 备选（无 xwin 时用 mingw-w64，MSVCRT 链接）
 build-win7-gnu:
     cargo +nightly build -Z build-std --target x86_64-win7-windows-gnu --release
 
 # 全部 Windows 产物
-build-windows: build-windows-msvc build-windows-gnu build-windows-gnu-32 build-win7
+build-windows: build-windows-msvc build-windows-gnu build-windows-gnu-32 build-win7 build-win7-32
 
 # 全部产物（本机 + Windows 各目标）
 build-all: build-release build-windows

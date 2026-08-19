@@ -13,7 +13,7 @@
 - **直方图**: 默认 ASCII `#`（内置）；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图与 Braille 散点时间线（非 tty 自动剥离 ANSI 颜色）；`-H` 支持桶数或逗号分隔阈值（ms）
 - **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en-US.yml` + `locales/zh-CN.yml`，自动检测 `$LANG` 或 `--lang`
 - **信号处理**: Ctrl+C 优雅退出 — Unix 用 `libc::signal`，Windows 用 `kernel32::SetConsoleCtrlHandler`（首次停止并输出统计，再次强制退出）；`--json` 模式在 Unix 上运行期间关闭 stdin tty 的 `ECHOCTL` 以隐藏终端回显的 `^C`（`^C` 是终端回显、从不进入 stdout 管道；退出时恢复）
-- **Windows 7**: 官方 Win7 基线目标（Tier 3）+ nightly `-Z build-std`；首选 `x86_64-win7-windows-msvc`（xwin 链接），GNU 版 `x86_64-win7-windows-gnu`（MSVCRT）为无 xwin 备选。MSVC 目标统一静态链接 CRT/C++ 运行库（`.cargo/config.toml` 配 `crt-static`）：产物不依赖 `vcruntime140.dll`/`msvcp140.dll`/`ucrtbase.dll`，Win7 实测仅依赖 `ADVAPI32`/`KERNEL32`/`ntdll`；链接器加 `/ignore:4099` 抑制 xwin 静态库缺 PDB 的 LNK4099 噪音（链接本身成功）
+- **Windows 7**: 官方 Win7 基线目标（Tier 3）+ nightly `-Z build-std`；首选 `x86_64-win7-windows-msvc`（x64）与 `i686-win7-windows-msvc`（x86/32 位）双产物（xwin 链接），GNU 版 `x86_64-win7-windows-gnu`（MSVCRT）为无 xwin 备选。MSVC 目标统一静态链接 CRT/C++ 运行库（`.cargo/config.toml` 配 `crt-static`）：产物不依赖 `vcruntime140.dll`/`msvcp140.dll`/`ucrtbase.dll`，Win7 实测仅依赖 `ADVAPI32`/`KERNEL32`/`ntdll`；链接器加 `/ignore:4099` 抑制 xwin 静态库缺 PDB 的 LNK4099 噪音（链接本身成功）。所有 xwin 配方必须统一 `XWIN_ARCH=x86,x86_64`（cargo-xwin 默认只下载 x86_64+aarch64 库、DONE 标记只记最近一次架构，不统一会反复重下载）
 - **DNS 解析**: `smol::unblock` + `std::net::ToSocketAddrs`，统一在 `util.rs`（`resolve_vec` 返回全部、`resolve` 取首个；解析横幅统一 `util::print_resolving`）
 - **ping 循环驱动器**: icmp/tcp/udp/latency 共用 `drive.rs::drive`（间隔/预热/统计/JSONL/收尾），各模式实现 `Probe` trait 只做「一次探测」与人读行
 - **次数/时长**: `-n 10` 固定次数，`-n 10s` 按秒运行（`util::Run` 统一控制循环）
@@ -62,7 +62,7 @@ prping -g HOST:PORT        TCP ping + 时间线图（-gp 用 ploot 渲染）
 - 共享逻辑（DNS 解析、运行循环、直方图桶计算、UDP socket、测试参数 `PingConfig`）收敛一处，不重复实现：直方图数据与渲染解耦（`stats::Histogram::from_times`），带宽报告用 `ReportArgs` 结构传参
 - lib 公开面最小化：只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告/`output::{stderr, writeln_red, writeln_orange}`，其余 `pub(crate)`
 - 不引入不必要的抽象
-- 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner 设置 cap_net_raw；各平台产物配方在 `justfile`（`just build-release` / `build-win7` / `build-windows` / `test` / `lint` 等）
+- 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner 设置 cap_net_raw；各平台产物配方在 `justfile`（`just build-release` / `build-win7` / `build-win7-32` / `build-windows` / `test` / `lint` 等）
 - CI: `.github/workflows/ci.yml` — fmt/clippy/doc/全部测试 × Linux/macOS/Windows + 非门禁基准 job
 - 跨平台编译检查: `cargo check --target x86_64-pc-windows-msvc`（Windows 路径需本机验证时用临时 CARGO_HOME）
 

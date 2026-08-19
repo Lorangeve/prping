@@ -6,6 +6,7 @@
 
 ### 新增
 
+- Windows 7 x86（32 位）MSVC 产物：`i686-win7-windows-msvc`（`just build-win7-32`，CI 随 x64 一起产出），同样静态链接 CRT/C++ 运行库，实测仅依赖 `ADVAPI32`/`KERNEL32`/`ntdll`；所有 xwin 配方统一 `XWIN_ARCH=x86,x86_64` 避免 SDK 反复重下载
 - MSVC 构建静态链接 CRT 与 C++ 运行库（`.cargo/config.toml` 配 `crt-static`）：产物不依赖 `vcruntime140.dll`/`msvcp140.dll`/`ucrtbase.dll`，目标机器无需 VC++ Redistributable；实测 `x86_64-win7-windows-msvc` 产物仅依赖 `ADVAPI32`/`KERNEL32`/`ntdll` 三个 Win7 自带系统库；链接器加 `/ignore:4099` 抑制 xwin 静态库缺 PDB 的 LNK4099 噪音警告
 - UDP ping 头部提示（与 ICMP/TCP 一致：目标/负载/迭代数或时长），并提示回显要求——目标端口需有回显服务（`prping -s ADDR:PORT`）才会回包
 - 服务端 UDP 接收模式触发即时日志（触发来源与 `count × size`，不逐包打印避免带宽测试刷屏）
