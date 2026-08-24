@@ -4,6 +4,7 @@ icmp:
   pinging: 'Pinging %{addr} with %{size} bytes of data:'
   iterations: "%{total} iterations (warmup %{warmup}) ping test:"
   duration: "%{secs}s duration (warmup %{warmup}) ping test:"
+  note_source_ignored_win: 'note: -s source binding is not supported for ICMPv4 on Windows (IcmpSendEcho2 has no source parameter) — ignored; ICMPv6 supports it'
 tcp:
   connect_to: 'TCP connect to %{addr}:%{port}:'
   iterations: "%{total} iterations (warmup %{warmup}) ping test:"
@@ -52,26 +53,55 @@ bandwidth:
     bytes: "%{done_bytes}/%{total_bytes}  %{mbps} Mbps"
     time: "%{bytes}  %{mbps} Mbps"
 server:
-  bandwidth_listening: Bandwidth server listening on %{addr}
+  bandwidth_listening: prping test server listening on %{addr}
   connect_tag: 'connect '
   sent_tag: 'sent '
   recv_tag: 'recv '
   udp_trigger: 'UDP receive-mode trigger from '
   summary: 'server summary: %{conns} connections, %{bytes} bytes received, %{sent} bytes sent in %{secs}s (avg %{mbps} Mbps)'
+trace:
+  tracing: 'Tracing route to %{host} (%{addr}) over a maximum of %{hops} hops:'
+  reached: 'Reached target %{host} in %{hops} hops.'
+  not_reached: 'Did not reach target %{host} within %{hops} hops (target may drop ICMP, or the path is longer — try -m to raise the limit).'
+engine:
+  note_fuzz: 'note: fuzz mode — unset fields randomized'
+  note_wait_reply: 'note: waiting up to %{secs}s for a matching reply'
+  note_wait_recipe: 'note: waiting up to %{secs}s for replies (per-step wait: overrides)'
+  note_bare_export: 'note: bare layer export (no TCP/UDP transport, no eth/ipv4/ipv6 outer layer) cannot be sent, skipped — --eng display only'
+  note_raw_fallback: 'note: no TCP/UDP transport — sending full packet via raw sockets'
+  note_raw_only: 'note: no TCP/UDP transport layer — full packet can only be sent via raw mode (--raw / recipe raw: true); payload mode cannot extract a payload'
+  note_fakeip_target: 'note: target %{ip} is a proxy fake-ip (198.18.0.0/15) — eth raw frames bypass the proxy and cannot be delivered; use examples/network_icmp_bare/ (kernel-routed/proxy, bare IP) or disable the proxy'
+  note_fakeip_src: 'note: src auto-filled to %{ip} (suspected proxy fake-ip gateway) — eth raw frames bypass the proxy, the real gateway drops them; use examples/network_icmp_bare/ (kernel-routed/proxy, bare IP)'
+  note_src_filled: 'note: src auto-filled → %{ip}'
+  note_src_unfillable: 'note: src=0.0.0.0/:: and local address could not be auto-filled — replies may not route back; use --params src=<local IP>'
+  target_none: 'link-layer'
+  note_linklayer_no_target: 'link-layer frame, no IP target (AF_PACKET sends by the frame dst MAC)'
+  note_arp_miss: 'note: cannot resolve MAC of %{next_hop} (ARP cache miss) — sending to broadcast, replies may not arrive'
+  note_iface_mac: 'note: failed to get MAC of interface %{if_index} (%{error}) — using zero src MAC, replies may not route back'
+  note_stack_reversed: 'note: %{inner} inside %{outer}: application layer should only carry raw payload — layer order likely reversed'
+  note_stack_transport_in_transport: 'note: %{inner} inside %{outer}: transport layer cannot directly carry another transport layer'
+  note_stack_missing_network: 'note: %{inner} inside %{outer}: missing network layer (ipv4/ipv6) — link layer cannot directly carry transport/application/ICMP'
+  note_stack_payload_only: 'note: %{inner} inside %{outer}: ICMP/ARP should only carry raw payload'
+  note_stack_uninferrable_proto: 'note: %{inner} inside %{outer}: cannot infer protocol number (proto=0 / next_header=59) — set it explicitly or add a transport layer'
+  note_stack_wrong_carrier: 'note: %{inner} declares carrier %{carriers} (via #[rule]) but is wrapped in %{outer}'
 errors:
   raw_socket: 'cannot create raw socket: %{error}. Requires root or cap_net_raw'
+  raw_socket_windows: 'cannot create raw socket: %{error}. Windows raw sockets require administrator privileges and are broken on Windows 7 RTM (SP0) (WSAEINVAL 10022) — ICMP ping uses the ICMP API instead, but the MTU probe / ICMP traceroute may be unavailable here'
+  no_npcap: 'Npcap is not installed (wpcap.dll not found) — packet --raw needs Npcap (https://npcap.com); all other prping features work without it'
   cannot_resolve: 'cannot resolve host: %{host}'
   invalid_bind: 'invalid bind address: %{addr}. Format: host:port'
-  host_port_required: HOST[:PORT] required, or -s ADDR:PORT for server mode
-  conflict_eng_pkg: "--eng and --pkg are mutually exclusive"
+  host_port_required: HOST[:PORT] required
+  conflict_eng_pkg: "--eng and --pkt are mutually exclusive"
   lsp_requires_eng: "--lsp only applies with --eng"
-  raw_requires_pkg: "--raw only applies with --pkg"
-  iface_requires_raw: "--iface only applies with --pkg --raw"
-  params_requires_eng_pkg: "--params only applies with --eng or --pkg"
+  raw_requires_pkg: "--raw only applies with --pkt"
+  iface_requires_raw: "--iface only applies with --pkt --raw"
+  params_requires_eng_pkg: "--params only applies with --eng or --pkt"
   params_format: "--params expects k=v format: `%{value}`"
-  wait_requires_pkg: "--wait only applies with --pkg"
-  fuzz_requires_pkg: "--fuzz only applies with --pkg"
-  out_requires_pkg: "--out only applies with --pkg"
+  global_requires_eng_pkg: "--global only applies with --eng or --pkt"
+  global_format: "--global expects k=v format: `%{value}`"
+  wait_requires_pkg: "--wait only applies with --pkt"
+  fuzz_requires_pkg: "--fuzz only applies with --pkt"
+  out_requires_pkg: "--out only applies with --pkt"
   eng_sub_conflict: "--ls / --hex / --pcap are mutually exclusive"
   eng_sub_requires_eng: "--ls / --hex / --pcap only apply with --eng"
   eng_sub_conflict_lsp: "--ls / --hex / --pcap cannot be combined with --lsp"
@@ -79,27 +109,36 @@ errors:
   conflict_engine_mode: "%{flag} cannot be combined with: %{opts}"
   eng_requires_file: "--eng needs a .pkt file to analyze (or --eng --lsp)"
   eng_lsp_no_file: "--lsp does not take a file argument"
-  pkg_requires_target: "--pkg needs a HOST:PORT target"
-  pkg_requires_port: "--pkg needs a target port (HOST:PORT)"
+  pktl_not_found: 'pktl not found for `%{arg}` (tried `%{direct}`, then the same-named folder `%{folder}`)'
+  pkg_requires_target: "--pkt needs a HOST:PORT target"
+  pkg_requires_port: "--pkt needs a target port (HOST:PORT)"
   udp_requires_port: 'UDP requires a port: HOST:PORT'
   bandwidth_requires_port: bandwidth requires HOST:PORT
   invalid_count: 'invalid count value: %{value} (use N or Ns)'
   invalid_histogram: 'invalid histogram value: %{value} (use N or t1,t2,...)'
   udp_size_clamped: UDP payload clamped to %{max} bytes (requested %{size})
   interval_min: interval clamped to minimum 1ms (requested %{value}s)
-  parallel_udp_ignored: "-P ignored in UDP mode (UDP bandwidth is single-connection)"
-  parallel_ignored: "-P ignored in this mode (bandwidth test only)"
+  parallel_udp_ignored: "--parallel ignored in UDP mode (UDP bandwidth is single-connection)"
+  parallel_ignored: "--parallel ignored in this mode (bandwidth test only)"
   receive_ignored_ping: "-r ignored for plain ping (use -l for latency or -b for bandwidth)"
   invalid_ipv6: 'invalid IPv6 format: [host] or [host]:port'
-  conflict_source_server: "-I cannot be used with server mode (-s)"
-  conflict_source_engine: "-I cannot be used with engine/package modes (--eng/--pkg)"
+  conflict_source_server: "-s (--source) cannot be used with server mode"
+  conflict_source_engine: "-s (--source) cannot be used with engine/package modes (--eng/--pkt)"
   mtu_ipv4_only: MTU probe supports IPv4 only (IPv6 path MTU needs ICMPv6 Packet Too Big, not yet supported)
   mtu_no_reply: 'no reply: ICMP may be dropped by a firewall (%{target})'
   conflict_mtu_mode: "--mtu cannot be combined with: %{opts}"
-  mtu_requires_no_port: 'MTU probe does not take a port: --mtu HOST'
+  mtu_requires_no_port: 'MTU probe does not take a port: prping ping -m HOST'
   conflict_mtu_histogram: "--mtu does not support -H histogram"
+  conflict_trace_mode: "-t cannot be combined with: %{opts}"
+  trace_requires_no_port: 'traceroute does not take a port: prping trace HOST'
+  tcp_trace_requires_port: 'TCP traceroute requires a port: prping trace --tcp HOST:PORT'
+  trace_udp_tcp_conflict: "--tcp and --udp cannot be used together"
+  tcp_trace_windows: 'TCP traceroute is not supported on Windows (raw TCP sockets are restricted) — use ICMP traceroute (prping trace HOST) or an Npcap-based tool'
+  trace_no_local_addr: cannot determine the local source address (UDP route probe failed)
+  max_hops_requires_trace: "-m only applies with -t (traceroute)"
+  no_dns_requires_trace: "-d only applies with -t (traceroute)"
   resolve_failed: cannot resolve %{host}
-  engine_mode_required: 'no mode given: use --eng / --pkg / --ls / --hex / --pcap'
+  engine_mode_required: 'no mode given: use --eng / --pkt / --ls / --hex / --pcap'
   help_pkg_not_found: |-
     no manual section matches "%{section}"
     use `prping --help-pkg` to list the table of contents:
@@ -112,7 +151,18 @@ errors:
   conflict_json_graph: "--json and -g/--graph cannot be used together"
   conflict_json_histogram: "--json and -H/--histogram cannot be used together"
   receive_requires_latency_bandwidth: "-r requires -b (bandwidth) or -l (latency) with HOST:PORT"
-  lib_requires_eng_pkg: "--lib requires --eng or --pkg"
+  lib_requires_eng_pkg: "--lib requires --eng or --pkt"
+  ambiguous_prefix: "ambiguous subcommand prefix '%{token}': matches %{candidates}"
+  legacy_host_hint: "unrecognized subcommand '%{host}' — prping now uses subcommands; try: prping ping %{host} (migration guide: prping --help-pkg)"
+  latency_requires_port: latency requires HOST:PORT
+cmd:
+  ping: Ping a host (ICMP; TCP with a port, UDP with -u, MTU probe with -m)
+  latency: Latency test (echo round-trip over TCP/UDP)
+  bandwidth: Bandwidth test (TCP/UDP throughput)
+  server: Run the test server (serves latency/bandwidth clients)
+  trace: Traceroute (ICMP echo with increasing TTL, hop-by-hop)
+  engine: 'Packet engine: analyze .pkt/.pktl, LSP, --ls/--hex/--pcap'
+  packet: Build packets from a .pkt/.pktl file and send
 help:
   group:
     mode: Mode (auto-detected)
@@ -131,6 +181,11 @@ help:
     lang: 'Set language (e.g. en-US, zh-CN). Default: auto-detect from system.'
     udp: UDP mode (default is TCP)
     mtu: Probe path MTU via ICMP DF + binary search
+    traceroute: 'Traceroute: ICMP echo with increasing TTL, hop-by-hop path discovery'
+    tcp: 'TCP traceroute: hop-by-hop SYN probing (needs HOST:PORT; SYN-ACK/RST from the target means reached)'
+    trace_udp: 'UDP traceroute (classic: destination ports start at 33434; Port Unreachable from the target means reached)'
+    max_hops: 'Maximum hops (default 30, with -t)'
+    no_dns: 'Skip reverse DNS lookup (with -t)'
     eng: 'Engine mode: analyze a .pkt file with rich output (add --lsp for a language server)'
     lsp: Start a Language Server for .pkt files (with --eng; JSON-RPC over stdio)
     pkg: >-
@@ -138,10 +193,13 @@ help:
       for raw sockets)
     raw: 'Send full serialized packets via raw sockets (Linux: root/cap_net_raw; Windows: Npcap installed)'
     iface: 'Network interface for raw ethernet frames (default: lo)'
-    params: Runtime parameters for the .pkt script (k=v,k2=v2; read via params("name") in the script)
-    wait: Wait up to SECS for a matching reply (like scapy sr1), print RTT and dissect it (with --pkg)
-    fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkg)
-    out: Save built packets to a pcap file (like scapy wrpcap, with --pkg)
+    params: Runtime parameters for the .pkt script (-p k=v,k2=v2; read via params("name") in the script)
+    global: >-
+      Recipe globals injected into the global store (k=v,k2=v2; read via global("name") in the
+      script; with a .pktl recipe this seeds global: declarations, -g overrides init)
+    wait: Wait up to SECS for a matching reply (like scapy sr1), print RTT and dissect it (with --pkt)
+    fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkt)
+    out: Save built packets to a pcap file (like scapy wrpcap, with --pkt)
     ls: List all builtin layer functions with fields and auto behavior (with --eng)
     hex: Dissect and show raw bytes from a hex string (with --eng)
     pcap: Read a pcap file and dissect every record (with --eng)
@@ -157,211 +215,76 @@ help:
     pretty: Render graphs with ploot (Unicode/Braille)
     graph: Print latency timeline graph (combine with -p for ploot rendering)
     version: Show version
-    help_icmp: ICMP ping usage
-    help_tcp: TCP ping usage
-    help_latency: Latency test usage
-    help_bandwidth: Bandwidth test usage
-    help_udp: UDP ping usage
-    help_server: Server usage
     help_pkg: Full manual (paged); --help-pkg SECTION jumps to a chapter (number or title)
+  usage_ping: 'prping ping [OPTIONS] <HOST[:PORT]>'
+  usage_latency: 'prping latency [OPTIONS] <HOST:PORT>'
+  usage_bandwidth: 'prping bandwidth [OPTIONS] <HOST:PORT>'
+  usage_server: 'prping server <ADDR:PORT>'
+  usage_trace: 'prping trace [OPTIONS] <HOST[:PORT]>'
+  usage_engine: 'prping engine [OPTIONS] [<FILE.pkt>]'
+  usage_packet: 'prping packet [OPTIONS] <FILE.pkt> [<HOST[:PORT]>]'
+  footer_ping: |-
+    Examples:
+      prping ping 8.8.8.8                  ICMP ping (infinite)
+      prping ping 192.168.1.1:22           TCP ping
+      prping ping -u 192.168.1.1:53        UDP ping
+      prping ping -m 8.8.8.8               MTU probe
+  footer_latency: |-
+    Examples:
+      prping latency 192.168.1.1:9000
+      prping latency -u -r 192.168.1.1:9000   UDP download latency
+  footer_bandwidth: |-
+    Examples:
+      prping bandwidth -l 8k --parallel 4 192.168.1.1:9000
+      prping bandwidth -u -r 192.168.1.1:9000  UDP download throughput
+  footer_server: |-
+    Example:
+      prping server 0.0.0.0:9000
+  footer_trace: |-
+    Examples:
+      prping trace 8.8.8.8                   ICMP echo traceroute
+      prping trace -m 60 8.8.8.8
+      prping trace --tcp 8.8.8.8:443         TCP SYN traceroute (works when ICMP is filtered)
+      prping trace --udp 8.8.8.8             UDP traceroute (classic, ports start at 33434)
+  footer_engine: |-
+    Examples:
+      prping engine file.pkt        analyze a packet script
+      prping engine --lsp           language server
+      prping engine --ls            list builtins
+  footer_packet: |-
+    Examples:
+      prping packet file.pkt 192.168.1.1:9000
+      prping packet --raw --wait 2 file.pkt 8.8.8.8
+      prping packet arp_request.pkt --raw   # 链路层帧（ARP 等）：目标可省略
+      prping packet arp_request.pkt --raw   # link-layer frame (ARP etc.): target optional
   overview: |-
     prping — ping, latency, bandwidth measurement utility
 
-    Implements ICMP ping, TCP ping, UDP ping, UDP/TCP latency,
-    and UDP/TCP bandwidth measurement.
-  usage: 'prping [OPTIONS] <HOST[:PORT]>   (or: -s <ADDR:PORT> for server | --eng [FILE] / --eng --lsp | --pkg FILE HOST:PORT)'
+    Subcommands: ping (ICMP/TCP/UDP/MTU probe), latency, bandwidth,
+    server, trace (traceroute), engine (packet analysis) and packet.
+  usage: 'prping COMMAND [OPTIONS] ...   (prping --help-pkg for the full manual)'
   mode_guide: |-
-    Modes (auto-detected): host → ICMP | host:port → TCP | -u → UDP | -l SIZE → Latency | -b → Bandwidth | -s → Server | --eng → engine | --pkg FILE → build & send
-    Detailed help: --help-icmp / --help-tcp / --help-udp / --help-latency / --help-bandwidth / --help-server
-    Conflicting options are rejected with an error: -4/-6, -s with a target or client options, --json with -p/-g/-H, -r without -b/-l
+    Subcommands can be abbreviated to any unique prefix (e.g. `prping e FILE.pkt` → engine).
+    Detailed help: `prping COMMAND --help` — full manual: `prping --help-pkg`.
   usage_line: |-
-    Help: prping -h | --help [--help-icmp|--help-tcp|--help-udp|--help-latency|--help-bandwidth|--help-server]
-       -h, --help            Show all options.
-       --help-icmp           ICMP ping usage.
-       --help-tcp            TCP ping usage.
-       --help-udp            UDP ping usage.
-       --help-latency        Latency test usage.
-       --help-bandwidth      Bandwidth test usage.
-       --help-server         Server usage.
-  icmp: |-
-    ICMP ping:
-      prping [-n count] [-i sec] [-l size] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host
-
-      Options:
-        -n N / -n Ns    Iterations, or seconds with 's' suffix (default: infinite)
-        -i S            Interval in seconds (0 = fast ping; clamped to 1ms min)
-        -l SIZE         Payload size (e.g. 64, 8k, 1m)
-        -g              Print latency timeline graph (default: off)
-        -p              Render graphs with ploot (Unicode/Braille)
-        -H N|t1,t2,...  Histogram: bucket count, or thresholds in ms (e.g. 1,5,10,50)
-        -w N            Warmup iterations (default 4)
-        -q              Suppress per-ping output
-        -4 / -6         Force IPv4 / IPv6
-        --json          Machine-readable JSON statistics
-        -I ADDR|IFACE   Source address/interface (Linux iface name -> IPv4)
-        -M, --mtu       Path MTU probe (standalone mode; see prping --help-pkg 16)
-        --lang          Language (en-US | zh-CN), default auto-detect
-
-      Examples:
-        prping -n 10 8.8.8.8
-            -n 10       send 10 pings, then stop
-        prping -n 5s -i 0.2 -gp 8.8.8.8
-            -n 5s       stop after 5 seconds
-            -i 0.2      0.2s interval between pings
-            -g          print the latency timeline graph
-            -p          render graphs with ploot
-        prping -l 64 -H "1,5,10,50" 8.8.8.8
-            -l 64       64-byte payload
-            -H "1,5,10,50"  histogram buckets split at 1/5/10/50 ms
-
-      Requires root or cap_net_raw on Linux.
-
-      More:
-        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
-  tcp: |-
-    TCP ping:
-      prping [-n count] [-i sec] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
-
-      Options: same as ICMP ping (see --help-icmp), but a target port is required.
-        -l SIZE  turns this into a latency test (see --help-latency)
-        -r       requires -b (bandwidth) or -l (latency); error otherwise
-
-      Examples:
-        prping -n 30 -i 0.1 -gp 192.168.1.1:22
-            -n 30       send 30 connection attempts
-            -i 0.1      0.1s interval
-            -g          print the latency timeline graph
-            -p          render graphs with ploot
-        prping -n 10s server:80
-            -n 10s      run for 10 seconds, then stop
-        prping -n 100 -gp server:8080        (with server: prping -s 0.0.0.0:8080)
-            -n 100      connect 100 times
-            -g -p       ploot-rendered timeline graph
-
-      More:
-        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
-  udp: |-
-    UDP ping:
-      prping -u [-n count] [-i sec] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-q] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
-
-      Options:
-        -u           UDP mode (required)
-        -n N / -n Ns Iterations, or seconds with 's' suffix (default: infinite)
-        -i S         Interval in seconds (0 = fast ping)
-        -g           Print latency timeline graph
-        -p           Render graphs with ploot
-        -H N|t1,t2   Histogram: bucket count, or thresholds in ms
-        -w N         Warmup iterations (default 4)
-        -q           Suppress per-ping output
-        -4 / -6      Force IPv4 / IPv6
-        --json       Machine-readable JSON statistics
-
-      Tests UDP port reachability and round-trip latency.
-      Replies are validated by an embedded sequence number.
-
-      Examples:
-        prping -u -n 10 192.168.1.1:53
-            -u          UDP mode
-            -n 10       send 10 probes
-        prping -u -n 5s -gp 192.168.1.1:53
-            -n 5s       stop after 5 seconds
-            -g -p       ploot-rendered timeline graph
-        prping -u -n 100 server:8080        (with server: prping -s 0.0.0.0:8080)
-            -n 100      send 100 probes (server echoes)
-
-      More:
-        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
-  latency: |-
-    TCP/UDP latency test (echo round-trip):
-      server: prping [-4] [-6] -s address:port
-      client: prping -l size[k|m] -n count[s] [-u] [-r] [-g] [-p] [-H N|t1,t2,...] [-w warmup] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
-
-      Options:
-        -l SIZE      Request payload size (required; e.g. 64, 8k, 1m)
-        -n N / -n Ns Iterations, or seconds with 's' suffix (default: 100)
-        -u           UDP mode (default TCP)
-        -r           Receive mode: server sends data, client measures download latency
-        -g           Print latency timeline graph
-        -p           Render graphs with ploot
-        -H N|t1,t2   Histogram: bucket count, or thresholds in ms
-        -w N         Warmup iterations (default 4)
-        -4 / -6      Force IPv4 / IPv6
-        --json       Machine-readable JSON statistics
-
-      Examples:
-        (server: prping -s 0.0.0.0:8080)
-        prping -l 64 -n 100 -gp server:8080
-            -l 64       64-byte request payload
-            -n 100      100 round-trips
-            -g -p       ploot-rendered timeline graph
-        prping -l 64 -n 10s -u -r server:8080
-            -l 64       64-byte payload
-            -n 10s      run for 10 seconds
-            -u          UDP mode
-            -r          receive mode (server sends, client receives)
-
-      More:
-        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
-  bandwidth: |-
-    TCP/UDP bandwidth test:
-      server: prping [-4] [-6] -s address:port
-      client: prping -b -l size[k|m] -n count[s] [-P N] [-u] [-r] [-w warmup] [-H N|t1,t2,...] [-4] [-6] [--json] [--lang en-US|zh-CN] host:port
-
-      Options:
-        -b           Bandwidth mode (required)
-        -l SIZE      Packet size (default 8k; e.g. 8k, 1m)
-        -n N / -n Ns Packets, or seconds with 's' suffix (default: 10000)
-        -P N         Parallel TCP connections (TCP only; ignored with -u)
-        -u           UDP mode (default TCP)
-        -r           Receive mode (measure download direction)
-        -w N         Warmup packets (default 4)
-        -H N|t1,t2   Histogram of per-packet send time
-        -4 / -6      Force IPv4 / IPv6
-        --json       JSON: {"type":"bandwidth","bytes":...,"secs":...,"mbps":...}
-
-      Examples:
-        (server: prping -s 0.0.0.0:8080)
-        prping -b -l 8k -n 20000 -P 4 server:8080
-            -b          bandwidth mode
-            -l 8k       8 KiB packets
-            -n 20000    20000 packets total
-            -P 4        4 parallel TCP connections
-        prping -b -l 8k -n 10s -u -r server:8080
-            -l 8k       8 KiB packets
-            -n 10s      run for 10 seconds
-            -u          UDP mode
-            -r          receive mode (download direction)
-
-      More:
-        prping --help-pkg [SECTION]  full manual (paged + table-of-contents jump)
-  server: |-
-    Server (serves latency & bandwidth clients):
-      prping [-4] [-6] -s address:port
-
-      Protocol on one port (TCP + UDP):
-        TCP echo      Every packet echoed back (single 0xFF byte triggers stream mode)
-        UDP echo      Every datagram echoed back
-        UDP trigger   [0xFF,0xFF,size(2B BE),count(4B BE)] -> send count datagrams of size bytes
-
-      Prints per-connection lines and an aggregate summary on Ctrl+C.
-      Concurrent TCP connection cap: 1024.
-
-      Examples:
-        prping -s 0.0.0.0:8080
-            -s 0.0.0.0:8080  listen on all interfaces, TCP+UDP port 8080
-        prping -s [::]:8080 -6
-            -s [::]:8080    IPv6 wildcard listener
-            -6             force IPv6
-        client: prping -b -l 8k -n 10000 -P 4 host:8080
-            -b -l 8k -n 10000 -P 4   bandwidth test against the server
-  examples: |-
+    Help: prping COMMAND --help   (prping --help lists all commands)
+       ping        ICMP ping / TCP ping (port) / UDP ping (-u) / MTU probe (-m)
+       latency     Echo round-trip latency over TCP/UDP
+       bandwidth   Throughput test over TCP/UDP
+       server      Run the test server (serves latency/bandwidth)
+       trace       Traceroute (ICMP echo + increasing TTL)
+       engine      Packet engine: analyze .pkt/.pktl, LSP, --ls/--hex/--pcap
+       packet      Build packets from a .pkt/.pktl file and send
     Examples:
-      prping 8.8.8.8                            ICMP ping (infinite)
-      prping -n 10 -gp 8.8.8.8                  ICMP, 10 pings, ploot graph
-      prping 192.168.1.1:22                     TCP ping
-      prping -u 8.8.8.8:53                      UDP ping
-      prping -l 64 -n 100 server:8080            Latency test (TCP, 64 bytes)
-      prping -b -l 8k -n 10000 -P 4 server:8080  Bandwidth (TCP, 8KB, 4 conns)
-      prping -b -l 8k -n 10s -u -r server:8080   Bandwidth (UDP download, 10s)
-      prping -s 0.0.0.0:8080                    Start server
-      prping --help-icmp                        ICMP details (also --help-tcp/udp/latency/bandwidth/server)
+      prping ping 8.8.8.8                      ICMP ping (infinite)
+      prping ping -n 10 -gp 8.8.8.8            ICMP, 10 pings, ploot graph
+      prping ping 192.168.1.1:22               TCP ping
+      prping ping -u 8.8.8.8:53                UDP ping
+      prping ping -m 8.8.8.8                   MTU probe
+      prping latency -l 64 -n 100 server:8080   Latency test (TCP, 64 bytes)
+      prping bandwidth -l 8k -n 10000 --parallel 4 server:8080  Bandwidth (TCP, 8KB, 4 conns)
+      prping bandwidth -l 8k -n 10s -u -r server:8080   Bandwidth (UDP download, 10s)
+      prping server 0.0.0.0:8080               Start server
+      prping trace 8.8.8.8                     Traceroute
+      prping engine file.pkt                   Analyze a packet script
+      prping packet file.pkt 192.168.1.1:9000  Build and send packets

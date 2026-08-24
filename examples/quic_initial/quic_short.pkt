@@ -1,0 +1,12 @@
+# quic_initial 步骤 2：QUIC Short 短头（握手后的 1-RTT 包：0x40 + DCID + 包号 + 帧）
+# 同一连接的第二包（dcid 沿用步骤 1 的 DCID；包号 1）
+# 注意：quic_short 是值函数（-> bytes），raw(bytes=...) 内按位置传参包成载荷层
+# （quic_initial 是 proto，层位置直接调用即可）；目标地址可注入：-p ip=127.0.0.1
+quic = raw(bytes=quic_short(hex("8394c8f03e515708"), 0, u8(1), pad(0)))
+
+full = use(quic) |> udp(dport=443)
+                 |> ipv4(src="127.0.0.1", dst=params("ip", "127.0.0.1"))
+                 |> eth(src_mac="00:11:22:33:44:55", dst_mac="66:77:88:99:aa:bb")
+
+export:
+- full

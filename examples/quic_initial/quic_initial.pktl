@@ -1,0 +1,16 @@
+# 配方 demo：两步 QUIC 会话（Initial 长头 → Short 短头）
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine quic_initial                    # 概览
+#   prping engine quic_initial/quic_initial.pkt   # 逐包层栈分析（proto 字段表）
+#   prping packet quic_initial --raw
+#     目标地址可注入：-p ip=127.0.0.1（默认本机回环；真实 QUIC 服务端注入 -p ip=<对端>）
+#
+# 演示点：
+#   - 步骤 1：Initial 长头（声明式 proto：字段即参数；dcid_len/length 等为
+#     len="目标"/"auto" 长度前缀 + prefix vint codec）
+#   - 步骤 2：Short 短头（quic_short：0x40 + DCID + 包号 + 帧）
+#   - 注意：构造的是保护前的裸结构（AEAD/头部保护需 initial secrets，RFC 9001 §5.2）
+recipe:
+- pkg: quic_initial.pkt
+- pkg: quic_short.pkt

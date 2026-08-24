@@ -1,0 +1,10 @@
+# bad_network 步骤 2：TCP ACK（三次握手完成）
+# seq = cseq + 1（SYN-ACK 的 ack 号），ack = sseq + 1（SYN-ACK 的 seq + 1）
+p = raw(bytes="")
+ack_pkt = use(p) |> tcp(sport=params("sport", 40000), dport=params("port", 80),
+                        seq=global("cseq", 0x1000) + 1, ack=global("sseq", 0x2000) + 1, flags=ack())
+                |> ipv4(dst=params("ip", "127.0.0.1"))
+                |> eth()
+
+export:
+- ack_pkt

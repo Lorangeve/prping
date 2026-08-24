@@ -1,13 +1,16 @@
 # prping
 
-跨平台 psping 复刻，使用 Rust 实现。支持 ICMP ping、TCP ping、UDP ping、延迟测试和带宽测试。
+跨平台 psping 复刻，使用 Rust 实现。支持 ICMP ping、TCP ping、UDP ping、延迟测试、
+带宽测试、路径 MTU 探测与路由跟踪。
 
 ## 特性
 
 - **四种 ping 模式**：ICMP / TCP / UDP，自动识别（有端口=TCP，`-u`=UDP，无端口=ICMP）
 - **次数或时长**：`-n 10` 固定次数，`-n 10s` 按秒运行
 - **延迟测试**：client/server 架构，TCP/UDP 双模式，`-r` 接收模式测反向
-- **带宽测试**：多连接并发（`-P`），直方图，`-r` 测下载方向
+- **带宽测试**：多连接并发（`--parallel`），直方图，`-r` 测下载方向
+- **路径 MTU 探测**：`-m` 自动二分最大不分片载荷
+- **路由跟踪**：`-t` 逐跳探测转发路径（递增 TTL + 反向 DNS）
 - **IPv4/IPv6 双栈**：`[::1]:80` 括号格式自动识别
 - **统计输出**：min/max/avg/stddev + P50/P95/P99 + 丢包率
 - **可视化**：直方图（`-H`，支持自定义阈值）、延迟时间线；`-p` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图/Braille 散点
@@ -48,32 +51,39 @@ XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target i686-win7-w
 > 三个 Win7 自带系统库。`x86_64-pc-windows-msvc`（普通 MSVC 目标）同样静态链接。
 > 链接器已加 `/ignore:4099` 抑制 xwin 静态库缺 PDB 的无害噪音警告。
 
-无 xwin 的环境（如 CI 用 mingw）可退而求其次构建 GNU 备选版（MSVCRT 链接）：
+> MSVC 是唯一支持路径：`packet --raw` 的 Npcap 绑定（pcap crate + wpcap.lib/windows.lib）
+> 只对接 MSVC 导入库，mingw-w64 没有 wpcap 导入库，GNU 备选配方（`build-windows-gnu`/
+> `build-win7-gnu` 等）已从 justfile 移除。
+>
+> wpcap.dll 已延迟加载（`/DELAYLOAD`）：未安装 Npcap 的机器上其它功能照常运行，
+> 只有 `packet --raw` 会提示需要 Npcap（https://npcap.com）。
 
-```bash
-cargo +nightly build -Z build-std --target x86_64-win7-windows-gnu --release
-```
-
-> 说明：Win7 基线目标为 Tier 3（官方不自动构建测试）；GNU 备选版已验证主流程
-> （TCP/UDP ping、接收模式）可用，MSVC 版由 CI `win7-build` job 产出。
+> 说明：Win7 基线目标为 Tier 3（官方不自动构建测试）；MSVC 版由 CI `win7-build` job 产出。
 
 ## 用法
 
+子命令组织全部功能；可用任意**唯一前缀**缩写（`prping e file.pkt` ≡ `prping engine file.pkt`）。
+
 ```
-prping HOST                    # ICMP ping（无限，Ctrl+C 停止）
-prping HOST:PORT               # TCP ping
-prping -u HOST:PORT            # UDP ping
-prping -l SIZE HOST:PORT       # 延迟测试（触发条件：-l + 端口）
-prping -b -l SIZE HOST:PORT    # 带宽测试
-prping -s ADDR:PORT            # 服务端（同时支持延迟/带宽/接收模式）
-prping --mtu HOST              # 路径 MTU 探测（ICMP DF + 变长载荷二分）
-prping -I 192.168.1.10 HOST    # 指定源地址/网卡（Linux 网卡名 → IPv4）
-prping --help-pkg              # 完整使用手册（tty 自动分页）
-prping --help-pkg 16           # 跳转手册第 16 章（MTU 探测）
-# 包构造引擎（同一 binary，--eng/--pkg 与测量模式互斥）：
-prping --eng FILE.pkt          # .pkt 分析（层栈 + hexdump）
-prping --eng --lsp             # .pkt 语言服务器（JSON-RPC over stdio）
-prping --pkg FILE.pkt [HOST:PORT]  # 构建并发送（目标可省略）
+prping ping HOST                # ICMP ping（无限，Ctrl+C 停止）
+prping ping HOST:PORT           # TCP ping
+prping ping -u HOST:PORT        # UDP ping
+prping ping -m HOST             # 路径 MTU 探测（ICMP DF + 变长载荷二分）
+prping latency -l SIZE HOST:PORT   # 延迟测试（-l 缺省 64）
+prping bandwidth -l SIZE HOST:PORT # 带宽测试（-l 缺省 8k；--parallel 并发）
+prping server ADDR:PORT         # 服务端（同时支持延迟/带宽/接收模式）
+prping trace HOST               # 路由跟踪（ICMP echo + 递增 TTL，逐跳路径）
+prping trace --tcp HOST:PORT    # TCP SYN 路由跟踪（ICMP 被过滤时可用）
+prping trace --udp HOST         # UDP 路由跟踪（经典 traceroute，33434 起递增端口）
+prping ping -s 192.168.1.10 HOST  # 指定源地址/网卡（Linux 网卡名 → IPv4）
+prping --version                # 版本号
+prping --help-pkg               # 完整使用手册（tty 自动分页）
+prping --help-pkg 17            # 跳转手册第 17 章（路由跟踪）
+# 包构造引擎（子命令，与测量模式互斥）：
+prping engine FILE.pkt          # .pkt 分析（层栈 + hexdump）
+prping engine --lsp             # .pkt 语言服务器（JSON-RPC over stdio）
+prping packet FILE.pkt [HOST:PORT]  # 构建并发送（目标可省略）
+prping engine --pcap x.pcap --to-pkt dir/  # pcap → 每记录一个 .pkt + .pktl 配方（--structured 语义化）
 ```
 
 ### 常用选项
@@ -88,16 +98,18 @@ prping --pkg FILE.pkt [HOST:PORT]  # 构建并发送（目标可省略）
 | `-q` | 静默模式 |
 | `-r` | 接收模式（测下载） |
 | `-u` | UDP 模式 |
-| `-P N` | 并发连接数 |
+| `--parallel N` | 并发连接数 |
 | `-p` | Unicode 渲染（直方图/时间线用 ploot） |
 | `-g` | 显示时间线图（配合 `-p` 用 ploot 渲染） |
 | `-4` / `-6` | 强制 IPv4/IPv6 |
 | `--json` | 输出 JSON 统计 |
-| `-V` / `--version` | 版本号 |
-| `--lang en\|zh-CN` | 语言 |
-| `--help-icmp` 等 | 各模式详细帮助 |
-| `-I ADDR\|IFACE` | 指定源地址/网卡（Linux 网卡名取 IPv4；多网卡/策略路由场景） |
-| `-M, --mtu` | 路径 MTU 探测：ICMP DF + 变长载荷二分（仅 IPv4，raw socket） |
+| `-V` / `--version` | 版本号（顶层） |
+| `--lang en\|zh-CN` | 语言（任意位置） |
+| `-s ADDR\|IFACE` | 指定源地址/网卡（Linux 网卡名取 IPv4；多网卡/策略路由场景） |
+| `-m, --mtu` | 路径 MTU 探测：ICMP DF + 变长载荷二分（仅 IPv4，raw socket） |
+| `-t, --traceroute` | 路由跟踪：ICMP echo + 递增 TTL（每跳 3 次，反向 DNS，`-m` 限跳数/`-d` 免解析；raw socket） |
+| `trace --tcp` | TCP SYN 路由跟踪：`trace --tcp HOST:PORT`（需端口；目标回 SYN-ACK/RST 即到达；Windows 不支持） |
+| `trace --udp` | UDP 路由跟踪：`trace --udp HOST`（经典 traceroute，33434 起递增端口；目标回端口不可达即到达；跨平台） |
 | `--help-pkg [章节]` | 完整使用手册（tty 自动分页，`## N. 标题` 章节）；`--help-pkg 编号\|标题` 跳转章节（双语随 `--lang`） |
 
 ### hex/raw 为基 + 层 bytes 直喂
@@ -123,65 +135,95 @@ packet-dsl 引擎内置只保留字节原语（`hex`/`raw` + `concat`/`be16`/`ck
   路径在编译期烘焙（packet-dsl 的 `CARGO_MANIFEST_DIR/../eng_lib`），源码构建时指向
   仓库标准库；运行时 `is_dir()` 校验，不存在则返回空。显式库 = 默认「当前目录/lib」
   （发布时 `just publish` 把 eng_lib 复制为 `target/release/lib/`）+ `--lib PATH`
-  （可多次，需 `--eng` 或 `--pkg`），排在默认 eng_lib 之后（`effective_libs` 合并，
-  `--eng` 头部的 `libs: ...` 行即展示这一列表）。发布机上默认路径失效，由运行时
+  （可多次，`engine`/`packet` 子命令），排在默认 eng_lib 之后（`effective_libs` 合并，
+  `engine` 头部的 `libs: ...` 行即展示这一列表）。发布机上默认路径失效，由运行时
   `./lib` + `--lib` 顶替。
 - **库导出隐式可见**：eng_lib 模块的 `export:` 无需 `import` 直接可用
   （如直接写 `net4(dst=...)`、`eth_frame(payload=hex("..."))`）；
   显式 `import` 仍支持，本地定义优先遮蔽。
-- 示例：`prping --eng examples/data_demo.pkt`。
+- 示例：`prping engine examples/tcp_handshake`（无扩展名自动定位到
+  `examples/tcp_handshake/tcp_handshake.pktl`）。
 
-### 包构造引擎（同一 binary 的 `--eng` / `--pkg` 模式）
+### 包构造引擎（同一 binary 的 `engine` / `packet` 子命令）
 
-packet-dsl（`.pkt` 网络包构建 DSL）是独立子项目；引擎侧 CLI（`--eng` / `--pkg` /
-LSP / pcap）集成在 prping 同一 binary 中（与测量模式互斥）：
+packet-dsl（`.pkt` 网络包构建 DSL）是独立子项目；引擎侧 CLI（`engine` / `packet` /
+LSP / pcap）集成在 prping 同一 binary 中（与测量模式互斥）。
 
-- `prping --eng FILE.pkt`：模块概览 + 逐包层栈（字段 + `auto` 标注）+ 字节 hexdump。
-- `prping --eng --lsp`：.pkt 语言服务器——诊断 / 补全 / 悬停 / 文档符号。
-- `prping --pkg FILE.pkt [HOST:PORT]`：求值展开全部变体包并发送（默认提取 TCP/UDP
+> pkglang 的完整语法规范（词法 token + 语句/表达式 EBNF，含值表达式 `+` 加法优先级
+> 与 `hex()`/`params()`/裸 ident 的二义性消解规则）见
+> [packet-dsl/GRAMMAR.md](crates/packet-dsl/GRAMMAR.md)；设计文档为
+> `crates/packet-dsl/DESIGN.md`，快速上手见 `crates/packet-dsl/README.md`。
+
+- `prping engine FILE.pkt`：模块概览 + 逐包层栈（字段 + `auto` 标注）+ 字节 hexdump。
+  文件参数不带扩展名时自动定位 pktl：先找 `<arg>.pktl`，再找同名文件夹里的
+  `<arg>/<basename>.pktl`（examples 即按「每 pktl 一个文件夹」组织，
+  `examples/<name>/<name>.pktl` + 其 .pkt）。
+- `prping engine --lsp`：.pkt 语言服务器——诊断 / 补全 / 悬停 / 文档符号。
+- `prping packet FILE.pkt [HOST:PORT]`：求值展开全部变体包并发送（默认提取 TCP/UDP
   载荷，`--raw` 原始套接字；`--wait` 应答匹配 + RTT，`--fuzz` 全字段随机，
-  `--out` 写 pcap；`--ls`/`--hex`/`--pcap` 反解展示）。详见 [packet-dsl](packet-dsl/)。
+  `--out` 写 pcap；`--ls`/`--hex`/`--pcap` 反解展示；`engine --pcap x.pcap --to-pkt dir/`
+  把 pcap 逐条转成 `.pkt` + `.pktl` 配方（缺省无损字节级，`--structured` 语义结构化，
+  `--skip/--limit` 选范围、`--threads` 并行解析；配方步骤 `delay:` 携带捕获帧间隔）。详见 [packet-dsl](crates/packet-dsl/)。
+  list）——`global:` 段声明跨步骤共享变量，`recipe:` 段列出步骤；每步可 `wait:`
+  （等回包）/ `delay:`（开始前等待，非首步）/ `params:` / `extract:`（回包反解取值写 global，如 `from:
+  reply.dns.id`）/ `on_error: stop|continue`；`.pkt` 内用 `global("名"[, 默认])`
+  值原语读取，`-g k=v`（`--global`）注入覆盖 init、`-p k=v`（`--params` 短选项）注入
+  普通参数；`engine FILE.pktl` 展示概览。示例（每协议一个文件夹，内含同名
+  `.pktl` 与其 `.pkt`，均为可实际发送的多包流程）：
+  `examples/tcp_handshake/`（TCP 三次握手：SYN → ACK → HTTP GET，seq/ack 经
+  `global` 链）、`examples/transport_udp/`（UDP：DNS 查询 + VNC 横幅）、
+  `examples/dns_recipe/`（DNS 查询 + extract 复用）、`examples/network_icmp_bare/`
+  （ICMP echo，裸 IP 走内核路由）、`examples/app_http/`（HTTP GET/POST over TCP）、
+  `examples/link_arp/`（ARP 请求/应答）、`examples/quic_initial/`（QUIC Initial/Short）。
+  运行如 `prping packet examples/dns_recipe 127.0.0.1:5353 --wait 1`。
 
 ### 测量功能（万用表）
 
 - **统计**：min/max/avg/stddev、**抖动 jitter（相邻 RTT 差均值/最大）**、P50/P95/P99、
   直方图（`-H`）、时间线（`-g/-p`）；`--json` 输出含 `jitter_ms`/`jitter_max_ms`。
-- **路径 MTU**：`-M`（`--mtu`）用 ICMP DF + 变长载荷二分，报告最大不分片载荷与路径 MTU
+- **路径 MTU**：`-m`（`--mtu`）用 ICMP DF + 变长载荷二分，报告最大不分片载荷与路径 MTU
   （IPv4；途中 Fragmentation Needed 报回的 MTU 一并展示）。
-- **源绑定**：`-I ADDR|IFACE` 指定探测源地址（TCP/UDP/ICMP/延迟/带宽全模式；
+- **路由跟踪**：`-t`（`--traceroute`）ICMP echo + 递增 TTL 逐跳探测路径（每跳 3 次、
+  反向 DNS、超时 `*`；`-m` 最大跳数默认 30、`-d` 跳过 DNS；目标回显即停止，
+  未到达返回非零退出码；IPv4/IPv6）。`trace --tcp HOST:PORT` 用 **TCP SYN** 变体
+  （每探测独立源端口按 (sport,dport) 匹配；目标回 SYN-ACK/RST 即到达）——ICMP 被
+  过滤时仍可用；Unix 支持，Windows 受限（raw TCP socket 禁止，报错提示）。
+  `trace --udp HOST` 用经典 **UDP** 变体（33434 起递增目标端口，内核构 UDP 头；
+  目标回 ICMP Port Unreachable 即到达）——跨平台可用。
+- **源绑定**：`-s ADDR|IFACE` 指定探测源地址（TCP/UDP/ICMP/延迟/带宽全模式；
   Linux 网卡名自动取 IPv4）。
-- 用户函数 / net4 模块等 DSL 能力见 [packet-dsl](packet-dsl/) 与 `examples/net.pkt`。
+- 用户函数 / net4 模块等 DSL 能力见 [packet-dsl](crates/packet-dsl/) 与 `eng_lib/net.pkt`。
 
 ## 使用手册
 
 `prping --help-pkg` 输出完整双语使用手册（[docs/manual-zh.md](docs/manual-zh.md) /
-[docs/manual-en.md](docs/manual-en.md)，随 `--lang` 选择）：25 章覆盖全部模式/选项/
-统计（含 jitter）/JSON/MTU/`-I`/退出码/FAQ/示例。长文在 tty 下经 `less` 自动分页，
+[docs/manual-en.md](docs/manual-en.md)，随 `--lang` 选择）：26 章覆盖全部模式/选项/
+统计（含 jitter）/JSON/MTU/`-s`/退出码/FAQ/示例。长文在 tty 下经 `less` 自动分页，
 文档头部有目录，`prping --help-pkg <编号或标题>` 直接跳转章节学习。
 
 ## 示例
 
 ```bash
 # TCP ping，30 次，0.1s 间隔，直方图 + 时间线图（ploot 渲染）
-prping -n 30 -i 0.1 -H 10 -gp 192.168.1.1:80
+prping ping -n 30 -i 0.1 -H 10 -gp 192.168.1.1:80
 
 # 延迟测试（客户端发送 64B）
-prping -l 64 -n 100 server:8080
+prping latency -l 64 -n 100 server:8080
 
 # 接收模式延迟测试（客户端接收，测下载方向）
-prping -l 64 -n 100 -r server:8080
+prping latency -l 64 -n 100 -r server:8080
 
 # 带宽测试，8KB 包，4 并发
-prping -b -l 8k -n 10000 -P 4 server:8080
+prping bandwidth -l 8k -n 10000 --parallel 4 server:8080
 
 # 自定义阈值直方图（1/5/10/50ms 分档）
-prping -n 100 -H "1,5,10,50" server:8080
+prping ping -n 100 -H "1,5,10,50" server:8080
 
 # JSON 输出（脚本/监控）
-prping -n 100 --json server:8080
+prping ping -n 100 --json server:8080
 
 # 服务端（Ctrl+C 退出时打印聚合统计）
-prping -s 0.0.0.0:8080
+prping server 0.0.0.0:8080
 ```
 
 > 说明：测试出现丢包时进程以退出码 1 结束（可用于脚本判断）；
@@ -193,7 +235,7 @@ prping -s 0.0.0.0:8080
 TCP ping + 统计 + 直方图：
 
 ```
-$ prping -n 3 -w 0 127.0.0.1:22
+$ prping ping -n 3 -w 0 127.0.0.1:22
 TCP 连接到 127.0.0.1:22:
 3 次迭代 (预热 0) ping 测试:
 连接到 127.0.0.1:22: 从 127.0.0.1:55940: 0.32ms
@@ -206,7 +248,7 @@ TCP 连接到 127.0.0.1:22:
 加 `-g` 显示时间线图（`-gp` 用 ploot 渲染 Unicode 柱状/Braille 散点）：
 
 ```
-$ prping -n 20 -i 0.1 -gp 127.0.0.1:22
+$ prping ping -n 20 -i 0.1 -gp 127.0.0.1:22
 ...
 延迟分布:（-p 时 ploot 柱状图）
 Latency timeline:（-gp 时 ploot Braille 散点 + 图例）
@@ -215,7 +257,7 @@ Latency timeline:（-gp 时 ploot Braille 散点 + 图例）
 `--json` 输出 JSONL（每行一条记录，实时可 tail -f；最后一行是汇总）：
 
 ```
-$ prping -n 3 -w 0 --json 127.0.0.1:22
+$ prping ping -n 3 -w 0 --json 127.0.0.1:22
 {"type":"tcp","target":"127.0.0.1:22","ts":1787031710,"seq":0,"ok":true,"rtt_ms":0.26}
 {"type":"tcp","target":"127.0.0.1:22","ts":1787031711,"seq":1,"ok":true,"rtt_ms":0.31}
 {"type":"tcp","target":"127.0.0.1:22","ts":1787031711,"seq":2,"ok":true,"rtt_ms":0.28}
@@ -227,7 +269,7 @@ $ prping -n 3 -w 0 --json 127.0.0.1:22
 带宽：
 
 ```
-$ prping -b -l 8k -n 10000 -P 4 server:8080
+$ prping bandwidth -l 8k -n 10000 --parallel 4 server:8080
 TCP Bandwidth test:
   Sent = 81920000 bytes in 0.42s
   Bandwidth = 1566.49 Mbps
@@ -253,7 +295,7 @@ TCP Bandwidth test:
 | `-t` 持续 ping | ✓ | 默认 | prping 默认即无限 |
 | 默认次数 | 4 | 无限 | |
 | 预热默认 | ICMP/TCP=1, 延迟=5, 带宽=2×CPU | 全部=4 | |
-| 并发 IO `-i`（带宽） | ✓ | `-P` | 参数名不同 |
+| 并发 IO `-i`（带宽） | ✓ | `--parallel` | 参数名不同 |
 | 防火墙 `-f` | ✓ | — | Windows only，跨平台不需要 |
 | i18n | ✗ | ✓ | 中英文自动切换 |
 | 时间线图 | ✗ | ✓ | prping 独有 |
@@ -274,7 +316,7 @@ TCP Bandwidth test:
 ## 开发
 
 ```bash
-just test                  # 全部测试（67）
+just test                  # 全部测试（476）
 just lint                  # clippy 零警告
 just fmt-check             # 格式检查
 just bench                 # 本地回环基准（阈值断言）

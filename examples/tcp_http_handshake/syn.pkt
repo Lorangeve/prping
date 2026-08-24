@@ -1,0 +1,14 @@
+# tcp_http_handshake 步骤 1：TCP SYN（三次握手第一步）
+# 客户端初始 seq 用 global cseq，目标地址/端口可注入
+# sniffer 匹配 SYN-ACK，--wait 时提取服务端 seq/ack 到 global
+p = raw(bytes="")
+syn_pkt = use(p) |> tcp(sport=params("sport", 40000), dport=params("port", 80),
+                        seq=global("cseq", 0x1000), flags=syn())
+                |> ipv4(dst=params("ip", "127.0.0.1"))
+                |> eth()
+
+sniffer:
+  - match tcp(sport=dport, dport=sport, flags=bor(syn(), ack()))
+
+export:
+- syn_pkt

@@ -1,0 +1,27 @@
+# 配方 demo：TCP 三次握手（.pktl = package list，一个流程多个包）
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine tcp_handshake                    # 概览
+#   sudo prping packet tcp_handshake 127.0.0.1:443 --raw -p port=443
+#     （--raw 发原始 TCP 包需 root/cap_net_raw；目标需有 TCP 监听，如
+#       prping server 127.0.0.1:443 或任意本地服务；ip 默认 127.0.0.1 可注入 -p ip=...）
+#
+# 演示点：
+#   - 三步流程 = 三次握手：SYN → ACK（seq/ack 用 global 算术链接）→ HTTP GET（PSH|ACK）
+#   - seq/ack 链：客户端初始 seq = global("cseq")，服务端初始 seq = global("sseq")
+#     （-g cseq=0x1000,sseq=0x2000 可覆盖；真实服务端的 sseq 需从 SYN-ACK 观察——Linux
+#      raw 回包 socket 只能收 ICMP 收不到 TCP，extract 回包字段见 dns_recipe/udp_flow）
+#   - 每步一个 .pkt：构造 TCP 各标志位组合（syn/ack/psh），dport 可注入 -p port=
+#
+# 注意：握手第三步发 HTTP GET 只是演示 PSH|ACK 数据包——对 prping server 会收到
+# 其协议回显而非 HTTP 响应（HTTP 解析 demo 见 app_http）。
+global:
+- name: cseq      # 客户端初始序号（步骤 2/3 用它 +1）
+  init: 0x1000
+- name: sseq      # 服务端初始序号（步骤 2/3 用它 +1；真实场景从 SYN-ACK 提取）
+  init: 0x2000
+
+recipe:
+- pkg: tcp_syn.pkt   # 步骤 1：SYN
+- pkg: tcp_ack.pkt   # 步骤 2：ACK（seq=cseq+1, ack=sseq+1）——握手完成
+- pkg: tcp_data.pkt  # 步骤 3：HTTP GET（PSH|ACK，seq/ack 沿用）

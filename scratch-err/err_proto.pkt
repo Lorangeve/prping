@@ -1,0 +1,7 @@
+# 错误2: proto body 必须扁平 concat（嵌套片段报错）
+#[proto(kind="udp")]
+func myudp() {
+    concat(be16(0x1234), hex("00 35"), concat(be16(0x0008)))
+}
+export:
+- myudp

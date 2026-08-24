@@ -1,0 +1,16 @@
+# tcp_http_handshake 步骤 3：HTTP GET 请求（PSH|ACK）
+# 握手完成后发送 HTTP 请求，seq/ack 沿用步骤 2
+# Host 头需硬编码或用固定值（headers 不支持动态拼接）
+http_req = http(start_line="GET / HTTP/1.1")
+data_pkt = use(http_req)
+         |> tcp(sport=params("sport", 40000), dport=params("port", 80),
+                seq=global("cseq") + 1, ack=global("sseq") + 1,
+                flags=bor(psh(), ack()))
+         |> ipv4(dst=params("ip", "127.0.0.1"))
+         |> eth()
+
+sniffer:
+  - match tcp(sport=dport, dport=sport, flags=bor(psh(), ack()))
+
+export:
+- data_pkt

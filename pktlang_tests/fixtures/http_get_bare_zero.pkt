@@ -1,0 +1,6 @@
+# 裸 IPv4 + TCP（无 eth 层），src=0.0.0.0（触发 patch_zero_src 自动填充）
+get = http(start_line="GET /")
+full = use(get) |> tcp(sport=40000, dport=params("port", 80))
+               |> ipv4(src="0.0.0.0", dst=params("ip", "127.0.0.1"))
+export:
+- full

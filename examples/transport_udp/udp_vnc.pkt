@@ -1,0 +1,9 @@
+# transport_udp 步骤 2：VNC 握手横幅（raw 字符串载荷，同一协议栈）
+# 目标地址可注入：-p ip=127.0.0.1（默认本机回环）
+vnc = raw(bytes="RFB 003.008\n")
+full = use(vnc) |> udp(sport=12346, dport=5900)
+               |> ipv4(src="127.0.0.1", dst=params("ip", "127.0.0.1"))
+               |> eth(src_mac="00:11:22:33:44:55", dst_mac="66:77:88:99:aa:bb")
+
+export:
+- full

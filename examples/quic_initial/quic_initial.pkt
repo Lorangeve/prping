@@ -1,0 +1,25 @@
+# QUIC Initial 报文示例（UDP 封装；保护前裸结构——线上需 AEAD + 头部保护，RFC 9001 §5.2）
+# 运行：prping engine quic_initial/quic_initial.pkt
+#      prping packet quic_initial/quic_initial.pkt --raw
+#     目标地址可注入：-p ip=127.0.0.1（默认本机回环；真实 QUIC 服务端注入 -p ip=<对端>）
+#
+# 8 字节 DCID/SCID + CRYPTO 帧（Initial 数据 "CHLO"）+ 16 字节 PADDING。
+# quic_initial 现在是声明式 proto（自表示协议）：字段即参数，命名调用；
+# 捕获的 QUIC 包也可被 dissect 反向解析（bind: udp 443 + 0xc0 特征）。
+
+quic = quic_initial(
+    dcid=hex("8394c8f03e515708"),   # DCID（dcid_len 自动 = 8）
+    scid=hex("fdfd0d050a0b0c0d"),   # SCID
+    version=0x00000001,             # QUIC v1
+    pnl=0,                          # 包号长度位 = 包号字节数 - 1（0 = 1 字节）
+    pn=u8(0),                       # 包号 0
+    token="",                       # token（Retry 后重发 Initial 才需要）
+    payload=concat(quic_crypto(0, "CHLO"), pad(16))  # CRYPTO 帧 + PADDING
+)
+
+full = use(quic) |> udp(dport=443)
+                 |> ipv4(src="127.0.0.1", dst=params("ip", "127.0.0.1"))
+                 |> eth(src_mac="00:11:22:33:44:55", dst_mac="66:77:88:99:aa:bb")
+
+export:
+- full

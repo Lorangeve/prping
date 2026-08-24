@@ -1,8 +1,8 @@
 # prping Manual
 
 > A cross-platform network "multimeter" — a psping clone implemented in Rust.
-> Measures: ICMP / TCP / UDP ping, latency tests, bandwidth tests, path MTU probing, jitter statistics.
-> The packet-building engine lives in the same binary (`--eng`/`--pkg` modes, see Chapter 25).
+> Measures: ICMP / TCP / UDP ping, latency tests, bandwidth tests, path MTU probing, traceroute, jitter statistics.
+> The packet-building engine lives in the same binary (`engine`/`packet` subcommands, see Chapter 26).
 
 ## Table of Contents
 
@@ -21,16 +21,17 @@
 13. [Histogram and Timeline (-H / -g / -p)](#13-histogram-and-timeline--h--g--p)
 14. [Statistics (incl. jitter)](#14-statistics-incl-jitter)
 15. [JSON Output](#15-json-output)
-16. [MTU Probe (-M / --mtu)](#16-mtu-probe--m---mtu)
-17. [Source Address Binding (-I)](#17-source-address-binding--i)
-18. [IPv4 / IPv6 Dual-Stack](#18-ipv4-ipv6-dual-stack)
-19. [Exit Codes and Scripting](#19-exit-codes-and-scripting)
-20. [Signals and Interruption (Ctrl+C)](#20-signals-and-interruption-ctrlc)
-21. [Language and Internationalization](#21-language-and-internationalization)
-22. [Complete Example Collection](#22-complete-example-collection)
-23. [Frequently Asked Questions (FAQ)](#23-frequently-asked-questions-faq)
-24. [Comparison with psping](#24-comparison-with-psping)
-25. [Packet-Building Engine (--eng / --pkg / packet-dsl)](#25-packet-building-engine---eng---pkg--packet-dsl)
+16. [MTU Probe (-m / --mtu)](#16-mtu-probe--m---mtu)
+17. [Traceroute (-t / --traceroute)](#17-traceroute--t---traceroute)
+18. [Source Address Binding (-s)](#18-source-address-binding--s)
+19. [IPv4 / IPv6 Dual-Stack](#19-ipv4-ipv6-dual-stack)
+20. [Exit Codes and Scripting](#20-exit-codes-and-scripting)
+21. [Signals and Interruption (Ctrl+C)](#21-signals-and-interruption-ctrlc)
+22. [Language and Internationalization](#22-language-and-internationalization)
+23. [Complete Example Collection](#23-complete-example-collection)
+24. [Frequently Asked Questions (FAQ)](#24-frequently-asked-questions-faq)
+25. [Comparison with psping](#25-comparison-with-psping)
+26. [Packet-Building Engine (engine / packet / packet-dsl)](#26-packet-building-engine-engine--packet--packet-dsl)
 
 > Tip: `prping --help-pkg <chapter-title>` jumps straight to a chapter for learning;
 > both `prping --help-pkg 1` (by number) and `prping --help-pkg installation` (by title prefix) work.
@@ -48,32 +49,34 @@ what's the latency, is there packet loss, is there jitter, how much bandwidth, w
 
 - **Four kinds of ping**: ICMP (IPv4/IPv6), TCP, UDP, with automatic port detection
 - **Latency test**: client/server architecture, TCP/UDP dual modes, can measure the reverse direction (receive mode)
-- **Bandwidth test**: multi-connection concurrency (`-P`), real-time progress bar
-- **Path MTU probe** (`-M`): ICMP DF + binary search over variable payload sizes, resolved automatically
+- **Bandwidth test**: multi-connection concurrency (`--parallel`), real-time progress bar
+- **Path MTU probe** (`-m`): ICMP DF + binary search over variable payload sizes, resolved automatically
+- **Traceroute** (`-t`): ICMP echo with increasing TTL, hop-by-hop path discovery + reverse DNS
 - **Jitter**: mean/max of consecutive RTT differences, a key metric for real-time stream troubleshooting
 - **Statistics**: min/max/avg/stddev + P50/P95/P99 + packet loss rate + histogram + timeline
 - **JSON output**: per-sample lines + summary, machine-readable, great for scripts/monitoring
-- **Source address binding** (`-I`): multi-NIC / policy-routing scenarios
+- **Source address binding** (`-s`): multi-NIC / policy-routing scenarios
 - **Count or duration**: `-n 10` for a fixed count, `-n 10s` to run by seconds
 - **IPv4/IPv6 dual-stack**, graceful Ctrl+C exit, bilingual (Chinese/English), exit codes that reflect packet loss
 
 ### Command-line overview
 
 ```
-prping [OPTIONS] <HOST[:PORT]>
+prping ping [OPTIONS] <HOST[:PORT]>
 ```
 
-With no options, the mode is auto-detected from the target:
+Everything is organized by subcommand (see Chapters 3.1/4); the mode is decided by "subcommand + target form":
 
-| Target form | Mode |
+| Subcommand + target form | Mode |
 |---|---|
-| `HOST` (no port) | ICMP ping |
-| `HOST:PORT` | TCP ping |
-| `-u HOST:PORT` | UDP ping |
-| `-l SIZE HOST:PORT` | Latency test |
-| `-b -l SIZE HOST:PORT` | Bandwidth test |
-| `-M HOST` | MTU probe |
-| `-s ADDR:PORT` | Server |
+| `ping HOST` (no port) | ICMP ping |
+| `ping HOST:PORT` | TCP ping |
+| `ping -u HOST:PORT` | UDP ping |
+| `latency -l SIZE HOST:PORT` | Latency test |
+| `bandwidth -l SIZE HOST:PORT` | Bandwidth test |
+| `ping -m HOST` | MTU probe |
+| `trace HOST` | Traceroute |
+| `server ADDR:PORT` | Server |
 
 ---
 
@@ -112,46 +115,74 @@ just lint                 # clippy zero warnings
 
 ```bash
 # reachability
-prping 8.8.8.8                    # ICMP, unlimited, stop with Ctrl+C
-prping example.com                # domain name resolved automatically
+prping ping 8.8.8.8                    # ICMP, unlimited, stop with Ctrl+C
+prping ping example.com                # domain name resolved automatically
 
 # port reachability / connection latency
-prping 192.168.1.1:80
-prping 8.8.8.8:53 -n 10           # fixed 10 probes
+prping ping 192.168.1.1:80
+prping ping 8.8.8.8:53 -n 10           # fixed 10 probes
 
 # latency test (needs a server, see Chapter 10)
-prping -l 64 -n 100 server:8080
+prping latency -l 64 -n 100 server:8080
 
 # bandwidth test
-prping -b -l 8k -n 10000 -P 4 server:8080
+prping bandwidth -l 8k -n 10000 --parallel 4 server:8080
 
 # quick one-round statistics (incl. jitter)
-prping -n 20 -w 0 -H 10 192.168.1.1
+prping ping -n 20 -w 0 -H 10 192.168.1.1
 
 # path MTU
-prping -M 8.8.8.8
+prping ping -m 8.8.8.8
+
+# traceroute
+prping trace 8.8.8.8
 
 # bind a source address
-prping -I 192.168.1.10 8.8.8.8
+prping ping -s 192.168.1.10 8.8.8.8
+
+# packet engine / send (Chapter 26)
+prping engine file.pkt
+prping packet file.pkt 192.168.1.1:9000
 ```
 
 ---
 
-## 4. Mode Overview (Auto-Detection)
+## 3.1 Subcommands and Migration
 
-The mode is determined automatically from "options + target port" — no explicit mode argument is needed:
+prping organizes everything into **subcommands**; any **unique prefix** abbreviates one
+(`prping e file.pkt` ≡ `prping engine file.pkt`; an ambiguous prefix like `p` errors with the candidates):
 
-| Trigger | Mode | Description |
+| Subcommand | Purpose | Old syntax (removed) |
 |---|---|---|
-| No port, no `-u/-l/-b/-M` | ICMP | Default; `-4/-6` select the protocol |
-| Port given, no `-u/-l/-b` | TCP | Connection latency + reachability |
-| `-u` + port | UDP | Sends UDP datagrams, validates reply seq |
-| `-l SIZE` + port | Latency test | Needs `prping -s` on the peer |
-| `-b` + `-l SIZE` + port | Bandwidth test | Needs `prping -s` on the peer |
-| `-M` | MTU probe | No port; IPv4 only |
-| `-s ADDR:PORT` | Server | Cannot be combined with client arguments |
+| `ping` | ICMP / TCP / UDP / MTU probe | `prping HOST`, `prping -u`, `prping -m` |
+| `latency` | Latency test (TCP/UDP, `-r` receive mode) | `prping -l SIZE HOST:PORT` |
+| `bandwidth` | Bandwidth test (`--parallel` conns) | `prping -b -l SIZE HOST:PORT` |
+| `server` | Test server (serves latency/bandwidth) | `prping -s ADDR:PORT` |
+| `trace` | Traceroute (`-m` hops / `-d` no DNS) | `prping -t HOST` |
+| `engine` | Packet engine: analyze .pkt/.pktl, LSP, `--ls/--hex/--pcap`, pcap→.pkt/.pktl convert (`--to-pkt`) | `prping --eng ...` |
+| `packet` | Build a .pkt/.pktl and send (`--raw/--wait/--fuzz/--out`) | `prping --pkt ...` |
 
-All modes share the "test control", "output", and "network" option groups (Chapters 12/13/15/18).
+Top-level `--version`, `--help-pkg [SECTION]` and `--lang` do not occupy the subcommand
+position and may appear anywhere (e.g. `prping --lang zh-CN ping 8.8.8.8`).
+
+---
+
+## 4. Subcommand Overview
+
+Functionality is organized by subcommand; each subcommand exposes only the options that are
+effective for that mode (structurally exclusive — no cross-argument conflict checks needed):
+
+| Subcommand | Target | Key options | Notes |
+|---|---|---|---|
+| `ping` | `HOST` (ICMP) / `HOST:PORT` (TCP) / `-u HOST:PORT` (UDP) | `-n/-i/-w/-q/-H/-g/-p/-s/-4/-6/--json`; `-m` MTU probe | `-m` takes no port, IPv4 only, exclusive with `-u/-l/-g/-p/-H/-n/-i/-w/-q` |
+| `latency` | `HOST:PORT` (required) | `-l SIZE` (default 64), `-u/-r/-g/-p/-H` + test/network options | Needs `prping server` on the peer |
+| `bandwidth` | `HOST:PORT` (required) | `-l SIZE` (default 8k), `-u/-r/--parallel N` + test/network options | Needs `prping server` on the peer |
+| `server` | `ADDR:PORT` (required) | No client options | Serves latency/bandwidth/receive modes |
+| `trace` | `HOST` (no port) | `-m N/-d/-s/-4/-6/--json` | ICMP echo + increasing TTL |
+| `engine` | `FILE.pkt/.pktl` (optional) | `--lsp/--ls/--hex/--pcap` (exclusive, no file), `--to-pkt DIR/--structured/--skip/--limit` (with `--pcap`), `--lib/-p/-g` | Analyze/LSP/overview/convert |
+| `packet` | `FILE.pkt/.pktl` (required) + `[HOST:PORT]` (optional) | `--raw/--iface/--wait/--fuzz/--out/--lib/-p/-g` | Build/send, recipes |
+
+Measurement subcommands share the "test control", "output", and "network" option groups (Chapters 12/13/15/19).
 
 ---
 
@@ -160,10 +191,11 @@ All modes share the "test control", "output", and "network" option groups (Chapt
 **Purpose**: the most basic connectivity + latency measurement; distinguishes network failures (unreachable / TTL exceeded).
 
 ```bash
-prping 8.8.8.8                  # unlimited (stop with Ctrl+C)
-prping -n 10 -i 0.2 8.8.8.8     # 10 probes, 200ms interval
-prping -l 1400 8.8.8.8          # large payload (probe link limits)
-prping -M 8.8.8.8               # see Chapter 16: automatic MTU
+prping ping 8.8.8.8                  # unlimited (stop with Ctrl+C)
+prping ping -n 10 -i 0.2 8.8.8.8     # 10 probes, 200ms interval
+prping ping -l 1400 8.8.8.8          # large payload (probe link limits)
+prping ping -m 8.8.8.8               # see Chapter 16: automatic MTU
+prping trace 8.8.8.8               # see Chapter 17: traceroute
 ```
 
 ### Example output
@@ -181,7 +213,7 @@ prping -M 8.8.8.8               # see Chapter 16: automatic MTU
 
 ### Notes
 
-- Raw ICMP socket: Linux/macOS need root or `cap_net_raw`; Windows needs administrator
+- Raw ICMP socket: Linux/macOS need root or `cap_net_raw`; **on Windows ICMP ping uses ICMP.DLL (`IcmpSendEcho2`, same as the system ping.exe)** — no administrator privileges required, and immune to the Windows 7 RTM (SP0) raw socket defect (on that version `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)` returns WSAEINVAL 10022 even as administrator; fixed in SP1); on Win7 SP0 the v4 `-s` source binding is not supported (ICMP.DLL has no source parameter — warned and ignored; v6 supports it)
 - `-l` controls the ICMP payload size in bytes (excluding the ICMP/IP headers)
 - Distinguishes three kinds of replies: echo reply (normal), unreachable (type 3), TTL exceeded (type 11)
 
@@ -192,9 +224,9 @@ prping -M 8.8.8.8               # see Chapter 16: automatic MTU
 **Purpose**: port connectivity + connection (connect) latency; equivalent to "telnet to a port and time it".
 
 ```bash
-prping 192.168.1.1:22           # SSH port
-prping -n 30 -i 0.1 -H 10 server:443
-prping -I 10.0.0.2 server:443   # bind a source address (Chapter 17)
+prping ping 192.168.1.1:22           # SSH port
+prping ping -n 30 -i 0.1 -H 10 server:443
+prping ping -s 10.0.0.2 server:443   # bind a source address (Chapter 18)
 ```
 
 ### Example output
@@ -213,7 +245,7 @@ TCP 连接到 192.168.1.1:22:
 - Each probe opens a new TCP connection and closes it immediately (no application data is sent)
 - Connection timeout is 5 seconds; multiple addresses (a domain with several IPs) are tried in turn automatically
 - Packet loss = failed connections; firewall drops show up as timeout losses
-- `-P` concurrency is meaningless in this mode (each probe connects only once)
+- `--parallel` concurrency is meaningless in this mode (each probe connects only once)
 
 ---
 
@@ -222,14 +254,14 @@ TCP 连接到 192.168.1.1:22:
 **Purpose**: UDP reachability testing (e.g. DNS port 53, game servers); unique to prping beyond psping.
 
 ```bash
-prping -u 8.8.8.8:53
-prping -u -n 10 192.168.1.1:5000
+prping ping -u 8.8.8.8:53
+prping ping -u -n 10 192.168.1.1:5000
 ```
 
 ### Notes
 
 - Sends UDP datagrams tagged with a sequence number; replies are validated against seq, filtering stray packets
-- **The target must run a UDP echo service** (such as a `prping -s` server or a DNS responder) to reply;
+- **The target must run a UDP echo service** (such as a `prping server` server or a DNS responder) to reply;
   without one, every probe times out — this is inherent to UDP ping
 - UDP is often silently dropped by firewalls; a 100% loss rate does not mean the host is unreachable —
   cross-check with ICMP/TCP
@@ -243,12 +275,12 @@ than ping. Both ends need prping installed: the client triggers with `-l`, the s
 
 ```bash
 # server (start it first)
-prping -s 0.0.0.0:8080
+prping server 0.0.0.0:8080
 
 # client
-prping -l 64 -n 100 server:8080          # TCP latency test (default)
-prping -l 64 -n 100 -u server:8080       # UDP latency test
-prping -l 64 -n 100 -r server:8080       # reverse: measure the download direction (Chapter 11)
+prping latency -l 64 -n 100 server:8080          # TCP latency test (default)
+prping latency -l 64 -n 100 -u server:8080       # UDP latency test
+prping latency -l 64 -n 100 -r server:8080       # reverse: measure the download direction (Chapter 11)
 ```
 
 ### How it works
@@ -268,17 +300,17 @@ prping -l 64 -n 100 -r server:8080       # reverse: measure the download directi
 
 ## 9. Bandwidth Test
 
-**Purpose**: throughput measurement (Mbps), multi-connection stress testing with `-P`.
+**Purpose**: throughput measurement (Mbps), multi-connection stress testing with `--parallel`.
 
 ```bash
 # server
-prping -s 0.0.0.0:8080
+prping server 0.0.0.0:8080
 
 # client: 8KB packets, 10k iterations, 4 concurrent connections
-prping -b -l 8k -n 10000 -P 4 server:8080
+prping bandwidth -l 8k -n 10000 --parallel 4 server:8080
 
 # duration mode
-prping -b -l 1m -n 10s -P 8 server:8080
+prping bandwidth -l 1m -n 10s --parallel 8 server:8080
 ```
 
 ### Example output
@@ -292,7 +324,7 @@ TCP Bandwidth test:
 ### Notes
 
 - For precise throughput measurement use iperf3; prping's bandwidth mode is a convenient "good enough" stress test
-- `-P` concurrency: parallel connections, with the total exactly equal to `count`
+- `--parallel` concurrency: parallel connections, with the total exactly equal to `count`
 - `-r` measures the download direction (receive mode, see Chapter 11)
 - The progress bar only shows on a tty; silent under pipes / `--json` / `-q`
 - UDP bandwidth mode automatically enlarges the kernel buffers to 4MB to avoid bursty loss
@@ -305,15 +337,15 @@ TCP Bandwidth test:
 at the same time.
 
 ```bash
-prping -s 0.0.0.0:8080
-prping -s [::]:8080             # IPv6
+prping server 0.0.0.0:8080
+prping server [::]:8080             # IPv6
 ```
 
 ### Notes
 
 - One server supports all client modes at once (TCP/UDP × latency/bandwidth × send/receive directions)
 - On Ctrl+C exit it prints aggregate statistics (connection count, bytes sent/received, etc.)
-- Cannot be combined with any client arguments (`-n/-i/-l/-b/-u/-P/-I/-M`, etc.)
+- Cannot be combined with any client arguments (`-n/-i/-l/-b/-u/--parallel/-s/-m`, etc.)
 - Kept Win7-compatible on Windows
 
 ---
@@ -324,13 +356,13 @@ prping -s [::]:8080             # IPv6
 
 ```bash
 # server
-prping -s 0.0.0.0:8080
+prping server 0.0.0.0:8080
 
 # client: reverse latency test
-prping -l 64 -n 100 -r server:8080
+prping latency -l 64 -n 100 -r server:8080
 
 # client: reverse bandwidth test
-prping -b -l 8k -n 10000 -P 4 -r server:8080
+prping bandwidth -l 8k -n 10000 --parallel 4 -r server:8080
 ```
 
 ### Notes
@@ -353,16 +385,16 @@ Common to all ping / latency / bandwidth modes.
 | `-i S` | Interval in seconds (0 = fast, minimum 1ms) |
 | `-w N` | Warmup count (default 4, not counted in statistics) |
 | `-q` | Quiet: no per-probe output, summary only |
-| `-P N` | Concurrent connections (bandwidth test only; other modes ignore it with a warning) |
+| `--parallel N` | Concurrent connections (bandwidth test only; other modes ignore it with a warning) |
 | `-l SIZE` | Payload size; suffixes `64` / `8k` / `1m` supported |
 
 ### Examples
 
 ```bash
-prping -n 1000 -i 0.01 8.8.8.8      # 1000 fast pings (10ms interval)
-prping -n 30s -w 5 server:8080      # 30 seconds, 5 warmup probes
-prping -q -n 100 192.168.1.1        # summary only
-prping -n 1000000 -i 0 -q 8.8.8.8   # 1M fast pings (0 interval = fastest)
+prping ping -n 1000 -i 0.01 8.8.8.8      # 1000 fast pings (10ms interval)
+prping ping -n 30s -w 5 server:8080      # 30 seconds, 5 warmup probes
+prping ping -q -n 100 192.168.1.1        # summary only
+prping ping -n 1000000 -i 0 -q 8.8.8.8   # 1M fast pings (0 interval = fastest)
 ```
 
 > Note: `-n` only supports the `s` suffix (seconds, e.g. `-n 10s`); `-n 1m` errors out —
@@ -377,8 +409,8 @@ prping -n 1000000 -i 0 -q 8.8.8.8   # 1M fast pings (0 interval = fastest)
 Two forms:
 
 ```bash
-prping -n 100 -H 10 8.8.8.8          # 10 buckets
-prping -n 100 -H "1,5,10,50" 8.8.8.8 # custom ms thresholds: 1/5/10/50ms buckets
+prping ping -n 100 -H 10 8.8.8.8          # 10 buckets
+prping ping -n 100 -H "1,5,10,50" 8.8.8.8 # custom ms thresholds: 1/5/10/50ms buckets
 ```
 
 Rendered as ASCII `#` by default; `-p` (pretty) renders a Unicode bar chart with
@@ -387,7 +419,7 @@ Rendered as ASCII `#` by default; `-p` (pretty) renders a Unicode bar chart with
 ### Timeline `-g`
 
 ```bash
-prping -n 20 -i 0.1 -gp 127.0.0.1:22  # timeline chart (-p uses ploot Braille scatter)
+prping ping -n 20 -i 0.1 -gp 127.0.0.1:22  # timeline chart (-p uses ploot Braille scatter)
 ```
 
 `-g` shows a timeline of per-round latency, good for spotting jitter trends.
@@ -459,23 +491,23 @@ Every test prints a summary of statistics when it finishes:
 ### Script examples
 
 ```bash
-prping -n 10 --json 8.8.8.8 | tail -1 | jq .jitter_ms
-prping -n 30s --json server:8080 | jq -r 'select(.ok) | .rtt_ms' | awk '{s+=$1} END {print s/NR}'
+prping ping -n 10 --json 8.8.8.8 | tail -1 | jq .jitter_ms
+prping ping -n 30s --json server:8080 | jq -r 'select(.ok) | .rtt_ms' | awk '{s+=$1} END {print s/NR}'
 ```
 
 > On Unix, `--json` disables the terminal's echoed `^C` while running (restored on exit).
 
 ---
 
-## 16. MTU Probe (-M / --mtu)
+## 16. MTU Probe (-m / --mtu)
 
 **Purpose**: find the path MTU (path Maximum Transmission Unit) — the largest packet size between the two ends
 that avoids fragmentation. Mismatched link MTUs are the classic cause of "small packets pass, big packets don't".
 
 ```bash
-prping -M 8.8.8.8
-prping -M 192.168.1.1 -I eth0     # bind a source
-prping -M --json 8.8.8.8          # machine-readable
+prping ping -m 8.8.8.8
+prping ping -m 192.168.1.1 -s eth0     # bind a source
+prping ping -m --json 8.8.8.8          # machine-readable
 ```
 
 ### Example output
@@ -509,15 +541,97 @@ prping -M --json 8.8.8.8          # machine-readable
 
 ---
 
-## 17. Source Address Binding (-I)
+## 17. Traceroute (trace / -t / --traceroute)
+
+**Purpose**: discover the forwarding path to a target hop by hop — locate where loss or
+high latency happens, spot asymmetric routes, verify multi-line egress. The default is
+Windows `tracert`-style (ICMP echo); `--tcp` switches to a TCP SYN variant (like
+`tcptraceroute`/`tracetcp`) and `--udp` to the classic UDP variant (like Unix
+`traceroute`) — both keep working when ICMP is filtered.
+
+```bash
+prping trace www.baidu.com          # ICMP echo, at most 30 hops by default
+prping trace -m 20 8.8.8.8          # at most 20 hops
+prping trace -d 8.8.8.8             # no hostname resolution (IPs only)
+prping trace --json 8.8.8.8         # machine-readable (one line per hop + summary)
+prping trace -6 ::1                 # IPv6 (Hop Limit increments)
+prping trace --tcp 8.8.8.8:443      # TCP SYN (needs HOST:PORT; SYN-ACK/RST from the target = reached)
+prping trace --udp 8.8.8.8          # UDP (classic traceroute, ports start at 33434)
+```
+
+### Example output
+
+```
+Tracing route to www.baidu.com (110.242.68.66) over a maximum of 30 hops:
+  1    0.35 ms   0.28 ms   0.31 ms  192.168.1.1
+  2    2.10 ms   1.98 ms   2.05 ms  100.64.0.1
+  3        *        *        *        *
+  4   25.12 ms  24.80 ms  25.33 ms  dg-xxx.bj.baidubce.com (110.242.68.66)
+
+Reached target www.baidu.com in 4 hops.
+```
+
+### How it works
+
+**ICMP echo (default)**:
+
+1. Send ICMP echo requests to the target with the TTL incremented hop by hop
+   (Hop Limit for IPv6)
+2. A router whose TTL expires replies ICMP Time Exceeded (type 11 / ICMPv6 type 3);
+   its source address is that hop — the Time Exceeded message embeds the original packet
+   (IP header + first 8 bytes of ICMP), matched by id/seq to confirm ownership
+   (the same validation `tracert` uses)
+3. The target itself replies ICMP echo reply → reached, tracing stops
+
+**TCP SYN (`--tcp HOST:PORT`)**:
+
+1. Send TCP SYNs with the TTL incremented hop by hop; each probe uses its own
+   source port, matched by the embedded TCP header's (sport, dport) — no seq needed
+2. Routers reply Time Exceeded (embedding the original TCP header); the target
+   replies **SYN-ACK** (port open) or **RST** (port closed) — either counts as reached
+3. Replies come from two sockets polled together: raw ICMP (Time Exceeded) + raw
+   TCP (SYN-ACK/RST); the TCP pseudo-header checksum uses the local source address
+   learned from a UDP route probe
+4. **Not supported on Windows** (raw TCP sockets are restricted) — `trace --tcp` errors out
+
+**UDP (`--udp HOST`, classic Unix traceroute)**:
+
+1. A plain UDP socket sends a payload to increasing destination ports (starting at
+   33434, +1 per probe, to dodge listening services), TTL incremented hop by hop;
+   the kernel builds the UDP header (checksum included)
+2. Routers reply Time Exceeded (embedding the original UDP header, matched by
+   (sport, dport)); the target replies **Port Unreachable** (type 3 code 3 /
+   ICMPv6 type 1 code 4) — reached
+3. Only one raw ICMP socket is needed for replies; **works on Windows** (plain UDP
+   + raw ICMP are allowed, unlike `--tcp`)
+4. If the target's UDP port happens to be open (e.g. DNS 53), it replies with data
+   rather than ICMP — that probe shows `*` (classic traceroute behaves the same;
+   high ports exist precisely to avoid this)
+
+### Notes
+
+- Timed-out hops print a red `*` (the router drops ICMP/TCP/UDP or the path loses packets);
+  tracing continues
+- 3 probes per hop (sent back-to-back; 1-second collection window per hop);
+  each hop address gets a reverse DNS lookup
+- `-m N` is capped at 255 (the TTL field limit), default 30; `-d` skips reverse DNS
+  (avoid slow DNS stalling the whole path)
+- If the target never echoes/answers, all `-m` hops are probed and it still ends as
+  "not reached" → non-zero exit code
+- Needs a raw socket (root / `cap_net_raw`); for `--tcp` pick a commonly open port
+  (e.g. 80/443) — filtered ports just show `*`; `--tcp` and `--udp` are mutually exclusive
+
+---
+
+## 18. Source Address Binding (-s)
 
 **Purpose**: specify the probe source address / interface — multi-NIC hosts, policy routing, dual-link troubleshooting.
 
 ```bash
-prping -I 192.168.1.10 8.8.8.8        # bind source IP (works for TCP/ICMP/UDP)
-prping -I 10.0.0.2 server:8080 -l 64  # latency test with a source
-prping -I eth0 8.8.8.8                # Linux: interface name → IPv4 automatically
-prping -M -I eth1 8.8.8.8             # MTU probe with a source
+prping ping -s 192.168.1.10 8.8.8.8        # bind source IP (works for TCP/ICMP/UDP)
+prping ping -s 10.0.0.2 server:8080 -l 64  # latency test with a source
+prping ping -s eth0 8.8.8.8                # Linux: interface name → IPv4 automatically
+prping ping -m -s eth1 8.8.8.8             # MTU probe with a source
 ```
 
 ### Notes
@@ -525,19 +639,19 @@ prping -M -I eth1 8.8.8.8             # MTU probe with a source
 - The argument can be an IP address, or a **Linux interface name** (its IPv4 is looked up via `SIOCGIFADDR`;
   for IPv6 write the address directly)
 - Works in every mode: ICMP / TCP / UDP ping, latency, bandwidth, MTU probe
-- Server mode (`-s`) does not accept `-I`
-- Errors on address-family mismatch (e.g. `-I` with an IPv6 address while the target is IPv4)
+- Server mode does not accept `-s` (`--source`)
+- Errors on address-family mismatch (e.g. `-s` with an IPv6 address while the target is IPv4)
 
 ---
 
-## 18. IPv4 / IPv6 Dual-Stack
+## 19. IPv4 / IPv6 Dual-Stack
 
 ```bash
-prping 8.8.8.8                # IPv4
-prping 2001:4860:4860::8888   # IPv6 (no brackets needed)
-prping [::1]:80               # IPv6 with a port needs square brackets
-prping -6 example.com         # force IPv6 (when a domain has multiple records)
-prping -4 example.com         # force IPv4
+prping ping 8.8.8.8                # IPv4
+prping ping 2001:4860:4860::8888   # IPv6 (no brackets needed)
+prping ping [::1]:80               # IPv6 with a port needs square brackets
+prping ping -6 example.com         # force IPv6 (when a domain has multiple records)
+prping ping -4 example.com         # force IPv4
 ```
 
 ### Rules
@@ -549,26 +663,26 @@ prping -4 example.com         # force IPv4
 
 ---
 
-## 19. Exit Codes and Scripting
+## 20. Exit Codes and Scripting
 
 | Exit code | Meaning |
 |---|---|
-| 0 | No packet loss (incl. successful MTU probe) |
-| 1 | Packet loss / connection failure / argument error |
+| 0 | No packet loss (incl. successful MTU probe); traceroute reached the target |
+| 1 | Packet loss / target not reached / connection failure / argument error |
 | 2 | Other runtime errors |
 
 ```bash
-prping -n 10 8.8.8.8 || echo "network problem"
-prping -n 10 --json 8.8.8.8 >/dev/null && echo OK
+prping ping -n 10 8.8.8.8 || echo "network problem"
+prping ping -n 10 --json 8.8.8.8 >/dev/null && echo OK
 
 # monitoring script: alert on a loss threshold
-loss=$(prping -n 5 --json 8.8.8.8 | tail -1 | jq -r .loss_pct)
+loss=$(prping ping -n 5 --json 8.8.8.8 | tail -1 | jq -r .loss_pct)
 [ "$(echo "$loss > 10" | bc)" = 1 ] && alert
 ```
 
 ---
 
-## 20. Signals and Interruption (Ctrl+C)
+## 21. Signals and Interruption (Ctrl+C)
 
 - **First Ctrl+C**: stop the test, print the full statistics, then exit
 - **Second Ctrl+C**: force exit (without waiting for statistics)
@@ -577,14 +691,14 @@ loss=$(prping -n 5 --json 8.8.8.8 | tail -1 | jq -r .loss_pct)
 
 ---
 
-## 21. Language and Internationalization
+## 22. Language and Internationalization
 
 Auto-detected: `$LANG` (Unix) / system UI language (Windows); `--lang` overrides manually.
 
 ```bash
-prping --lang en-US 8.8.8.8    # English
-prping --lang zh-CN 8.8.8.8    # Chinese (default follows the system)
-LANG=zh_CN.UTF-8 prping 8.8.8.8
+prping ping --lang en-US 8.8.8.8    # English
+prping ping --lang zh-CN 8.8.8.8    # Chinese (default follows the system)
+LANG=zh_CN.UTF-8 prping ping 8.8.8.8
 ```
 
 ### Manual language
@@ -593,44 +707,47 @@ The `--help-pkg` manual switches with the language:
 
 ```bash
 prping --lang zh-CN --help-pkg 16     # Chinese manual, Chapter 16 (MTU)
-prping --lang en-US --help-pkg MTU    # English manual
+prping ping --lang en-US --help-pkg MTU    # English manual
 ```
 
 ---
 
-## 22. Complete Example Collection
+## 23. Complete Example Collection
 
 ### Everyday troubleshooting
 
 ```bash
 # 1. is it reachable?
-prping 8.8.8.8 -n 4
+prping ping 8.8.8.8 -n 4
 
 # 2. full picture: latency / jitter / loss (20 probes, threshold histogram)
-prping -n 20 -w 0 -H "1,5,10,50" 8.8.8.8
+prping ping -n 20 -w 0 -H "1,5,10,50" 8.8.8.8
 
 # 3. a specific port
-prping 8.8.8.8:53 -n 10
-prping 192.168.1.1:443 -n 10 -i 0.5
+prping ping 8.8.8.8:53 -n 10
+prping ping 192.168.1.1:443 -n 10 -i 0.5
 
 # 4. do large packets pass? (MTU issues)
-prping -l 1400 8.8.8.8
-prping -M 8.8.8.8
+prping ping -l 1400 8.8.8.8
+prping ping -m 8.8.8.8
 
-# 5. multi-NIC: bind a source
-prping -I eth1 10.0.0.1:80 -n 20
+# 5. routing path / where is it stuck
+prping trace 8.8.8.8
+
+# 6. multi-NIC: bind a source
+prping ping -s eth1 10.0.0.1:80 -n 20
 ```
 
-### Latency / bandwidth (the peer needs `prping -s`)
+### Latency / bandwidth (the peer needs `prping server`)
 
 ```bash
-prping -s 0.0.0.0:8080                       # server
-prping -l 64 -n 1000 server:8080             # TCP latency
-prping -l 64 -n 1000 -u server:8080          # UDP latency
-prping -l 64 -n 1000 -r server:8080          # reverse (download direction)
-prping -b -l 8k -n 10000 -P 4 server:8080    # bandwidth
-prping -b -l 1m -n 10s -P 8 server:8080      # duration-mode bandwidth
-prping -b -l 8k -n 10000 -P 4 -r server:8080 # reverse bandwidth
+prping server 0.0.0.0:8080                       # server
+prping latency -l 64 -n 1000 server:8080             # TCP latency
+prping latency -l 64 -n 1000 -u server:8080          # UDP latency
+prping latency -l 64 -n 1000 -r server:8080          # reverse (download direction)
+prping bandwidth -l 8k -n 10000 --parallel 4 server:8080    # bandwidth
+prping bandwidth -l 1m -n 10s --parallel 8 server:8080      # duration-mode bandwidth
+prping bandwidth -l 8k -n 10000 --parallel 4 -r server:8080 # reverse bandwidth
 ```
 
 ### Scripts / monitoring
@@ -638,17 +755,17 @@ prping -b -l 8k -n 10000 -P 4 -r server:8080 # reverse bandwidth
 ```bash
 # measure latency every 30 seconds and log it
 while true; do
-  echo "$(date +%s) $(prping -n 3 --json 8.8.8.8 | tail -1 | jq -r .avg_ms)"
+  echo "$(date +%s) $(prping ping -n 3 --json 8.8.8.8 | tail -1 | jq -r .avg_ms)"
   sleep 30
 done >> latency.log
 
 # packet-loss trend
-prping -n 60 -i 1 --json 8.8.8.8 | jq -c 'select(.summary)'
+prping ping -n 60 -i 1 --json 8.8.8.8 | jq -c 'select(.summary)'
 ```
 
 ---
 
-## 23. Frequently Asked Questions (FAQ)
+## 24. Frequently Asked Questions (FAQ)
 
 ### Q1: ICMP ping reports "cannot create raw socket"
 You need root or `cap_net_raw`:
@@ -659,29 +776,29 @@ On Windows, run as administrator.
 
 ### Q2: UDP ping times out entirely
 No UDP echo service (or a firewall drops it). Cross-check with TCP/ICMP;
-for a DNS server try `prping -u 8.8.8.8:53` (DNS replies).
+for a DNS server try `prping ping -u 8.8.8.8:53` (DNS replies).
 
 ### Q3: Small packets pass, big packets don't
-Most likely an MTU issue: probe the path MTU with `prping -M <host>`,
+Most likely an MTU issue: probe the path MTU with `prping ping -m <host>`,
 and check the MTU configuration on both ends plus tunnel overhead (e.g. PPPoE subtracts 8 bytes).
 
 ### Q4: Low latency but video/voice stutters
 Look at **jitter** (Chapter 14) — high jitter hurts real-time streams more than high latency.
-Check the distribution with `prping -n 100 -H 1,5,10,50 <host>`.
+Check the distribution with `prping ping -n 100 -H 1,5,10,50 <host>`.
 
 ### Q5: Does `-n 1m` mean one million probes?
 No, it errors out. `-n` only supports the `s` suffix (seconds; `-n 10s` = 10 seconds);
 write fixed counts as plain numbers (`-n 1000000`). Only `-l`'s `m` suffix means megabytes (`-l 1m` = 1MB payload).
 
-### Q6: `-P` has no effect on TCP ping?
-`-P` only works for the bandwidth test; other modes ignore it with a warning.
+### Q6: `--parallel` has no effect on TCP ping?
+`--parallel` only works for the bandwidth test; other modes ignore it with a warning.
 
 ### Q7: Bandwidth numbers differ from iperf3?
 That's normal. prping's bandwidth mode is a convenient stress test without window / congestion tuning;
 use iperf3 for precise throughput.
 
 ### Q8: How do I measure the download direction?
-Use `-r` receive mode (Chapter 11); the peer runs `prping -s`.
+Use `-r` receive mode (Chapter 11); the peer runs `prping server`.
 
 ### Q9: Can `--json` be combined with `-p/-g/-H`?
 No — they are mutually exclusive. JSON is a machine format.
@@ -690,11 +807,11 @@ No — they are mutually exclusive. JSON is a machine format.
 Yes (the Win7-compatible build recipe is in Chapter 2 and the project README).
 
 ### Q11: Want to build / send custom packets?
-That's the packet-building engine (Chapter 25): `prping --pkg demo.pkt ...`.
+That's the packet-building engine (Chapter 26): `prping packet examples/network_icmp_bare ...`.
 
 ---
 
-## 24. Comparison with psping
+## 25. Comparison with psping
 
 | Feature | psping | prping | Notes |
 |---|---|---|---|
@@ -702,7 +819,7 @@ That's the packet-building engine (Chapter 25): `prping --pkg demo.pkt ...`.
 | TCP ping | ✓ | ✓ | connection latency |
 | UDP ping | ✗ | ✓ | unique to prping |
 | Latency test | ✓ | ✓ | TCP/UDP |
-| Bandwidth test | ✓ | ✓ | TCP/UDP, `-P` concurrency |
+| Bandwidth test | ✓ | ✓ | TCP/UDP, `--parallel` concurrency |
 | Receive mode `-r` | ✓ | ✓ | measures the download direction |
 | MTU probe | ✗ | ✓ | unique to prping (automatic binary search) |
 | Jitter | ✗ | ✓ | unique to prping |
@@ -716,7 +833,7 @@ That's the packet-building engine (Chapter 25): `prping --pkg demo.pkt ...`.
 
 ---
 
-## 25. Packet-Building Engine (--eng / --pkg / packet-dsl)
+## 26. Packet-Building Engine (engine / packet / packet-dsl)
 
 ### packet-dsl (workspace sub-crate)
 
@@ -724,21 +841,80 @@ A `.pkt` network-packet-building DSL: parsing + semantic analysis → structured
 Supports an import/export module system, runtime parameters (`params("name")`), byte primitives
 (`concat`/`be16`/`rand16`/..., random values generated at build time, e.g. `sport=rand16()`),
 user functions (`func name(args) { ... }`),
-packet dissection (`dissect(bytes)`), and pcap read/write. Design doc: `packet-dsl/DESIGN.md`.
+packet dissection (`dissect(bytes)`), and pcap read/write. Design doc: `crates/packet-dsl/DESIGN.md`.
 
 ### Engine modes (same binary)
 
 The packet-building engine CLI, fully separated from prping itself:
 
 ```bash
-prping --eng FILE.pkt            # analyze: layer stack + hexdump
-prping --eng --lsp               # .pkt language server
-prping --pkg FILE.pkt [HOST:PORT] # build and send (target optional, inferred from the packet)
-prping --pkg FILE.pkt --wait 3   # reply matching + RTT
-prping --pkg FILE.pkt --fuzz     # randomize all fields
-prping --pkg FILE.pkt --out x.pcap  # save to pcap
-prping --eng --ls / --hex ... / --pcap x.pcap
+prping engine FILE.pkt            # analyze: layer stack + hexdump
+prping engine --lsp               # .pkt language server
+prping packet FILE.pkt [HOST:PORT] # build and send (target optional, inferred from the packet)
+prping packet FILE.pkt --wait 3   # reply matching + RTT
+prping packet FILE.pkt --fuzz     # randomize all fields
+prping packet FILE.pkt --out x.pcap  # save to pcap
+prping engine --ls / --hex ... / --pcap x.pcap
+prping engine --pcap x.pcap --to-pkt dir/          # pcap → one .pkt per record + a .pktl recipe
+prping engine --pcap x.pcap --to-pkt dir/ --structured  # semantic structured conversion
 ```
+
+**Extension-less arguments auto-locate the pktl**: when the `engine`/`packet` file
+argument has no extension, prping first tries `<arg>.pktl` (in the current directory /
+the argument's directory), and if that file does not exist, tries the same-named
+folder's `<arg>/<basename>.pktl`. The examples are organized this way — one folder
+per pktl (`examples/<name>/<name>.pktl` plus its `.pkt` files):
+
+```bash
+prping engine examples/tcp_handshake    # = examples/tcp_handshake/tcp_handshake.pktl
+prping packet tcp_handshake 127.0.0.1:80 --wait 1   # (from inside examples/)
+```
+
+### pcap → .pkt/.pktl conversion (`engine --pcap --to-pkt`)
+
+The inverse of `--out`: converts a pcap into one `.pkt` per record
+(`record_%05d.pkt`, numbered by the original pcap index) plus a `.pktl` recipe that
+references them in order, with step `delay:` carrying the captured inter-frame gap
+(<1μs gaps are omitted; the first step has no delay). You can replay them with
+`packet dir/x.pktl [HOST:PORT] --raw`, or merge them back into a pcap with `--out`:
+
+```bash
+prping engine --pcap x.pcap --to-pkt dir/            # lossless byte-level (default)
+prping engine --pcap x.pcap --to-pkt dir/ --structured   # semantic structured
+prping engine --pcap x.pcap --to-pkt dir/ --skip 10 --limit 100  # records 11..110 only
+prping engine --pcap x.pcap --to-pkt dir/ --threads 8       # parse with 8 threads
+```
+
+Two routes:
+
+- **Lossless byte-level (A1, default)**: the whole frame/packet is fed through
+  `layer("eth"/"ipv4"/"ipv6", hex(...))` or `raw(bytes=hex(...))` — bytes are
+  100% preserved (semantic fields are bypassed, checksums are never recomputed),
+  and frames with an eth/ipv4/ipv6 outer layer can be `--raw`-sent to reproduce the
+  capture. Unknown link types (other than 1=Ethernet/101=Raw) are archived as
+  `raw` only, with a header comment.
+- **Semantic structured (A2, `--structured`)**: dissects the layer stack into
+  readable, editable DSL source (`eth`/`arp`/`ipv4`/`ipv6`/`icmp`/`tcp`/`udp`
+  semantic fields plus bit constants like `bor(syn(), ack())`; layers the DSL
+  cannot express — IPv4/TCP option headers, the TCP URG pointer, IPv6 traffic
+  class/flow label — plus `dns`/`http` are fed byte-exact via `*_bytes(hex(...))`).
+  For valid captures, re-serialization is **byte-identical** (roundtrip fidelity via
+  layer-order reversal + per-layer raw header bytes); records with leftover
+  `remaining` bytes (Ethernet padding / unknown payloads) or that cannot be
+  dissected fall back to A1 (`fallback`). Header comments carry the layer stack
+  and dissect notes (e.g. checksum mismatch).
+
+**Parallel parsing (`--threads N`)**: per-record dissect/rendering is pure and fully
+independent, so conversion parallelizes across records (`std::thread::scope`, no new
+crate; workers render + write their own files, results are re-ordered by index —
+byte-identical to single-threaded output). `0` = auto (parallel via CPU count when
+≥ 1024 records; small files stay single-threaded to avoid pool overhead); `1` = force
+single-threaded; `N` = exactly N threads (capped at the record count). The lossless
+A1 mode is I/O-bound, so threads mainly help `--structured` on large pcaps.
+
+**Recipe `delay:` step option**: waits before the step starts (ignored for the
+first step; chunked sleep responds to Ctrl+C) — the converted recipes use it to
+reproduce capture pacing; hand-written recipes can use it too.
 
 **sniffer block** (reply validation): with `--wait`, replies are matched against the
 `sniffer` declaration in the `.pkt` file; a match prints `✓ reply matched: field=value (rtt)`,
@@ -760,9 +936,48 @@ import net { net4 }
 use(p) |> net4(dst="1.1.1.1")
 ```
 
-### Raw-send platform differences (--pkg --raw)
+### Byte primitive relationship table (raw / hex / u8 / be16 / be32 / [])
 
-`--pkg --raw` sends fully serialized bytes; the underlying transport differs by platform:
+The final form of every byte value in the DSL is a **byte list** — a `[0x12, 0x34]`-style
+`[]` literal. The six forms below are all construction/consumption entry points
+(`raw` is a **dual-position** primitive: layer = Raw payload layer, value = UTF-8 bytes):
+
+| Primitive | Position | Input | Output | Equivalence |
+| --- | --- | --- | --- | --- |
+| `[]` literal | value | — | byte list | the common product of every byte primitive |
+| `raw("abc")` | **layer / value** | string (UTF-8) or byte list | Raw payload layer / byte list | `raw("abc")` = `[0x61, 0x62, 0x63]` ≡ Python `b"abc"` |
+| `hex("1234")` | value / layer | hex text (optional `0x` prefix, even length) | byte list / Raw layer | `hex("1234")` = `[0x12, 0x34]` |
+| `u8(x)` | value | number 0..255 or 1 byte | 1 byte | `u8(0x61)` = `u8([0x61])` = `[0x61]` |
+| `be16(x)` | value | number 0..65535 or 2 bytes | 2 bytes, big-endian | `be16(0x1234)` = `be16(hex("1234"))` = `[0x12, 0x34]` |
+| `be32(x)` | value | number 0..2³²-1 or 4 bytes | 4 bytes, big-endian | same, width 4 |
+
+Flow at a glance:
+
+```
+"abc" ──bytes()/raw()──► [61 62 63]         string = UTF-8 bytes (≡ Python b"abc")
+"1234" ──hex()──► [12 34]                    hex text = bytes
+0x1234 ──be16()──► [12 34]  ──le16()──► [34 12]    number encoded big-/little-endian by width
+[12 34] ──be16()──► [12 34]  ──int()──► 0x1234     same-width passthrough / big-endian decode
+```
+
+Interchange rules (**width is the type** — values with the same byte count convert directly,
+no wrapper needed):
+
+- `be16(hex("1234"))` = `be16([0x12, 0x34])` = `u8(raw("a"))` — same-width byte passthrough;
+  only a width mismatch errors (`be16(hex("123456"))` → needs 2 bytes)
+- **params parse by shape** (`0x` prefix = hex number, plain digits = decimal number, else string):
+- `le16`/`le32` little-endian encode (`le16(0x1234)` = `[0x34, 0x12]`); byte input is reversed
+  (`le16([0x01, 0x02])` = `[0x02, 0x01]`)
+- string literals never implicitly become numbers: `be16("0x4242")` errors — write
+  `be16(0x4242)` or `be16(hex("0x4242"))`
+- `raw` is a dual-position primitive (layer = payload layer, value = UTF-8 bytes).
+  `params` parse by shape: `be16(params("port", "53"))` / `icmp(id=params("id", "0x1234"))`
+  work directly (`--params port=5353`); the default may be any value expression
+  (`params("port", be16(0x1235))` = `[0x12,0x35]`)
+
+### Raw-send platform differences (packet --raw)
+
+`packet --raw` sends fully serialized bytes; the underlying transport differs by platform:
 
 | Platform | eth layer (Ethernet frame) | ipv4 layer (bare IP) | ipv6 layer (bare IPv6) |
 |---|---|---|---|
@@ -772,11 +987,125 @@ use(p) |> net4(dst="1.1.1.1")
 
 Windows notes:
 
-- **Requirements**: Npcap ([npcap.com](https://npcap.com/)). If the installer option "Allow non-admin applications to capture packets" is unchecked, capture/injection requires administrator privileges.
+- **Requirements**: only `packet --raw` (Npcap link-layer injection) needs Npcap ([npcap.com](https://npcap.com/)). wpcap.dll is now delay-loaded (`/DELAYLOAD`), so on machines without Npcap every other prping feature (ping/latency/bandwidth/trace/engine etc.) works normally — only `packet --raw` reports that Npcap is required. If the installer option "Allow non-admin applications to capture packets" is unchecked, capture/injection requires administrator privileges.
 - **Windows 7**: Npcap still supports Windows 7; the driver is SHA-2 signed, so KB4474419 + KB4490628 must be installed or the driver will fail to load.
 - **Loopback**: targeting `127.0.0.1`/`::1` automatically selects the Npcap Loopback Adapter (enable "Install Npcap Loopback Adapter" during install).
 - **MAC resolution**: before sending bare IPv4, the next hop (`GetBestRoute`) and ARP cache (`GetIpNetTable`) are resolved automatically; on a miss a 1-byte UDP packet is sent to trigger kernel ARP, and if that still fails a broadcast address is used with a warning.
 - **IPv6 limitation**: non-loopback bare IPv6 is not supported yet (Windows 7 has no `GetIpNetTable2`, so the v6 neighbor table cannot be enumerated).
 - **`--wait`**: the capture handle is opened before sending (to avoid missing fast replies) and filtered by direction so frames we just sent are excluded.
 
-See `packet-dsl/README.md` for details.
+### Target derivation and link-layer frames
+
+For `packet FILE.pkt [HOST:PORT]` the target priority is: **explicit `HOST:PORT` >
+derivation from the outermost IP layer `dst` > omitted**. In raw mode the port is
+meaningless (raw sockets carry no port), so a bare `HOST` is enough
+(e.g. `packet foo.pkt --raw 192.168.1.5`).
+
+**Link-layer frames (outermost eth, no IP layer — e.g. ARP) need no target for raw
+sending**: AF_PACKET delivers by the frame's dst MAC (`--iface` selects the NIC,
+default lo); the target is only used for side logic such as IP source-address filling:
+
+```bash
+prping packet examples/link_arp/arp_request.pkt --raw   # ARP request (broadcast) sent directly
+#   target: none — link-layer frame, no IP target (AF_PACKET sends by the frame dst MAC)
+```
+
+**Bare layer exports** (no TCP/UDP transport and no eth/ipv4/ipv6 outer layer — e.g.
+`req = arp(...)` elements that exist only for `--eng` display/composition) are
+skipped with a yellow note in both payload and raw modes, not counted as send
+failures; if every export is skipped, the run reports "no packets to send". Bare
+IPv4/IPv6 sends still require a target (used for the `sendto` route).
+
+**Send-mode hint (`--eng`)**: packets with no TCP/UDP transport but a raw-sendable
+outer layer (e.g. ICMP over IP, ARP over eth) get an orange `note:` in the
+`engine FILE.pkt` per-packet view — the full packet can only be sent via raw mode
+(`--raw`, or recipe step `raw: true`); payload mode cannot extract a payload
+(without `--raw` the send falls back to raw sockets automatically).
+
+See `crates/packet-dsl/README.md` for details.
+
+### Recipes (`.pktl`, multiple packets in sequence)
+
+A `.pktl` (package list) file runs several `.pkt` files in order as one session
+(handshake / multi-packet flows) and shares data across steps through a
+**global store** — any step can read values set by any earlier step, not just the previous one:
+
+```text
+# examples/dns_recipe/dns_recipe.pktl
+global:
+- name: tid             # shared variable (init optional; -g overrides init)
+  init: 0x4321
+
+recipe:
+- pkg: recipe_query.pkt   # send recipe_query.pkt, wait for the reply, extract dns.id → global.tid
+  wait: 1
+  extract:
+  - name: tid
+    from: reply.dns.id    # dissected reply field (layer.field, same field set as sniffer)
+    as: hex               # default int; also hex / str / bytes
+- pkg: recipe_query.pkt   # bare filename = no extra options
+```
+
+- **Syntax**: `global:` / `recipe:` section headers and step items (`- `) start at
+  column 0; step option lines are indented. A step item is `- pkg: FILE` (followed
+  by `wait:` / `raw:` / `params:` / `extract:` / `on_error:`) or a bare `- FILE`;
+  `#` comments;
+  paths resolve relative to the `.pktl` directory. A global item has three forms:
+  `- name: NAME` (optionally followed by an indented `init:`), a bare `- NAME`
+  (declared but unset), or `- NAME=VALUE` (inline init; `VALUE` uses the same
+  literal syntax as `init:`).
+- **Global store**: `.pkt` files read it with the new value primitive
+  **`global("name"[, default])`** — symmetric with `params`, but values are
+  **typed** (Int/Hex/Str/byte list, no string shape parsing), so they compose
+  directly with `+` / `be16` / bitwise ops, e.g. `tcp(ack=global("seq") + 1)`.
+  Unset with no default → error. Writes: `init` initial value (a global item may
+  spell it inline as `- NAME=VALUE`), step `extract`
+  (from replies; multiple replies apply in order, last write wins), CLI
+  `-g k=v` (`--global`, overrides `init`).
+- **extract** needs a reply for that step (`wait:` or `--wait`). `from:` has two forms:
+  - `reply.<layer>.<field>` picks the dissected reply field (same layer/field set as
+    sniffer), `as:` controls the form — `int` (numeric fields, default) / `hex` /
+    `str` (formatted IP/MAC strings) / `bytes` (raw field bytes, network order);
+  - **value expression** (functions / primitives / `+` arithmetic, with embedded
+    `reply.<layer>.<field>` leaves): `from: reply.tcp.seq + 1`,
+    `from: be16(reply.dns.id)`, `from: cksum(reply.icmp.payload)` — the expression
+    evaluates to a typed value (numeric fields → int, address/string fields →
+    string, payload fields `icmp.payload` / `http.body` / `raw.bytes` → byte list),
+    and may call the step's own `.pkt` `func` value functions, `params(...)` and
+    `global(...)`; `as:` is optional (default = the expression's natural type; an
+    explicit `as:` converts to int / hex / str / bytes). TCP echo bodies are kept
+    in the reply too, so extract works there as well.
+- **Failure handling**: a failing step (send error / extract with no reply or
+  missing field) **stops** the whole recipe by default (exit code 1);
+  `on_error: continue` records the failure and keeps going (final exit code
+  still non-zero).
+- **Raw switch**: a step `raw: true` forces this step to send the full serialized
+  bytes via raw sockets (per-step `--raw`; the interface is inherited from the CLI
+  `--iface`); `raw: eth0` also picks the interface; `raw: false` forces the step
+  back to normal TCP/UDP payload sending (overriding a CLI `--raw`) — one recipe
+  can mix raw and payload steps, e.g. `raw: eth0` for an ARP/ethernet frame first,
+  then `raw: false` for a TCP payload.
+- **CLI**: `packet FILE.pktl [HOST:PORT]` runs it; `--wait` / `--raw` /
+  `-p` (`--params`) / `--fuzz` / `--out` / `--lib` are global defaults, overridden per
+  step by `wait:` / `raw:` / `delay:` / `params:` (a step `delay: N` waits N seconds before
+  starting — ignored for the first step, chunked sleep responds to Ctrl+C; the
+  pcap-converted recipes use it to carry capture pacing); in recipe mode `--out`
+  collects every step's packets into one pcap; `-g k=v` injects globals.
+  `engine FILE.pktl` shows a recipe overview (global declarations + the **param
+  surface of the step pkts** — a lexical scan of `params("name", default)` with
+  defaults and the using steps, hinting `-p k=v` injection; an unparseable step
+  pkt is reported early, same philosophy as the extract-field validation — plus
+  step options, and validates extract field names — the expression form
+  validates its `reply(...)` leaves too). `packet FILE.pktl` prints the same
+  param summary in its header.
+- **Examples** (one folder per protocol — a same-named `.pktl` plus its `.pkt`
+  files, every one a **sendable multi-packet flow**): `examples/tcp_handshake/`
+  (TCP three-way handshake: SYN → ACK → HTTP GET, seq/ack chained via
+  `global("cseq") + 1` arithmetic), `examples/transport_udp/` (UDP send tests:
+  DNS query + VNC banner payloads), `examples/dns_recipe/` (DNS query: extract
+  the reply `dns.id` and reuse it), `examples/network_icmp_bare/` (ICMP echo:
+  sniffer + extract id/seq reuse, bare IP through kernel routing; `--raw` needs
+  root), `examples/app_http/` (HTTP GET/POST over TCP, `-p port=` injection),
+  `examples/link_arp/` (ARP request/reply), `examples/quic_initial/`
+  (QUIC Initial/Short headers).
+  Run e.g. `prping packet examples/dns_recipe 127.0.0.1:5353 --wait 1`.

@@ -1,0 +1,25 @@
+[package]
+name = "prping-core"
+version = "0.1.0"
+edition = "2024"
+description = "prping 核心库：跨平台 psping 复刻（协议实现 + 包构造引擎）"
+license = "MIT"
+
+[dependencies]
+smol = "2"
+anyhow = "1"
+termcolor = "1"
+socket2 = { version = "0.6", features = ["all"] }
+rust-i18n = "3"
+libc = "0.2"
+thiserror = "2"
+ploot = "0.1"
+packet-dsl = { path = "../packet-dsl" }
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"
+
+# Windows raw 发送兼容层（packet --raw）：Npcap 的 wpcap.dll 绑定
+[target.'cfg(windows)'.dependencies]
+pcap = "2"

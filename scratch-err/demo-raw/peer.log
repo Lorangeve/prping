@@ -1,0 +1,3 @@
+peer-log server on :8888
+[('127.0.0.1', 51978)] received 18 bytes: b'GET / HTTP/1.1\r\n\r\n'
+[('127.0.0.1', 51800)] received 2 bytes: b'hi'

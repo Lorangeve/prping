@@ -1,0 +1,15 @@
+# 配方 demo：两步 ARP 流程（请求 → 应答）
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine link_arp                        # 概览
+#   sudo prping packet link_arp --raw             # --raw 发完整帧，需 root
+#     目标 IP 可注入：-p ip=127.0.0.1（默认回环；打同网段邻居时注入 -p ip=<邻居 IP>）
+#
+# 演示点：
+#   - 步骤 1：ARP 请求（广播 ff:ff:ff:ff:ff:ff，问「谁是 127.0.0.1」）
+#   - 步骤 2：ARP 应答（应答者 spa=目标 IP、sha 由 -p tmac 注入——真实场景从
+#     应答帧提取，Linux raw 回包 socket 只收 ICMP 收不到 ARP，故用参数注入）
+#   - arp 层字段：op=request()/reply() 位常量 + sha/spa/tha/tpa
+recipe:
+- pkg: arp_request.pkt
+- pkg: arp_reply.pkt

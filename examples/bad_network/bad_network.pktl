@@ -1,0 +1,72 @@
+# 配方：模拟网络质量差的场景 —— TCP 重传 + HTTP RST
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine bad_network                     # 概览
+#   prping packet bad_network 192.168.81.162:8000
+#     （发包并等待每个步骤的 delay 时间再发下一个）
+#   prping packet bad_network 192.168.81.162:8000 --out /tmp/bad_network.pcap
+#     （--out 保存所有步骤到 pcap 文件，可用 tcpdump -r 分析）
+#
+# 场景说明：
+#   模拟网络质量差时的典型行为：TCP 三次握手后，客户端发送 HTTP GET，
+#   服务端长时间无响应，客户端触发多次重传（Retransmission），最终收到 RST。
+#
+#   步骤 1：SYN —— 客户端发起连接
+#   步骤 2：ACK —— 三次握手完成（省略 SYN-ACK，用 -g sseq=... 注入）
+#   步骤 3：HTTP GET（第一次发送）
+#   步骤 4：TCP Retransmission #1（超时重传，seq 不变）
+#   步骤 5：TCP Retransmission #2（指数退避，seq 不变）
+#   步骤 6：TCP Retransmission #3（再次退避，seq 不变）
+#   步骤 7：RST —— 服务端拒绝连接或连接异常关闭
+#
+# 重传机制说明：
+#   TCP 超时重传时，seq/ack 号与原始包完全一致（Linux/Windows 均如此），
+#   区别仅在于时间间隔递增（1s → 2s → 4s → 8s 指数退避）。
+#   这里用 delay 字段模拟时间间隔（发包前等待）。
+#
+# 对比正常流程：
+#   正常：SYN → SYN-ACK → ACK → HTTP GET → HTTP 200 OK（见 tcp_http_handshake）
+#   异常：SYN → ... → ACK → HTTP GET → [重传×3] → RST
+#
+# 注意：
+#   - Linux raw 模式收不到 TCP 回包（只能收 ICMP），所以本配方不依赖回包
+#   - 用 -g sseq=0x2000 手动注入服务端序号（真实场景从 SYN-ACK 提取）
+#   - delay: 控制步骤间的等待时间（发包前延迟）
+#   - wait: 控制等待回包的超时时间（发包后等待）
+global:
+- name: cseq      # 客户端初始序号
+  init: 0x1000
+- name: sseq      # 服务端初始序号（用 -g sseq=... 注入，或用默认值 0x2000）
+  init: 0x2000
+
+recipe:
+# 步骤 1：SYN（三次握手第一步）
+- pkg: syn.pkt
+  wait: 0
+
+# 步骤 2：ACK（三次握手完成，seq/ack 用 global 算术）
+- pkg: ack.pkt
+  wait: 0
+
+# 步骤 3：HTTP GET（第一次发送，PSH|ACK）
+- pkg: http_get.pkt
+  wait: 0
+
+# 步骤 4：TCP Retransmission #1（模拟超时重传，间隔 1s）
+- pkg: retransmit_1.pkt
+  delay: 1
+  wait: 0
+
+# 步骤 5：TCP Retransmission #2（指数退避，间隔 2s）
+- pkg: retransmit_2.pkt
+  delay: 2
+  wait: 0
+
+# 步骤 6：TCP Retransmission #3（再次退避，间隔 4s）
+- pkg: retransmit_3.pkt
+  delay: 4
+  wait: 0
+
+# 步骤 7：RST —— 模拟服务端拒绝或连接异常
+- pkg: rst.pkt
+  wait: 0

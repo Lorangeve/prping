@@ -1,0 +1,13 @@
+# 配方 demo：两步 HTTP 请求流程（http 层构造 + TCP 端口注入）
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine app_http                        # 概览
+#   prping packet app_http 127.0.0.1:80 --wait 1 -p port=80
+#     （目标需有 HTTP 服务/回显；ip 默认 127.0.0.1，TCP 端口可注入 -p port=80）
+#
+# 演示点：
+#   - headers.http 是 proto：start_line/headers/body 三参数（method/path 为反解字段）
+#   - 步骤 1：GET；步骤 2：POST（带 JSON body 与中文头）——同一端口两个变体
+recipe:
+- pkg: http_get.pkt
+- pkg: http_post.pkt

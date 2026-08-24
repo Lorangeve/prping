@@ -1,0 +1,24 @@
+# 配方 demo：两步 DNS 会话（.pktl = package list）
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine dns_recipe                     # 概览
+#   prping engine dns_recipe/dns_recipe.pktl     # 显式路径
+#   prping packet dns_recipe 127.0.0.1:5353 --wait 1
+#     （目标需回显 DNS 查询；目标地址可注入 -p ip=127.0.0.1；
+#       第一步把应答的 dns.id 提取进 global.tid，
+#       第二步用 global("tid") 复用——也可 -g tid=0xabcd 覆盖 init）
+#
+# global: 声明跨步骤共享变量（三种形态：`- name: X` + 缩进 init / 裸 `- X` /
+#          `- X=v` 一行内联；-g 键值覆盖 init，extract 覆盖前两者）
+global:
+- tid=0x4321   # 一行内联 init（等价于 `- name: tid` / `  init: 0x4321`）
+
+# recipe: 按顺序发送多个 .pkt；每步可覆盖 wait/params，extract 从回包取值写 global
+recipe:
+- pkg: recipe_query.pkt
+  wait: 1
+  extract:
+  - name: tid
+    from: reply.dns.id
+    as: hex
+- pkg: recipe_query.pkt

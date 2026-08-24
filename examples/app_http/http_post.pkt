@@ -1,0 +1,18 @@
+# app_http 步骤 2：HTTP POST（JSON body + 自定义头；TCP 端口可注入 -p port=80）
+# 目标地址可注入：-p ip=127.0.0.1
+#
+# sniffer 段匹配 TCP 回包（ACK 或 PSH|ACK）——
+# 仅配合 --wait（Windows Npcap 可收；Linux raw 回包 socket 只收 ICMP，收不到 TCP）。
+# 注意：HTTP 响应是应用层数据，这里匹配 TCP 层确认，如需匹配 HTTP 响应需自定义 sniffer。
+post = http(start_line="POST /login HTTP/1.1",
+            headers=["Content-Type: application/json", "User-Agent: prping/0.1"],
+            body="{\"user\":\"admin\",\"pass\":\"123456\"}")
+full = use(post) |> tcp(sport=40001, dport=params("port", 80))
+                |> ipv4(src="0.0.0.0", dst=params("ip", "127.0.0.1"))
+                |> eth(src_mac="00:11:22:33:44:55", dst_mac="66:77:88:99:aa:bb")
+
+sniffer:
+  - match tcp(sport=dport, dport=sport, flags=ack())
+
+export:
+- full

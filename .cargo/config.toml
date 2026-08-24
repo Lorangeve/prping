@@ -9,20 +9,37 @@ runner = ".cargo/run-with-cap.sh"
 # /ignore:4099：xwin 分发的 MSVC 静态库内嵌 PDB 路径引用（编译 MS 库时的
 # 构建机路径），但 SDK 包不带 PDB——lld-link 找不到就刷 LNK4099 警告。
 # 链接本身成功，此选项抑制这条已知噪音。
+#
+# /DELAYLOAD:wpcap.dll：wpcap.dll（Npcap 运行时）改为**延迟加载**——Windows
+# 加载器在进程启动时只解析普通导入表（IAT），wpcap.dll 是 pcap crate（packet
+# --raw 的 Npcap 绑定）的静态导入，不延迟加载的话机器上没装 Npcap 就连
+# `prping --help` 都起不来（“wpcap.dll is missing”）。延迟加载后只有真正执行
+# `packet --raw` 才需要 wpcap.dll；rawwin.rs 的 ensure_wpcap() 在该入口先
+# LoadLibrary 探测，未装 Npcap 时给出友好报错而不是 delay-load 异常崩溃。
+# /DELAYLOAD 需要 delay-load helper（__delayLoadHelper2），由 MSVC 工具链的
+# delayimp.lib 提供（xwin 分发在 crt/lib/{x86_64,x86}/delayimp.lib，已含在
+# LIBPATH 中；本机 MSVC 同理）——lld-link 不像 link.exe 会自动拉取，须显式
+# 链接。MSVC 原生 link.exe 下显式链接 delayimp.lib 同样是标准做法。
 [target.x86_64-pc-windows-msvc]
 rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=/ignore:4099",
+    "-C", "link-arg=/DELAYLOAD:wpcap.dll",
+    "-C", "link-arg=delayimp.lib",
 ]
 
 [target.x86_64-win7-windows-msvc]
 rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=/ignore:4099",
+    "-C", "link-arg=/DELAYLOAD:wpcap.dll",
+    "-C", "link-arg=delayimp.lib",
 ]
 
 [target.i686-win7-windows-msvc]
 rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=/ignore:4099",
+    "-C", "link-arg=/DELAYLOAD:wpcap.dll",
+    "-C", "link-arg=delayimp.lib",
 ]

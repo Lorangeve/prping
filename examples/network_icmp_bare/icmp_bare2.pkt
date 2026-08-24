@@ -1,0 +1,16 @@
+# network_icmp_bare 步骤 2：复用步骤 1 提取的 id/seq（seq 再 +1）
+# id=global("rid", 0) 配方提取值；独立 packet 时用默认；目标地址可注入：-p ip=127.0.0.1
+payload = raw(bytes="prping icmp probe")
+
+full4 = use(payload) |> icmp(type=8, id=global("rid", 0), seq=global("rseq", 1) + 1)
+                    |> ipv4(src=params("src", "0.0.0.0"), dst=params("ip", "127.0.0.1"))
+full6 = use(payload) |> icmp(type=128, id=global("rid", 0), seq=global("rseq", 1) + 1)
+                    |> ipv6(src=params("src6", "::"), dst=params("ip6", "::1"))
+
+# 回包校验（--wait）：回包必须是 ICMP 且 id/seq 与发包一致（v4/v6 通用）
+sniffer:
+  - match icmp(id=id, seq=seq)
+
+export:
+- full4
+- full6

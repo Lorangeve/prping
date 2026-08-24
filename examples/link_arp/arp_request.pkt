@@ -1,0 +1,10 @@
+# link_arp 步骤 1：ARP 请求（问「谁是目标 IP」，广播目的；ethertype 自动 0x0806）
+# 目标 IP 可注入：-p ip=127.0.0.1（默认回环；打真实网段邻居时注入 -p ip=<邻居 IP>）
+req = arp(op=request(), sha="00:11:22:33:44:55", spa="127.0.0.1",
+          tha="00:00:00:00:00:00", tpa=params("ip", "127.0.0.1"))
+
+# 默认导出：ARP 请求 + 广播目的（ethertype 由 arp 层自动推导 0x0806）
+use(req) |> eth(src_mac="00:11:22:33:44:55", dst_mac="ff:ff:ff:ff:ff:ff")
+
+export:
+- req

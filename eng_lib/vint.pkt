@@ -1,0 +1,29 @@
+# eng_lib/vint.pkt —— 变长整数字节原语的库声明（proto 双位置：值位置调用返回字节）
+#
+# 引擎不再内置 varint/qvarint 原语（builtin_docs 已移除）：变长整数编码统一走
+# vint codec 声明（`#[meta(codec=...)]`），这里用 `#[proto]` 把最常用的两个方案
+# 暴露成值位置可调用的名字（concat 里 `qvarint(len(data))` 一步拼字节）；
+# 新增编码 = 自己在 lib 里声明一个 `#[proto]`（值位置同样可用），不动引擎。
+#
+# doc 注释约定同 net.pkt：摘要 + `@param`/`@auto` 标签行，`--eng --ls` 展示。
+
+# protobuf 变长整数（base-128/LEB128，最小字节数）→ 字节
+# @param n: 非负整数 0..2^63-1（≤9 字节）
+# @auto: 续延位编码（每字节低 7 位 + 最高位续延）——与 `#[meta(codec="le128")]` 字段同实现
+#[proto]
+func varint(n=0) -> bytes {
+    concat(#[meta(codec="le128")] n)
+}
+
+# QUIC 变长整数（RFC 9000 §16：2 位长度前缀 1/2/4/8 字节）→ 字节
+# @param n: 非负整数 0..2^62-1
+# @auto: 前缀宽度表编码（首字节高 2 位 = 宽度索引）——与 `#[meta(codec="prefix",
+#   prefix_bits=2, widths=[1,2,4,8])]` 字段同实现
+#[proto]
+func qvarint(n=0) -> bytes {
+    concat(#[meta(codec="prefix", prefix_bits=2, widths=[1,2,4,8])] n)
+}
+
+export:
+- varint
+- qvarint

@@ -1,0 +1,19 @@
+[package]
+name = "prping"
+version = "0.1.0"
+edition = "2024"
+description = "跨平台 psping 复刻 CLI"
+license = "MIT"
+
+[[bin]]
+name = "prping"
+path = "src/main.rs"
+
+[dependencies]
+prping-core = { path = "../prping-core" }
+packet-dsl = { path = "../packet-dsl" }
+bpaf = "0.9"
+anyhow = "1"
+rust-i18n = "3"
+libc = "0.2"
+smol = "2"

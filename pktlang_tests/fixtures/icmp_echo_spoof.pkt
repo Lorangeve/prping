@@ -1,0 +1,6 @@
+# 裸 IPv4 + ICMP echo request，伪造 src
+payload = raw(bytes="prping test")
+full = use(payload) |> icmp(type=8, id=0x5678, seq=1)
+                    |> ipv4(src=params("src", "192.168.81.100"), dst=params("ip", "127.0.0.1"))
+export:
+- full

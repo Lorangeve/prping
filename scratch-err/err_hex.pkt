@@ -1,0 +1,5 @@
+# 错误4: hex 奇数长度
+payload = raw(bytes="x")
+full = use(payload) |> ipv4(bytes=hex("4500f"))
+export:
+- full

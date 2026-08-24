@@ -1,0 +1,7 @@
+# 裸 IPv4 + TCP（无 eth 层），伪造 src=192.168.81.100
+# 用于测试 raw 模式下 spoofed src 是否原样上线
+get = http(start_line="GET /")
+full = use(get) |> tcp(sport=40000, dport=params("port", 80))
+               |> ipv4(src="192.168.81.100", dst=params("ip", "127.0.0.1"))
+export:
+- full

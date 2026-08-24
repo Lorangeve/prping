@@ -1,0 +1,11 @@
+# link_arp 步骤 2：ARP 应答（「127.0.0.1 的 MAC 是 …」）
+# sha（应答者 MAC）可注入：-p tmac=66:77:88:99:aa:bb；spa/tpa 默认回环
+# 真实场景的应答 MAC 从目标返回的 ARP 应答帧提取（Linux raw 回包 socket 收不到
+# ARP，故用 -p 注入）；tha 回填请求方 MAC
+rpl = arp(op=reply(), sha=params("tmac", "66:77:88:99:aa:bb"), spa="127.0.0.1",
+          tha="00:11:22:33:44:55", tpa="127.0.0.1")
+
+use(rpl) |> eth(src_mac=params("tmac", "66:77:88:99:aa:bb"), dst_mac="00:11:22:33:44:55")
+
+export:
+- rpl

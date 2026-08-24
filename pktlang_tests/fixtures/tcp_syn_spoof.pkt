@@ -1,0 +1,6 @@
+p = http(start_line="GET /")
+full = use(p) |> tcp(sport=12345, dport=80, flags=syn(), seq=0x1000)
+             |> ipv4(src="192.168.81.100", dst="127.0.0.1")
+
+export:
+- full

@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "scripts/claude-hooks/primitive-docs-check.sh",
+            "timeout": 10,
+            "statusMessage": "primitive docs sync check"
+          }
+        ]
+      }
+    ]
+  }
+}
