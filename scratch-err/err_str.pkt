@@ -1,5 +1,0 @@
-# 错误1: 字符串字面量不隐式转数值
-payload = raw(bytes="hi")
-full = use(payload) |> udp(dport=be16("0x4242"))
-export:
-- full

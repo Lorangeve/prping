@@ -1,5 +1,0 @@
-# 错误3: 已移除运算符 ==（词法层报错）
-payload = raw(bytes="x")
-full = use(payload) |> ipv4(ttl=params("t", "64") == 64)
-export:
-- full

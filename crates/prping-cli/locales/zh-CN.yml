@@ -58,6 +58,7 @@ server:
   recv_tag: '接收 '
   udp_trigger: 'UDP 接收模式触发：来自 '
   summary: '服务端汇总: %{conns} 个连接，接收 %{bytes} 字节、发送 %{sent} 字节，耗时 %{secs}秒（平均 %{mbps} Mbps）'
+  verbose_hint: '详细模式：将为每个收到的数据包打印反解层栈与 hexdump'
 trace:
   tracing: '正在跟踪到 %{host} (%{addr}) 的路由，最多 %{hops} 跳:'
   reached: 到达目标 %{host}，共 %{hops} 跳。
@@ -191,6 +192,7 @@ help:
     wait: 发送后等待最多 SECS 秒的匹配应答（对标 scapy sr1），打印 RTT 并反解展示（配合 --pkt）
     fuzz: 发送前把未填字段全部随机化（对标 scapy fuzz()，配合 --pkt）
     out: 把构建的包存成 pcap 文件（对标 scapy wrpcap，配合 --pkt）
+    summary: 摘要模式：只打印一行结果（包数、目标、发送/失败数），隐藏逐包详情
     ls: 列出全部内置层函数的字段表与自动行为（配合 --eng）
     hex: 反解并展示十六进制字符串对应的包（配合 --eng）
     pcap: 读取 pcap 文件并逐条反解展示（配合 --eng）
@@ -211,6 +213,7 @@ help:
     receive: 接收模式：测下载方向（配合 -l 延迟或 -b 带宽测试使用）
     pretty: 用 ploot 渲染图表（Unicode/Braille）
     graph: 显示延迟时间线图（配合 -p 用 ploot 渲染）
+    verbose: 详细模式：打印每个收到的数据包的解析详情（反解层栈 + hexdump）
     version: 显示版本号
     help_pkg: 使用手册（分页）；--help-pkg 章节标题 跳转（编号或标题）
   usage_ping: 'prping ping [选项] <HOST[:PORT]>'
@@ -252,6 +255,7 @@ help:
     示例:
       prping packet file.pkt 192.168.1.1:9000
       prping packet --raw --wait 2 file.pkt 8.8.8.8
+      prping packet --summary file.pkt 192.168.1.1:9000
       prping packet arp_request.pkt --raw   # 链路层帧（ARP 等）：目标可省略
   overview: |-
     prping — ping, 延迟, 带宽测量工具

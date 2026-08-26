@@ -4,8 +4,9 @@
 //! ipv6/icmp/tcp/udp 按 kind 反解（`try_proto_layer`），Rust 手写 parse_* 已全部退役——
 //! 未注册或字节不符时该层不产生（eth/ip 类字节留 `remaining`；icmp/tcp/udp 段按 raw
 //! 保留并记 note）。调用方须先注册（`set_proto_registry`，宿主 `ensure_proto_registry`）。
-//! - 应用层：先查 proto 注册表（`#[rule]` 分派，如 dns udp/tcp 53），未命中再回退
-//!   硬编码 parse_dns/parse_http（DNS 压缩指针/HTTP 文本行注册表不可达，保留兜底）。
+//! - 应用层：只走 proto 注册表（`#[rule]` 分派，如 dns udp/tcp 53；裸载荷结构化
+//!   回退 `dissect_bare_app` 按 kind 查 http/dns 声明）。硬编码 parse_dns/parse_http
+//!   已退役——DNS 压缩指针/HTTP 文本行均已 proto 化。
 //! - DNS 支持压缩指针；checksum 不匹配时记入 `notes` 而非报错。
 //! - 反解产物复用构建侧 IR 字段结构（实际值填入 `Field::Value`），可与序列化 roundtrip。
 //!

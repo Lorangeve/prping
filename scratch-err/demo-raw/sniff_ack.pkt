@@ -1,7 +1,0 @@
-payload = raw(bytes="hi")
-full = use(payload) |> tcp(sport=40000, dport=params("port", 80))
-                    |> ipv4(src="1.2.3.4", dst="127.0.0.1")
-sniffer:
-  - match tcp(sport=dport, dport=sport, flags=ack())
-export:
-- full

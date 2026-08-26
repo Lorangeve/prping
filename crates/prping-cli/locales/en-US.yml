@@ -58,6 +58,7 @@ server:
   recv_tag: 'recv '
   udp_trigger: 'UDP receive-mode trigger from '
   summary: 'server summary: %{conns} connections, %{bytes} bytes received, %{sent} bytes sent in %{secs}s (avg %{mbps} Mbps)'
+  verbose_hint: 'verbose mode: packet dissection will be printed for each received packet'
 trace:
   tracing: 'Tracing route to %{host} (%{addr}) over a maximum of %{hops} hops:'
   reached: 'Reached target %{host} in %{hops} hops.'
@@ -193,6 +194,7 @@ help:
     wait: Wait up to SECS for a matching reply (like scapy sr1), print RTT and dissect it (with --pkt)
     fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkt)
     out: Save built packets to a pcap file (like scapy wrpcap, with --pkt)
+    summary: 'Summary mode: print a single result line (packet count, target, sent/failed); suppress per-packet detail'
     ls: List all builtin layer functions with fields and auto behavior (with --eng)
     hex: Dissect and show raw bytes from a hex string (with --eng)
     pcap: Read a pcap file and dissect every record (with --eng)
@@ -213,6 +215,7 @@ help:
     receive: Receive from server instead of sending (download direction; used with -l latency or -b bandwidth)
     pretty: Render graphs with ploot (Unicode/Braille)
     graph: Print latency timeline graph (combine with -p for ploot rendering)
+    verbose: "Verbose mode: print parsed packet details (dissected layers + hexdump)"
     version: Show version
     help_pkg: Full manual (paged); --help-pkg SECTION jumps to a chapter (number or title)
   usage_ping: 'prping ping [OPTIONS] <HOST[:PORT]>'
@@ -254,6 +257,7 @@ help:
     Examples:
       prping packet file.pkt 192.168.1.1:9000
       prping packet --raw --wait 2 file.pkt 8.8.8.8
+      prping packet --summary file.pkt 192.168.1.1:9000
       prping packet arp_request.pkt --raw   # link-layer frame (ARP etc.): target optional
   overview: |-
     prping — ping, latency, bandwidth measurement utility

@@ -40,7 +40,7 @@ fn with_server(f: impl Fn(u16) + Send + 'static) -> prping_core::ServerReport {
     smol::block_on(async {
         let port = alloc_port();
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let handle = smol::spawn(async move { serve(addr).await.expect("serve") });
+        let handle = smol::spawn(async move { serve(addr, false).await.expect("serve") });
         wait_port(port);
         f(port);
         // 给连接任务一点收尾时间，确保聚合计数完成
@@ -337,7 +337,7 @@ fn bw_client(
     reset_interrupt();
     let port = alloc_port();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let handle = smol::spawn(async move { serve(addr).await.expect("serve") });
+    let handle = smol::spawn(async move { serve(addr, false).await.expect("serve") });
     wait_port(port);
     let cfg = PingConfig {
         host: "127.0.0.1".into(),

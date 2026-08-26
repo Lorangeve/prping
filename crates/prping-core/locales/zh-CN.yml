@@ -59,6 +59,13 @@ server:
   recv_tag: '接收 '
   udp_trigger: 'UDP 接收模式触发：来自 '
   summary: '服务端汇总: %{conns} 个连接，接收 %{bytes} 字节、发送 %{sent} 字节，耗时 %{secs}秒（平均 %{mbps} Mbps）'
+  verbose_hint: '详细模式：将为每个收到的数据包打印反解层栈与 hexdump'
+  verbose_capture_active: 'raw 抓包已启动（%{devs}）——显示完整帧（eth/IP/TCP/UDP 头 + 握手）'
+  verbose_capture_note: 'raw 抓包不可用（%{reason}）；回退显示载荷级反解'
+  capture_iface_all: '全接口'
+  capture_unsupported: '本平台不支持 raw 抓包（Linux AF_PACKET / Windows Npcap）'
+  verbose_capture_macos_hint: 'macOS：打开 BPF 抓包设备需要 root 权限——用 `sudo` 运行，或安装 Wireshark 的 ChmodBPF 授权 /dev/bpf* 后普通用户可用。'
+  capture_stopped: '抓包已停止'
 trace:
   tracing: '正在跟踪到 %{host} (%{addr}) 的路由，最多 %{hops} 跳:'
   reached: 到达目标 %{host}，共 %{hops} 跳。
@@ -133,6 +140,7 @@ errors:
   tcp_trace_requires_port: "TCP 路由跟踪需要端口: prping trace --tcp HOST:PORT"
   trace_udp_tcp_conflict: "--tcp 与 --udp 不能同时使用"
   tcp_trace_windows: "TCP 路由跟踪暂不支持 Windows（raw TCP socket 受限）——请用 ICMP 路由跟踪（prping trace HOST）或 Npcap 工具"
+  raw_eth_macos: "--raw 发送以太网帧（eth）在 macOS 上不支持（AF_PACKET 仅 Linux 可用；Windows 需安装 Npcap）；请在 Linux 上运行，或改用不带 eth 层的包（ipv4/ipv6 外层可正常发送）"
   trace_no_local_addr: 无法确定本地源地址（UDP 路由探测失败）
   max_hops_requires_trace: "-m 只能与 -t（路由跟踪）一起使用"
   no_dns_requires_trace: "-d 只能与 -t（路由跟踪）一起使用"

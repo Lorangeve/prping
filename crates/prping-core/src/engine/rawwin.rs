@@ -31,8 +31,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 #[cfg(windows)]
 use std::time::{Duration, Instant};
 
-/// Npcap 设备抽象（纯数据；windows 由 `pcap::Device` 填充，测试直接构造）。
-#[cfg(any(windows, test))]
+/// Npcap/libpcap 设备抽象（纯数据；windows/macOS 由 `pcap::Device` 填充，测试直接构造）。
+#[cfg(any(windows, target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DeviceInfo {
     pub name: String,
@@ -40,8 +40,10 @@ pub(crate) struct DeviceInfo {
     pub loopback: bool,
 }
 
-/// 选择发送设备：`--iface` 按名字（不区分大小写）精确匹配，或描述子串匹配；
+/// 选择发送/抓包设备：`--iface` 按名字（不区分大小写）精确匹配，或描述子串匹配；
 /// 否则回环目标优先回环设备，其余取首个非回环设备（全回环时兜底取第一个）。
+/// （macOS server 抓包不用本函数：0.0.0.0 未指定绑定需同时开 lo0 + 非回环设备，
+/// 设备集合选择内联在 `capture::spawn_macos`。）
 #[cfg(any(windows, test))]
 pub(crate) fn pick_device(
     devs: &[DeviceInfo],
@@ -191,7 +193,7 @@ mod iphlp {
 /// - 失败：返回友好错误——绝不能让 delay-load 失败路径走到（那会抛 SEH 异常
 ///   0xC06D007E，Rust 默认不捕获，直接崩溃）。
 #[cfg(windows)]
-fn ensure_wpcap() -> anyhow::Result<()> {
+pub(crate) fn ensure_wpcap() -> anyhow::Result<()> {
     unsafe extern "system" {
         fn LoadLibraryW(name: *const u16) -> *mut std::ffi::c_void;
     }
@@ -263,7 +265,10 @@ pub(crate) fn send_raw_full(
 }
 
 #[cfg(windows)]
-fn select_device_name(target: Option<&SocketAddr>, iface: Option<&str>) -> anyhow::Result<String> {
+pub(crate) fn select_device_name(
+    target: Option<&SocketAddr>,
+    iface: Option<&str>,
+) -> anyhow::Result<String> {
     let devs = list_devices()?;
     // 链路层帧（None）无目标可判回环：走非回环优先的默认选择
     let loopback = target.is_some_and(|t| t.ip().is_loopback());
@@ -275,10 +280,10 @@ fn select_device_name(target: Option<&SocketAddr>, iface: Option<&str>) -> anyho
     Ok(devs[idx].name.clone())
 }
 
-#[cfg(windows)]
-fn list_devices() -> anyhow::Result<Vec<DeviceInfo>> {
-    let devs = pcap::Device::list()
-        .map_err(|e| anyhow::anyhow!("Npcap 设备枚举失败（确认已安装 Npcap）：{e}"))?;
+/// pcap 设备枚举（windows = Npcap；macOS = 系统 libpcap）。两者结果同构。
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn list_devices() -> anyhow::Result<Vec<DeviceInfo>> {
+    let devs = pcap::Device::list().map_err(|e| anyhow::anyhow!("pcap 设备枚举失败：{e}"))?;
     Ok(devs
         .into_iter()
         .map(|d| DeviceInfo {
@@ -290,7 +295,7 @@ fn list_devices() -> anyhow::Result<Vec<DeviceInfo>> {
 }
 
 #[cfg(windows)]
-fn open_capture(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Active>> {
+pub(crate) fn open_capture(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Active>> {
     let cap = pcap::Capture::from_device(dev)
         .map_err(|e| anyhow::anyhow!("打开 Npcap 设备 `{dev}` 失败：{e}"))?
         .timeout(100)

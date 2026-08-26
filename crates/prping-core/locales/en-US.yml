@@ -59,6 +59,13 @@ server:
   recv_tag: 'recv '
   udp_trigger: 'UDP receive-mode trigger from '
   summary: 'server summary: %{conns} connections, %{bytes} bytes received, %{sent} bytes sent in %{secs}s (avg %{mbps} Mbps)'
+  verbose_hint: 'verbose mode: packet dissection will be printed for each received packet'
+  verbose_capture_active: 'raw packet capture active on %{devs} — showing full frames (eth/IP/TCP/UDP headers + handshake)'
+  verbose_capture_note: 'raw packet capture unavailable (%{reason}); showing payload-level dissection only'
+  capture_iface_all: 'all interfaces'
+  capture_unsupported: 'raw packet capture is not supported on this platform (Linux AF_PACKET / Windows Npcap)'
+  verbose_capture_macos_hint: 'macOS: opening the BPF capture device needs root — run with `sudo`, or install Wireshark''s ChmodBPF to grant /dev/bpf* to your user.'
+  capture_stopped: 'packet capture stopped'
 trace:
   tracing: 'Tracing route to %{host} (%{addr}) over a maximum of %{hops} hops:'
   reached: 'Reached target %{host} in %{hops} hops.'
@@ -133,6 +140,7 @@ errors:
   tcp_trace_requires_port: 'TCP traceroute requires a port: prping trace --tcp HOST:PORT'
   trace_udp_tcp_conflict: "--tcp and --udp cannot be used together"
   tcp_trace_windows: 'TCP traceroute is not supported on Windows (raw TCP sockets are restricted) — use ICMP traceroute (prping trace HOST) or an Npcap-based tool'
+  raw_eth_macos: '--raw sending Ethernet frames (eth) is not supported on macOS (AF_PACKET is Linux-only; Windows requires Npcap). Run on Linux, or use packets without an eth layer (ipv4/ipv6 outer layer works fine)'
   trace_no_local_addr: cannot determine the local source address (UDP route probe failed)
   max_hops_requires_trace: "-m only applies with -t (traceroute)"
   no_dns_requires_trace: "-d only applies with -t (traceroute)"

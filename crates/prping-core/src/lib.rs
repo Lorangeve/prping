@@ -68,6 +68,7 @@
 
 rust_i18n::i18n!("locales");
 
+mod capture;
 mod drive;
 pub(crate) mod engine;
 pub(crate) mod manual;
@@ -308,12 +309,45 @@ fn clamp_udp_size(size: usize, udp: bool, on_warning: &mut impl FnMut(PrpingWarn
 ///
 /// 无限运行直到 `set_interrupted(true)`（Ctrl+C 或测试注入），返回聚合报告。
 /// 连接日志直接打印到 stdout（语义化配色）。
-pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
+/// `verbose` 为 true 时，每个收发数据包打印 dissect 反解层栈 + hexdump。
+pub async fn serve(addr: SocketAddr, verbose: bool) -> Result<ServerReport, PrpingError> {
     use smol::io::{AsyncReadExt, AsyncWriteExt};
     use smol::net::TcpListener;
     use std::io::Write as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    // verbose 模式需要 dissect 反解应用层（http/dns 等）：proto 注册表在
+    // engine/packet 路径由 ensure_proto_registry 加载，服务端进程必须自己加载
+    // （OnceLock 一次性；非 verbose 不加载，保持零开销）。
+    if verbose {
+        engine::eng::ensure_proto_registry();
+    }
+    // 完整帧抓包（verbose）：普通 socket 只见载荷，要显示 eth/IP/TCP 头（含握手）
+    // 需 raw 抓包。成功 → 帧级显示（抑制下面 socket 载荷级打印）；失败 → 提示并
+    // 回退载荷级 dissect（Linux 需 root/cap_net_raw，Windows 需装 Npcap）。
+    let mut capture_active = false;
+    if verbose {
+        match capture::spawn(addr) {
+            capture::CaptureStatus::Active(devs) => {
+                capture_active = true;
+                println!(
+                    "{}",
+                    rust_i18n::t!("server.verbose_capture_active", devs = devs.join(", "))
+                );
+            }
+            capture::CaptureStatus::Unavailable(reason) => {
+                let mut w = stderr();
+                let _ = writeln_orange(
+                    &mut w,
+                    rust_i18n::t!("server.verbose_capture_note", reason = reason),
+                );
+                // macOS 专用提示：BPF 抓包需 root（/dev/bpf* 默认 root:wheel 600）
+                #[cfg(target_os = "macos")]
+                let _ = writeln_orange(&mut w, rust_i18n::t!("server.verbose_capture_macos_hint"));
+            }
+        }
+    }
 
     let listener = TcpListener::bind(addr).await?;
     let agg = Arc::new(ServerAgg {
@@ -337,6 +371,15 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
             if n == 8 && data[0] == 0xFF && data[1] == 0xFF {
                 let size = u16::from_be_bytes([data[2], data[3]]) as usize;
                 let count = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                // verbose 且未抓包：dissect 触发包
+                if verbose && !capture_active {
+                    let report = packet_dsl::dissect(data);
+                    let mut w = output::stdout();
+                    let _ = output::print_green(&mut w, "[udp-trigger] ");
+                    let _ = output::print_cyan(&mut w, format!("{}:{} ", src.ip(), src.port()));
+                    let _ = writeln!(&mut w, "{n} B");
+                    let _ = engine::eng::render_dissected(&mut w, &report, "  trigger:", data);
+                }
                 // 接收模式开始：给服务端一个即时接收反馈（不逐包打印，带宽测试会刷屏）
                 let mut w = output::stdout();
                 let _ = output::print_green(&mut w, rust_i18n::t!("server.udp_trigger"));
@@ -369,6 +412,15 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
                 continue;
             }
             // 普通回显：原样回送并统计接收字节（UDP ping/latency 的接收量进聚合报告）
+            // verbose 且未抓包：打印接收数据报的 dissect 反解
+            if verbose && !capture_active {
+                let report = packet_dsl::dissect(data);
+                let mut w = output::stdout();
+                let _ = output::print_green(&mut w, "[udp-echo] ");
+                let _ = output::print_cyan(&mut w, format!("{}:{} ", src.ip(), src.port()));
+                let _ = writeln!(&mut w, "{n} B");
+                let _ = engine::eng::render_dissected(&mut w, &report, "  recv:", data);
+            }
             if util::udp_send(&udp_socket, data, &src).await.is_ok() {
                 udp_agg.bytes.fetch_add(n as u64, Ordering::Relaxed);
             }
@@ -414,6 +466,16 @@ pub async fn serve(addr: SocketAddr) -> Result<ServerReport, PrpingError> {
                     Ok(0) => break,
                     Ok(n) => {
                         total += n as u64;
+                        // verbose 且未抓包：打印接收数据的 dissect 反解
+                        if verbose && !capture_active {
+                            let data = &buf[..n];
+                            let report = packet_dsl::dissect(data);
+                            let mut w = output::stdout();
+                            let _ = output::print_green(&mut w, "[recv] ");
+                            let _ = output::print_cyan(&mut w, format!("{peer} "));
+                            let _ = writeln!(&mut w, "{} B", n);
+                            let _ = engine::eng::render_dissected(&mut w, &report, "  recv:", data);
+                        }
                         // 接收模式触发（0xFF 单字节）：持续回送数据并统计发送量
                         if n == 1 && buf[0] == 0xFF && total == 1 {
                             let dummy = vec![0u8; 65536];
