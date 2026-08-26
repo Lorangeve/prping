@@ -112,12 +112,11 @@ export:
 /// 独立 one's complement checksum（RFC 1071）。
 fn ref_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
-    let mut it = data.chunks_exact(2);
-    for c in &mut it {
-        sum += u16::from_be_bytes([c[0], c[1]]) as u32;
+    for c in data.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*c) as u32;
     }
-    if let &[b] = it.remainder() {
-        sum += (b as u32) << 8;
+    if data.len() & 1 == 1 {
+        sum += (data[data.len() - 1] as u32) << 8;
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);

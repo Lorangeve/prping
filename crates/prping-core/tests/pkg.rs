@@ -705,7 +705,7 @@ fn patch_zero_src_fills_and_rechecksums() {
     hdr[10] = 0;
     hdr[11] = 0;
     let mut sum = 0u32;
-    for ch in hdr.chunks_exact(2) {
+    for ch in hdr.as_chunks::<2>().0 {
         sum += u16::from_be_bytes([ch[0], ch[1]]) as u32;
     }
     while sum >> 16 != 0 {
@@ -1245,7 +1245,7 @@ fn recipe_extract_expr_feeds_next_step() {
         dns_id(&datagrams[1]),
         0x4322,
         "步骤 2 应复用表达式提取的 tid（0x4321+1，而非 init 0x1111）：{:02x?}",
-        &datagrams[1]
+        datagrams[1]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1392,7 +1392,7 @@ fn recipe_extract_feeds_next_step() {
         dns_id(&datagrams[1]),
         0x4321,
         "步骤 2 应复用 extract 的 tid（而非 init 0x1111）：{:02x?}",
-        &datagrams[1]
+        datagrams[1]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1625,7 +1625,7 @@ fn recipe_on_error_continue_sends_rest() {
     assert!(
         got.windows(5).any(|w| w == b"hello"),
         "步骤 2 应已发送：{:02x?}",
-        &got
+        got
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

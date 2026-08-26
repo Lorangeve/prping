@@ -94,14 +94,16 @@ pub use ping::trace::{DEFAULT_MAX_HOPS, TraceReport, traceroute};
 // 引擎模块
 pub use engine::convert::{ConvertOptions, ConvertReport, convert_pcap};
 pub use engine::eng::{
-    analyze_file, analyze_recipe, decode_hex, decode_pcap, ensure_proto_registry, ls_builtins,
-    render_dissected, render_hexdump, render_layers, render_packet, render_packet_fields,
+    analyze_file, analyze_recipe, decode_hex, decode_pcap, dns_type_name, effective_libs,
+    ensure_proto_registry, layer_name, libs_display, ls_builtins, opt_bytes_len, render_dissected,
+    render_hexdump, render_layers, render_packet, render_packet_fields, run_lsp, run_lsp_on,
+    value_display,
 };
-pub use engine::lsp::{run_lsp, run_lsp_on};
 pub use engine::pcap::{LinkType, PcapRecord, linktype_of, read_pcap, write_pcap};
 pub use engine::pkg::{
-    PkgOptions, SendMode, SendOutcome, Transport, derive_target, extract_payload, patch_zero_src,
-    send_packets, send_recipe, sniffer_match, sniffer_match_with, step_send_mode,
+    PkgOptions, Reply, SendMode, SendOutcome, SnifferMatcher, Transport, derive_target,
+    extract_payload, patch_zero_src, send_packets, send_recipe, sniffer_match, sniffer_match_with,
+    step_send_mode,
 };
 pub use engine::recipe::{
     Extract, ExtractAs, FromSpec, GlobalDecl, OnError, Recipe, Step, StepRaw, parse as parse_recipe,

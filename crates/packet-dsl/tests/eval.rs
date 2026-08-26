@@ -199,7 +199,7 @@ fn params_fill_string() {
     assert!(
         bytes.windows(5).any(|w| w == b"POST "),
         "start_line=POST 应进入字节：{:02x?}",
-        &bytes
+        bytes
     );
     // 未传 start_line → 用默认值 GET / HTTP/1.1
     let pkts = resolve_with("a = http()\nuse(a) |> tcp()\n", &[]);
@@ -209,7 +209,7 @@ fn params_fill_string() {
     assert!(
         bytes.windows(14).any(|w| w == b"GET / HTTP/1.1"),
         "默认 start_line 应进入字节：{:02x?}",
-        &bytes
+        bytes
     );
 }
 
@@ -533,12 +533,11 @@ fn net6_builds_ipv6_and_eth() {
 /// 独立 one's complement checksum。
 fn ref_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
-    let mut it = data.chunks_exact(2);
-    for c in &mut it {
-        sum += u16::from_be_bytes([c[0], c[1]]) as u32;
+    for c in data.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*c) as u32;
     }
-    if let &[b] = it.remainder() {
-        sum += (b as u32) << 8;
+    if data.len() & 1 == 1 {
+        sum += (data[data.len() - 1] as u32) << 8;
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -765,9 +764,8 @@ fn layer_bytes_passthrough() {
     hdr[10] = 0;
     hdr[11] = 0;
     let mut sum = 0u32;
-    let mut it = hdr.chunks_exact(2);
-    for ch in &mut it {
-        sum += u16::from_be_bytes([ch[0], ch[1]]) as u32;
+    for ch in hdr.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*ch) as u32;
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);

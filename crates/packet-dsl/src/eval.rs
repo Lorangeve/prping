@@ -196,6 +196,14 @@ fn ip4_bytes(v: &Value, name: &str, span: crate::ast::Span) -> PktResult<Vec<u8>
         return Ok(b);
     }
     let s = str_of(Some(v), name, span)?;
+    // `random` 关键字已随内置层函数移除（随机值改用 rand16/rand8 等字节原语），
+    // 字面量 "random" 不应再被当域名解析——直接拒绝。
+    if s.eq_ignore_ascii_case("random") {
+        return Err(Diagnostic::at(
+            format!("字段 `{name}`：`random` 关键字已移除，请用 rand16/rand8 等字节原语"),
+            span,
+        ));
+    }
     match s.parse::<std::net::Ipv4Addr>() {
         Ok(a) => Ok(a.octets().to_vec()),
         Err(_) => {
@@ -225,6 +233,13 @@ fn ip6_bytes(v: &Value, name: &str, span: crate::ast::Span) -> PktResult<Vec<u8>
         return Ok(b);
     }
     let s = str_of(Some(v), name, span)?;
+    // 同 ip4_bytes：字面量 "random" 直接拒绝，不走域名解析。
+    if s.eq_ignore_ascii_case("random") {
+        return Err(Diagnostic::at(
+            format!("字段 `{name}`：`random` 关键字已移除，请用 rand16/rand8 等字节原语"),
+            span,
+        ));
+    }
     match s.parse::<std::net::Ipv6Addr>() {
         Ok(a) => Ok(a.octets().to_vec()),
         Err(_) => {

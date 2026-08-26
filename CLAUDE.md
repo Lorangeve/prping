@@ -8,7 +8,10 @@
 - **ICMP**: 手写 raw socket (socket2) + smol::Async，无第三方 ICMP 依赖
 - **CLI**: [bpaf](https://github.com/pacak/bpaf) — 轻量级，编译快
 - **错误处理**: lib 层 thiserror（`PrpingError` 分派层枚举 + IO/anyhow 透传），bin 层 anyhow 做胶水
-- **代码结构**: 单 crate 双 target — `src/lib.rs`（协议/统一入口 `run`/`serve`，公开面最小化）+ `src/main.rs`（CLI 解析/渲染/退出码/信号安装）+ `src/{util,drive,stats,output,icmp,tcp,udp,latency,bandwidth,trace}.rs`（lib 内部）
+- **代码结构**: 单 crate 双 target — `src/lib.rs`（协议/统一入口 `run`/`serve`，公开面最小化）+ `src/main.rs`（CLI 解析/渲染/退出码/信号安装）+ `src/{util,drive,stats,output,icmp,tcp,udp,latency,bandwidth,trace}.rs`（lib 内部）。超大模块按 rust mod 目录化拆分（`a.rs` → `a/` 目录 + `a/mod.rs` 入口，忠实搬移原实现，行为不变）：
+  - `engine/pkg/`（原 `pkg.rs` 3119 行）— `send.rs`（`--pkt` 发送/渲染循环 + 目标推导 + 源地址填充）、`recipe.rs`（`.pktl` 配方执行 + extract）、`sniffer.rs`（回包匹配器 + 字段提取 + 字节级 Expr 比较）、`raw.rs`（AF_PACKET / IPPROTO_RAW / raw ICMP 收包）
+  - `engine/eng/`（原 `eng.rs` 1672 行）— `display.rs`（层字段展示/hexdump/反解渲染/模块概览头 + 终端宽度/折行）、`lsp.rs`（LSP 语言服务器，原 `engine/lsp.rs` 移入）
+  - `ping/trace/`（原 `trace.rs` 2072 行）— `icmp.rs`（echo 逐跳）、`tcp.rs`（SYN 逐跳）、`udp.rs`（经典 UDP 逐跳）；共享常量/类型/工具在 `mod.rs`
 - **终端颜色**: [termcolor](https://github.com/BurntSushi/termcolor)，颜色函数统一在 `output.rs`（客户端与服务端一致）
 - **直方图**: 默认 ASCII `#`（内置）；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图与 Braille 散点时间线（非 tty 自动剥离 ANSI）；`-H` 支持桶数或逗号分隔阈值（ms）
 - **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en-US.yml` + `locales/zh-CN.yml`，自动检测 `$LANG` 或 `--lang`
@@ -66,7 +69,7 @@ engine/packet 含引擎选项（`--lsp/--ls/--hex/--pcap` 互斥且不带文件�
 ## 编码约定
 
 - Rust edition 2024
-- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --workspace --all-targets` 全通过（437 tests：prping-core 109 + prping-cli 25 + engine/packet/pkg/lsp/recipe 各若干 + packet-dsl 全量）
+- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --workspace --all-targets` 全通过（464 tests）
 - 用户可见输出英文，注释中文
 - 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端连接日志用 `output::print_server_log`）；bin 侧错误用红色、警告用橙色（lib re-export `output::{stderr, writeln_red, writeln_orange}` 给 bin 用）
 - 参数校验分层：子命令选项集结构性互斥（server/trace/mtu/模式互斥、`-r` 依赖等已消除）+ `validate_ping`/`validate_latency`/`validate_engine`/`validate_packet` 只留真校验 + lib `run` 管 config 级不变式（`-4`/`-6` 冲突、UDP/带宽缺端口、`-i` clamp、`-m`/trace 不接受端口）；非法 `-H`（如 `-H abc`）与非法 `-n` 在 bin 红色报错退出码 1

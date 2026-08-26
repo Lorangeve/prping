@@ -714,12 +714,11 @@ impl DefaultSerializer {
 /// 自动校验和与 DSL `cksum` 原语共用。
 pub(crate) fn word_sum(data: &[u8], prev: u64) -> u64 {
     let mut sum = prev;
-    let mut chunks = data.chunks_exact(2);
-    for c in &mut chunks {
-        sum += u16::from_be_bytes([c[0], c[1]]) as u64;
+    for c in data.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*c) as u64;
     }
-    if let &[b] = chunks.remainder() {
-        sum += (b as u64) << 8;
+    if data.len() & 1 == 1 {
+        sum += (data[data.len() - 1] as u64) << 8;
     }
     sum
 }

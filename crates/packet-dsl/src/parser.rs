@@ -1578,7 +1578,7 @@ fn render_parse_err<'a, T>(
             RichReason::ExpectedFound { expected, found } => {
                 let exp: Vec<String> = expected.iter().map(|p| pattern_text(p)).collect();
                 match found {
-                    Some(f) => format!("期望 {}，发现 {}", exp.join(" 或 "), &**f),
+                    Some(f) => format!("期望 {}，发现 {}", exp.join(" 或 "), **f),
                     None => format!("期望 {}，但输入已结束", exp.join(" 或 ")),
                 }
             }

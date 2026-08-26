@@ -47,7 +47,7 @@ fn run_session(frames: Vec<Value>) -> Vec<Value> {
         write_frame(&mut input, f);
     }
     let mut output = Cursor::new(Vec::new());
-    run_lsp_on(Cursor::new(input), &mut output, &[]).expect("LSP 会话不应崩溃");
+    run_lsp_on(&mut Cursor::new(input), &mut output, &[]).expect("LSP 会话不应崩溃");
     let mut r = Cursor::new(output.into_inner());
     let mut out = Vec::new();
     while let Some(m) = read_frame(&mut r) {
@@ -281,7 +281,7 @@ fn malformed_body_gets_parse_error() {
     // 直接喂非法 JSON
     let input = b"Content-Length: 5\r\n\r\n{}{}{";
     let mut output = Cursor::new(Vec::new());
-    run_lsp_on(Cursor::new(input.to_vec()), &mut output, &[]).expect("不应崩溃");
+    run_lsp_on(&mut Cursor::new(input.to_vec()), &mut output, &[]).expect("不应崩溃");
     let mut r = Cursor::new(output.into_inner());
     let m = read_frame(&mut r).expect("应有响应");
     assert_eq!(m["error"]["code"], -32700);

@@ -185,6 +185,7 @@ struct BandwidthArgs {
 
 /// server 子命令（同时服务 latency/bandwidth/接收模式）
 struct ServerArgs {
+    verbose: bool,
     lang: Option<String>,
     addr: String,
 }
@@ -234,6 +235,7 @@ struct PacketArgs {
     wait: Option<f64>,
     fuzz: bool,
     out: Option<String>,
+    summary: bool,
     lib: Vec<String>,
     params: Vec<String>,
     global: Vec<String>,
@@ -358,6 +360,10 @@ fn bandwidth_cmd() -> impl Parser<Command> {
 
 fn server_cmd() -> impl Parser<Command> {
     construct!(ServerArgs {
+        verbose(long("verbose")
+            .short('v')
+            .switch()
+            .help(t!("help.options.verbose").as_ref())),
         lang(opt_lang()),
         addr(positional::<String>("ADDR:PORT")),
     })
@@ -477,6 +483,7 @@ fn packet_cmd() -> impl Parser<Command> {
             .argument::<String>("FILE.pcap")
             .help(t!("help.options.out").as_ref())
             .optional()),
+        summary(long("summary").switch().help(t!("help.options.summary").as_ref())),
         lib(long("lib")
             .argument::<String>("PATH")
             .help(t!("help.options.lib").as_ref())
@@ -851,7 +858,10 @@ fn run_server(a: ServerArgs) -> anyhow::Result<()> {
         .parse()
         .map_err(|_| anyhow::anyhow!(t!("errors.invalid_bind", addr = a.addr.as_str())))?;
     println!("{}", t!("server.bandwidth_listening", addr = addr));
-    let report = smol::block_on(serve(addr))?;
+    if a.verbose {
+        println!("{}", t!("server.verbose_hint"));
+    }
+    let report = smol::block_on(serve(addr, a.verbose))?;
     println!(
         "{}",
         t!(
@@ -1019,6 +1029,7 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
         wait: a.wait,
         fuzz: a.fuzz,
         out: a.out.as_ref().map(std::path::PathBuf::from),
+        summary: a.summary,
         libs: resolve_libs(&a.lib),
     };
     let path = resolve_pktl_arg(std::path::Path::new(&a.file))?;

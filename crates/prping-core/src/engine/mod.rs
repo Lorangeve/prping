@@ -1,6 +1,5 @@
 pub(crate) mod convert;
 pub(crate) mod eng;
-pub(crate) mod lsp;
 pub(crate) mod pcap;
 pub(crate) mod pkg;
 pub(crate) mod rawwin;

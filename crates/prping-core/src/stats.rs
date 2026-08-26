@@ -462,11 +462,10 @@ fn print_bucket_histogram(w: &mut StandardStream, h: &Histogram) -> Result<()> {
     writeln!(w)?;
     writeln!(w, "{}", t!("stats.latency_dist"))?;
     for (low, high, count) in &h.buckets {
-        let bar_len = if h.max_count > 0 {
-            count * bar_width / h.max_count
-        } else {
-            0
-        };
+        let bar_len = count
+            .checked_mul(bar_width)
+            .and_then(|c| c.checked_div(h.max_count))
+            .unwrap_or(0);
         write!(w, "  {low:7.2} - {high:7.2} ms ")?;
         output::print_yellow(w, bar_char.repeat(bar_len))?;
         writeln!(w, " ({count})")?;
@@ -491,11 +490,10 @@ fn print_threshold_histogram(w: &mut StandardStream, h: &Histogram) -> Result<()
         } else {
             format!("{low:.2} - {high:.2}")
         };
-        let bar_len = if h.max_count > 0 {
-            count * bar_width / h.max_count
-        } else {
-            0
-        };
+        let bar_len = count
+            .checked_mul(bar_width)
+            .and_then(|c| c.checked_div(h.max_count))
+            .unwrap_or(0);
         write!(w, "  {range:<14} ")?;
         output::print_yellow(w, bar_char.repeat(bar_len))?;
         writeln!(w, " ({count})")?;

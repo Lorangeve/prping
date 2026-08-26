@@ -10,7 +10,7 @@ use packet_dsl::registry::builtin_doc;
 use packet_dsl::semantic::Module;
 use serde_json::{Value, json};
 
-use super::eng::{doc_markdown, value_display};
+use super::{doc_markdown, value_display};
 
 /// LSP 服务器入口（stdio）；`libs` 为 pkglang 库目录（import 解析用）。
 pub fn run_lsp(libs: &[std::path::PathBuf]) -> anyhow::Result<()> {
