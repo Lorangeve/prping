@@ -22,8 +22,14 @@ default: build
 build:
     cargo build
 
-# Release 构建（本机）
+# Release 构建（本机）；Windows 原生 MSVC：pcap crate 静态链接 wpcap.lib
+# （--pkg --raw 的 Npcap 绑定），自动经 windows-deps 就位 SDK 并设 LIBPCAP_LIBDIR。
+[script]
 build-release:
+    if [ "${OS:-}" = "Windows_NT" ]; then
+        just windows-deps
+        export LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64
+    fi
     cargo build --release
 
 # ── Linux 运行权限 ─────────────────────────────────────────
