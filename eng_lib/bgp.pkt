@@ -1,0 +1,189 @@
+# eng_lib/bgp.pkt —— BGP 协议定义（RFC 4271）
+#
+# BGP (Border Gateway Protocol) 是边界网关协议，
+# 用于在自治系统（AS）之间交换路由信息。
+#
+# BGP 特点：
+#   - 路径矢量协议：记录完整的 AS 路径
+#   - 策略驱动：基于策略的路由决策
+#   - 支持多协议：通过 MP-BGP 扩展支持多种网络层协议
+#   - 可靠传输：基于 TCP（端口 179）
+
+# BGP 头部（RFC 4271 §4.1）
+# ── BGP 头部结构 ────────────────────────────────────────────────────────────
+# 所有 BGP 消息都包含相同的头部：
+#   - 标记：16 字节全 1（用于同步和认证）
+#   - 长度：整个 BGP 消息的长度（字节）
+#   - 类型：消息类型（OPEN, UPDATE, NOTIFICATION, KEEPALIVE）
+# ───────────────────────────────────────────────────────────────────────────────
+# @param marker: 标记（16字节）
+#                通常为全 1（0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF）
+#                用于同步和认证
+# @param length: 消息长度（2字节，大端序）
+#                整个 BGP 消息的长度（字节）
+#                最小值：19 字节（仅头部）
+#                最大值：4096 字节
+# @param type: 消息类型（1字节）
+#              1 = OPEN（打开连接）
+#              2 = UPDATE（更新路由）
+#              3 = NOTIFICATION（通知错误）
+#              4 = KEEPALIVE（保持连接）
+# @auto: length 自动计算
+#[proto]
+func bgp_header(type=1, data="") -> bytes {
+    concat(
+        hex("ffffffffffffffffffffffffffffffff"),  # 标记：16字节（全1）
+        #[meta(len="data")] be16(length),         # 消息长度：2字节（自动计算）
+        u8(type),                                 # 消息类型：1字节
+        #[meta(rest="data")] data           # 消息数据：变长
+    )
+}
+
+# BGP OPEN 消息（RFC 4271 §4.2）
+# ── BGP OPEN 结构 ───────────────────────────────────────────────────────────
+# OPEN 消息用于建立 BGP 连接：
+#   - 版本：BGP 版本号（4 = BGP-4）
+#   - My AS：发送方的 AS 号
+#   - Hold Time：保持时间（秒）
+#   - BGP Identifier：BGP 标识符（通常是路由器 ID）
+#   - Opt Parm Len：可选参数长度
+#   - Optional Parameters：可选参数（如认证、能力）
+# ───────────────────────────────────────────────────────────────────────────────
+# @param version: BGP 版本（1字节）
+#                 4 = BGP-4（当前版本）
+# @param my_as: 我的 AS 号（2字节，大端序）
+#               发送方的自治系统号
+# @param hold_time: 保持时间（2字节，大端序）
+#                   连接保持时间（秒）
+#                   通常为 180 秒（3 分钟）
+# @param bgp_identifier: BGP 标识符（4字节）
+#                        BGP 路由器的标识符（通常是最大的环回接口 IP）
+# @param opt_parm_len: 可选参数长度（1字节）
+#                      可选参数的总长度（字节）
+# @param optional_parameters: 可选参数（变长）
+#                             常见参数：
+#                             - 认证（类型 1）
+#                             - 能力（类型 2，MP-BGP、路由刷新等）
+# @auto: 无自动字段
+#[proto]
+func bgp_open(version=4, my_as=0, hold_time=180, bgp_identifier="0.0.0.0", opt_parm_len=0, optional_parameters="") -> bytes {
+    concat(
+        u8(version),                        # BGP版本：1字节
+        be16(my_as),                        # 我的AS号：2字节
+        be16(hold_time),                    # 保持时间：2字节
+        ip4(bgp_identifier),                # BGP标识符：4字节
+        u8(opt_parm_len),                   # 可选参数长度：1字节
+        #[meta(rest="optional_parameters")] optional_parameters  # 可选参数：变长
+    )
+}
+
+# BGP UPDATE 消息（RFC 4271 §4.3）
+# ── BGP UPDATE 结构 ─────────────────────────────────────────────────────────
+# UPDATE 消息用于更新路由信息：
+#   - Withdrawn Routes Length：撤回路由的长度
+#   - Withdrawn Routes：撤回的路由列表
+#   - Path Attributes Length：路径属性的长度
+#   - Path Attributes：路径属性列表
+#   - NLRI：网络层可达性信息（新的路由）
+# ───────────────────────────────────────────────────────────────────────────────
+# @param withdrawn_routes_len: 撤回路由长度（2字节，大端序）
+#                              撤回路由的总长度（字节）
+# @param withdrawn_routes: 撤回路由列表（变长）
+#                          要撤回的路由前缀列表
+# @param path_attributes_len: 路径属性长度（2字节，大端序）
+#                             路径属性的总长度（字节）
+# @param path_attributes: 路径属性列表（变长）
+#                         常见属性：
+#                         - ORIGIN：路由来源
+#                         - AS_PATH：AS 路径
+#                         - NEXT_HOP：下一跳
+#                         - LOCAL_PREF：本地优先级
+#                         - MED：多出口鉴别器
+#                         - COMMUNITY：团体
+# @param nlri: NLRI（变长）
+#              网络层可达性信息（新的路由前缀）
+# @auto: 无自动字段
+#[proto]
+func bgp_update(withdrawn_routes_len=0, withdrawn_routes="", path_attributes_len=0, path_attributes="", nlri="") -> bytes {
+    concat(
+        be16(withdrawn_routes_len),         # 撤回路由长度：2字节
+        #[meta(rest="withdrawn_routes")] withdrawn_routes,  # 撤回路由列表：变长
+        be16(path_attributes_len),          # 路径属性长度：2字节
+        #[meta(rest="path_attributes")] path_attributes,  # 路径属性列表：变长
+        #[meta(rest="nlri")] nlri           # NLRI：变长
+    )
+}
+
+# BGP NOTIFICATION 消息（RFC 4271 §4.4）
+# ── BGP NOTIFICATION 结构 ───────────────────────────────────────────────────
+# NOTIFICATION 消息用于通知错误并关闭连接：
+#   - Error Code：错误代码
+#   - Error Subcode：错误子代码
+#   - Data：错误数据（可选）
+# ───────────────────────────────────────────────────────────────────────────────
+# @param error_code: 错误代码（1字节）
+#                    1 = 消息头错误
+#                    2 = OPEN 消息错误
+#                    3 = UPDATE 消息错误
+#                    4 = 保持计时器超时
+#                    5 = 有限状态机错误
+#                    6 = 停止
+# @param error_subcode: 错误子代码（1字节）
+#                       根据错误代码不同而不同：
+#                       对于消息头错误（1）：
+#                       1 = 连接不同步
+#                       2 = 错误消息长度
+#                       3 = 错误消息类型
+#                       对于 OPEN 消息错误（2）：
+#                       1 = 不支持的版本号
+#                       2 = 错误的对等 AS
+#                       3 = 错误的 BGP 标识符
+#                       4 = 不支持的可选参数
+#                       5 = 认证失败
+#                       6 = 不接受的保持时间
+#                       对于 UPDATE 消息错误（3）：
+#                       1 = 畸形属性列表
+#                       2 = 未识别的知名属性
+#                       3 = 缺少知名属性
+#                       4 = 属性标志错误
+#                       5 = 属性长度错误
+#                       6 = 无效的 ORIGIN 属性
+#                       7 = AS 路由环路
+#                       8 = 无效的 NEXT_HOP 属性
+#                       9 = 可选属性错误
+#                       10 = 无效的网络字段
+#                       11 = 畸形 AS_PATH
+# @param data: 错误数据（变长，可选）
+#              附加的错误信息
+# @auto: 无自动字段
+#[proto]
+func bgp_notification(error_code=1, error_subcode=0, data="") -> bytes {
+    concat(
+        u8(error_code),                    # 错误代码：1字节
+        u8(error_subcode),                 # 错误子代码：1字节
+        #[meta(rest="data")] data          # 错误数据：变长
+    )
+}
+
+# BGP KEEPALIVE 消息（RFC 4271 §4.4）
+# ── BGP KEEPALIVE 结构 ──────────────────────────────────────────────────────
+# KEEPALIVE 消息用于保持连接活跃：
+#   - 仅包含 BGP 头部（19字节）
+#   - 发送间隔：保持时间的 1/3
+# ───────────────────────────────────────────────────────────────────────────────
+# @auto: 无自动字段
+#[proto]
+func bgp_keepalive() -> bytes {
+    concat(
+        hex("ffffffffffffffffffffffffffffffff"),  # 标记：16字节（全1）
+        be16(19),                                 # 消息长度：19字节
+        u8(4)                                     # 消息类型：KEEPALIVE
+    )
+}
+
+export:
+- bgp_header
+- bgp_open
+- bgp_update
+- bgp_notification
+- bgp_keepalive

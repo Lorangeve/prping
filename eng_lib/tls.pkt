@@ -34,12 +34,13 @@
 # @param data: 记录数据（变长）
 #              根据 content_type 解析为握手消息、告警等
 # @auto: 无自动字段
-#[proto(kind="tls")]
+#[proto]
 func tls_record(content_type=22, version=0x0303, data="") -> bytes {
     concat(
         u8(content_type),           # 内容类型：1字节
         be16(version),              # TLS版本：2字节
         be16(count(data)),          # 数据长度：2字节（自动计算）
+        #[meta(rest)]
         data                        # 记录数据：变长
     )
 }
@@ -72,8 +73,8 @@ func tls_record(content_type=22, version=0x0303, data="") -> bytes {
 func tls_handshake(msg_type=1, data="") -> bytes {
     concat(
         u8(msg_type),               # 消息类型：1字节
-        #[meta(len="data", expr="band(len, 0xffffff)")] be24(length),  # 消息长度：3字节
-        data                        # 握手数据：变长
+        #[meta(len="data", expr="band(len, 0xffffff)")] be32(length),  # 消息长度：3字节（低24位有效）
+        #[meta(rest="data")] data           # 握手数据：变长
     )
 }
 
@@ -114,15 +115,15 @@ func tls_handshake(msg_type=1, data="") -> bytes {
 func tls_client_hello(version=0x0303, random="", session_id="", cipher_suites="", compression_methods="", extensions="") -> bytes {
     concat(
         be16(version),              # 版本：2字节
-        random,                     # 随机数：32字节
+        #[meta(bytes="32")] random, # 随机数：32字节
         #[meta(len="session_id")] u8(session_id_len),  # 会话ID长度：1字节
-        session_id,                 # 会话ID：变长
+        #[meta(rest="session_id")] session_id,  # 会话ID：变长
         #[meta(len="cipher_suites")] be16(cipher_suites_len),  # 密码套件长度：2字节
-        cipher_suites,              # 密码套件列表：变长
+        #[meta(rest="cipher_suites")] cipher_suites,  # 密码套件列表：变长
         #[meta(len="compression_methods")] u8(compression_methods_len),  # 压缩方法长度：1字节
-        compression_methods,        # 压缩方法列表：变长
+        #[meta(rest="compression_methods")] compression_methods,  # 压缩方法列表：变长
         #[meta(len="extensions")] be16(extensions_len),  # 扩展长度：2字节
-        extensions                  # 扩展列表：变长
+        #[meta(rest="extensions")] extensions  # 扩展列表：变长
     )
 }
 
@@ -153,13 +154,13 @@ func tls_client_hello(version=0x0303, random="", session_id="", cipher_suites=""
 func tls_server_hello(version=0x0303, random="", session_id="", cipher_suite=0x1301, compression_method=0, extensions="") -> bytes {
     concat(
         be16(version),              # 版本：2字节
-        random,                     # 随机数：32字节
+        #[meta(bytes="32")] random, # 随机数：32字节
         #[meta(len="session_id")] u8(session_id_len),  # 会话ID长度：1字节
-        session_id,                 # 会话ID：变长
+        #[meta(bytes="session_id_len")] session_id, # 会话ID：变长
         be16(cipher_suite),         # 密码套件：2字节
         u8(compression_method),     # 压缩方法：1字节
         #[meta(len="extensions")] be16(extensions_len),  # 扩展长度：2字节
-        extensions                  # 扩展列表：变长
+        #[meta(rest="extensions")] extensions  # 扩展列表：变长
     )
 }
 

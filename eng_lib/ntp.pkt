@@ -1,0 +1,126 @@
+# eng_lib/ntp.pkt —— NTP 协议定义（RFC 5905）
+#
+# NTP (Network Time Protocol) 是网络时间协议，用于同步计算机时钟。
+# 本文件定义 NTP 协议的消息结构，用于学习和调试时间同步。
+#
+# NTP 工作原理：
+#   - 客户端向 NTP 服务器发送请求
+#   - 服务器返回响应，包含服务器时间
+#   - 客户端根据往返时间计算时钟偏差
+#   - 调整本地时钟以同步时间
+#
+# NTP 层次结构（Stratum）：
+#   - Stratum 0：高精度时钟（原子钟、GPS 等）
+#   - Stratum 1：直接连接到 Stratum 0 的服务器
+#   - Stratum 2：从 Stratum 1 同步的服务器
+#   - ...以此类推，最多到 Stratum 15
+
+# NTP 报文（RFC 5905 §7.3）
+# NTP 报文是固定长度的 48 字节，包含：
+#   - 首字节：Leap, Version, Mode
+#   - Stratum：时钟层次
+#   - Poll：轮询间隔
+#   - Precision：时钟精度
+#   - Root Delay：到主时钟的往返延迟
+#   - Root Dispersion：主时钟的最大误差
+#   - Reference ID：参考时钟标识
+#   - Reference Timestamp：参考时间戳
+#   - Origin Timestamp：原始时间戳（客户端发送时间）
+#   - Receive Timestamp：接收时间戳（服务器接收时间）
+#   - Transmit Timestamp：发送时间戳（服务器发送时间）
+# @param leap: 闰秒指示（2位）
+#              0 = 无警告
+#              1 = 最后一分钟有 61 秒
+#              2 = 最后一分钟有 59 秒
+#              3 = 时钟未同步
+# @param version: NTP 版本（3位）
+#                 3 = NTPv3
+#                 4 = NTPv4（当前版本）
+# @param mode: 工作模式（3位）
+#              0 = 保留
+#              1 = 对称主动
+#              2 = 对称被动
+#              3 = 客户端
+#              4 = 服务器
+#              5 = 广播
+#              6 = NTP 控制消息
+#              7 = 保留（私有使用）
+# @param stratum: 时钟层次（1字节）
+#                 0 = 未指定或无效
+#                 1 = 主参考时钟（原子钟、GPS 等）
+#                 2-15 = 次级参考时钟
+#                 16-255 = 保留
+# @param poll: 轮询间隔（1字节）
+#              以 2 的幂表示，单位秒
+#              例如：4 = 16 秒，6 = 64 秒
+#              有符号值：负数表示小于 1 秒的间隔
+# @param precision: 时钟精度（1字节）
+#                   以 2 的幂表示，单位秒
+#                   例如：-20 = 约 1 微秒
+#                   有符号值：负数表示亚秒精度
+# @param root_delay: 到主时钟的往返延迟（4字节，定点数）
+#                    单位：秒/65536
+#                    格式：高 16 位整数部分，低 16 位小数部分
+# @param root_dispersion: 主时钟的最大误差（4字节，定点数）
+#                         单位：秒/65536
+#                         格式：高 16 位整数部分，低 16 位小数部分
+# @param reference_id: 参考时钟标识（4字节）
+#                      对于 Stratum 1：参考时钟类型（如 "GPS", "ATOM"）
+#                      对于 Stratum 2+：服务器的 IP 地址
+# @param reference_ts: 参考时间戳（8字节，NTP 时间格式）
+#                      最后一次校准或更新的时间
+#                      格式：高 32 位秒数（1900 年起），低 32 位小数部分
+# @param origin_ts: 原始时间戳（8字节，NTP 时间格式）
+#                   客户端发送请求的时间
+#                   格式：高 32 位秒数（1900 年起），低 32 位小数部分
+# @param receive_ts: 接收时间戳（8字节，NTP 时间格式）
+#                    服务器接收到请求的时间
+#                    格式：高 32 位秒数（1900 年起），低 32 位小数部分
+# @param transmit_ts: 发送时间戳（8字节，NTP 时间格式）
+#                     服务器发送响应的时间
+#                     格式：高 32 位秒数（1900 年起），低 32 位小数部分
+# @auto: 无自动字段（NTP 报文固定 48 字节）
+#[proto]
+func ntp(leap=0, version=4, mode=3, stratum=0, poll=6, precision=0, root_delay=0, root_dispersion=0, reference_id=0, reference_ts=0, origin_ts=0, receive_ts=0, transmit_ts=0) -> bytes {
+    concat(
+        u8(bor(shl(leap, 6), shl(version, 3), mode)),  # 首字节：闰秒(2位)+版本(3位)+模式(3位)
+        u8(stratum),                                    # 时钟层次：1字节
+        u8(poll),                                       # 轮询间隔：1字节
+        u8(precision),                                  # 时钟精度：1字节
+        be32(root_delay),                               # 到主时钟的往返延迟：4字节
+        be32(root_dispersion),                          # 主时钟的最大误差：4字节
+        be32(reference_id),                             # 参考时钟标识：4字节
+        be64(reference_ts),                             # 参考时间戳：8字节
+        be64(origin_ts),                                # 原始时间戳：8字节
+        be64(receive_ts),                               # 接收时间戳：8字节
+        be64(transmit_ts)                               # 发送时间戳：8字节
+    )
+}
+
+# NTP 时间戳转换（NTP 时间格式到 Unix 时间格式）
+#
+# [NTP 时间戳格式]
+#   - 高 32 位：秒数（从 1900 年 1 月 1 日起）
+#   - 低 32 位：小数部分（2^-32 秒）
+#
+# [Unix 时间戳格式]
+#   - 从 1970 年 1 月 1 日起的秒数
+#
+# [转换公式]
+#   Unix 秒 = NTP 秒 - 2208988800（1900 年到 1970 年的秒数）
+#   毫秒 = (小数部分 * 1000) / 2^32
+#
+# @param ntp_seconds: NTP 秒数（4字节，大端序）
+# @param ntp_fraction: NTP 小数部分（4字节，大端序）
+# @auto: 无自动字段（转换是计算过程，不是协议字段）
+#[proto]
+func ntp_timestamp(ntp_seconds=0, ntp_fraction=0) -> bytes {
+    concat(
+        be32(ntp_seconds),                  # NTP 秒数：4字节
+        be32(ntp_fraction)                  # NTP 小数部分：4字节
+    )
+}
+
+export:
+- ntp
+- ntp_timestamp

@@ -1,0 +1,67 @@
+# eng_lib/gre.pkt —— GRE 协议定义（RFC 2784, RFC 2890）
+#
+# GRE (Generic Routing Encapsulation) 是通用路由封装协议，
+# 用于在 IP 网络上封装各种协议的数据包。
+#
+# GRE 特点：
+#   - 简单封装：在原始数据包外层添加 GRE 头部
+#   - 协议无关：可以封装任何协议（IP、IPv6、IPX 等）
+#   - 支持校验和：可选的校验和和密钥
+#   - 支持序列号：可选的序列号，用于排序
+
+# GRE 头部（RFC 2784 §2, RFC 2890 §2）
+# ── GRE 头部结构 ────────────────────────────────────────────────────────────
+# GRE 头部包含：
+#   - 标志位：C（校验和）、K（密钥）、S（序列号）、严格源路由
+#   - 版本：GRE 版本号（0 = GRE, 1 = GRE-in-PPP）
+#   - 协议类型：封装的协议类型（如 0x0800 = IPv4）
+#   - 校验和：可选，整个 GRE 数据包的校验和
+#   - 密钥：可选，用于标识隧道
+#   - 序列号：可选，用于排序
+# ───────────────────────────────────────────────────────────────────────────────
+# @param c_flag: 校验和标志（1位）
+#                0 = 无校验和
+#                1 = 有校验和
+# @param k_flag: 密钥标志（1位）
+#                0 = 无密钥
+#                1 = 有密钥
+# @param s_flag: 序列号标志（1位）
+#                0 = 无序列号
+#                1 = 有序列号
+# @param strict_source_route: 严格源路由标志（1位）
+#                             0 = 不严格
+#                             1 = 严格
+# @param recursion_control: 递归控制（3位）
+#                           允许的封装层数（通常为 0）
+# @param version: GRE 版本（5位）
+#                 0 = GRE
+#                 1 = GRE-in-PPP
+# @param protocol_type: 协议类型（2字节，大端序）
+#                       封装的协议类型：
+#                       0x0800 = IPv4
+#                       0x86DD = IPv6
+#                       0x0806 = ARP
+#                       0x8100 = VLAN
+# @param checksum: 校验和（2字节，大端序，可选）
+#                  整个 GRE 数据包的校验和
+# @param reserved: 保留字段（2字节，可选）
+#                  必须为 0
+# @param key: 密钥（4字节，大端序，可选）
+#             用于标识 GRE 隧道
+# @param sequence_number: 序列号（4字节，大端序，可选）
+#                         用于排序数据包
+# @auto: checksum 自动计算（如果 c_flag=1）
+#[proto]
+func gre(c_flag=0, k_flag=0, s_flag=0, strict_source_route=0, recursion_control=0, version=0, protocol_type=0x0800, key=0, sequence_number=0) -> bytes {
+    concat(
+        u8(bor(shl(c_flag, 7), shl(k_flag, 6), shl(s_flag, 5), shl(strict_source_route, 4), shl(recursion_control, 1), band(version, 0x01))),  # 标志位+版本：1字节
+        be16(protocol_type),                # 协议类型：2字节
+        #[meta(len="auto")] be16(checksum), # 校验和：2字节（可选）
+        be16(0),                            # 保留：2字节（可选）
+        be32(key),                          # 密钥：4字节（可选）
+        be32(sequence_number)               # 序列号：4字节（可选）
+    )
+}
+
+export:
+- gre

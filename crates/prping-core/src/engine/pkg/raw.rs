@@ -3,15 +3,24 @@
 //! 忠实拆分自原 `engine/pkg.rs` 的 raw 段：`send_raw_bytes` 分发、
 //! `wait_icmp_reply` 应答等待、AF_PACKET / IPPROTO_RAW 平台实现。
 
-use std::io;
 use std::net::SocketAddr;
-use std::time::Duration;
 
-use packet_dsl::ir::{Layer, PacketSpec};
+use packet_dsl::ir::PacketSpec;
 
 use super::SendOutcome;
 use super::sniffer::SnifferMatcher;
-use super::{Reply, icmp_echo_ids, match_reply};
+
+// 以下仅 Linux/IPPROTO_RAW 路径使用（Windows/macOS/Linux+feature=pcap 走 rawpcap）
+#[cfg(not(windows))]
+use std::io;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+#[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
+use packet_dsl::ir::Layer;
+#[cfg(target_os = "linux")]
+use super::{Reply, match_reply};
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+use super::icmp_echo_ids;
 
 pub(crate) fn send_raw_bytes(
     bytes: &[u8],

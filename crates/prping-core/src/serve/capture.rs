@@ -3,15 +3,19 @@
 //! raw 抓包。
 //!
 //! - **Linux**：AF_PACKET raw socket（`ETH_P_ALL`，全接口，需 root/cap_net_raw），
-//!   按 `sll_pkttype == PACKET_HOST` 只收本机入向——回环上服务端回包也会以 HOST
-//!   回环，完整会话可见且无重复；真实网卡上服务端出向（PACKET_OUTGOING）不显示
-//!   （v1 入向聚焦）。
-//! - **Windows**：Npcap（复用 `rawpcap.rs` 的设备选择与抓包句柄，`direction(In)`
-//!   只收入向）。
-//! - **其他平台**（macOS 等）：暂无 raw 抓包实现 → 不可用，`serve` 回退载荷级解析。
+//!   按 `sll_pkttype == PACKET_HOST` 只收本机入向帧（服务端自己的出向回包
+//!   PACKET_OUTGOING 天然不显示）。
+//! - **Windows**：Npcap（复用 `rawpcap.rs` 的设备枚举与抓包句柄）；通配绑定开
+//!   全部设备（多网卡机器不漏抓），指定绑定开拥有该 IP 的设备。
+//! - **macOS**：libpcap（系统自带，底层 BPF /dev/bpf*）；lo0 为 DLT_NULL 裸 IP，
+//!   网卡为完整 eth 帧，两条路径都反解。
 //!
-//! 抓包线程按监听端口过滤帧（sport/dport 任一命中），命中帧 `packet_dsl::dissect`
-//! 全栈反解（eth → ipv4/ipv6 → tcp/udp → 应用层规则分派）后打印。
+//! 抓包线程只打印**本服务收到的包**：目的端口 == 监听端口，且目的 IP 为本机地址
+//! （通配绑定 0.0.0.0/:: 时用 getifaddrs / GetAdaptersAddresses 枚举本机全部 IP）。
+//! v1 的 sport/dport 任一命中会把别的主机发往本机临时端口的包（如
+//! `ping 别机:1234` 的 SYN-ACK）也当成本服务流量打印，v2 起不再打印。
+//! 命中帧 `packet_dsl::dissect` 全栈反解（eth → ipv4/ipv6 → tcp/udp → 应用层规则
+//! 分派）后打印。
 
 use std::net::SocketAddr;
 
@@ -141,10 +145,150 @@ fn ports(p: &[u8]) -> Option<(u16, u16)> {
     ))
 }
 
-/// 帧是否命中监听端口（src 或 dst 端口任一命中）。
+/// 「只打印本服务收到的包」过滤器：目的端口 == 监听端口，且目的 IP 为本机地址。
+///
+/// 普通 socket 只会收到发给本服务监听地址的包，而 raw 抓包能看到网卡上的一切；
+/// 若只按端口过滤（v1 的 sport/dport 任一命中），会把别的主机发往本机临时端口的
+/// 包（比如 `ping 别机:1234` 时回给本机的 SYN-ACK）也打印出来——那不是本服务收
+/// 到的包。v2 改为按「目的端口 + 目的 IP 本机」精确匹配。
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
-fn frame_matches_port(frame: &[u8], port: u16) -> bool {
-    frame_meta(frame).is_some_and(|m| m.sport == port || m.dport == port)
+#[derive(Debug, Clone, PartialEq)]
+struct ServiceFilter {
+    port: u16,
+    /// 允许的目的 IP；`None` = 任意（本机地址枚举失败时的兜底，仅剩端口条件）。
+    dsts: Option<Vec<IpAddr>>,
+}
+
+impl ServiceFilter {
+    /// 按监听地址构造：通配绑定（0.0.0.0/::）→ 枚举本机全部 IP；指定绑定 → 仅该 IP。
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    fn new(addr: SocketAddr) -> Self {
+        let dsts = if addr.ip().is_unspecified() {
+            local_addresses()
+        } else {
+            Some(vec![addr.ip()])
+        };
+        ServiceFilter {
+            port: addr.port(),
+            dsts,
+        }
+    }
+
+    /// 完整以太网帧是否为「本服务收到的包」。
+    fn matches_frame(&self, frame: &[u8]) -> bool {
+        frame_meta(frame).is_some_and(|m| self.matches_meta(&m))
+    }
+
+    /// 裸 IP 包（macOS lo0 DLT_NULL 剥掉族头后）是否为「本服务收到的包」。
+    #[cfg(any(target_os = "macos", test))]
+    fn matches_bare(&self, ip: &[u8]) -> bool {
+        bare_ip_meta(ip).is_some_and(|m| self.matches_meta(&m))
+    }
+
+    fn matches_meta(&self, m: &FrameMeta) -> bool {
+        m.dport == self.port && self.dsts.as_ref().is_none_or(|dsts| dsts.contains(&m.dst))
+    }
+}
+
+/// 本机全部 IP（IPv4 + IPv6，含回环）：`getifaddrs`。失败 → None（兜底不过滤 IP）。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_addresses() -> Option<Vec<IpAddr>> {
+    let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut cur = ifap;
+    unsafe {
+        while !cur.is_null() {
+            let ifa = &*cur;
+            if !ifa.ifa_addr.is_null() {
+                let sa = &*ifa.ifa_addr;
+                if sa.sa_family == libc::AF_INET as libc::sa_family_t {
+                    let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                    out.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                        sin.sin_addr.s_addr,
+                    ))));
+                } else if sa.sa_family == libc::AF_INET6 as libc::sa_family_t {
+                    let sin6 = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+                    out.push(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)));
+                }
+            }
+            cur = ifa.ifa_next;
+        }
+        libc::freeifaddrs(ifap);
+    }
+    Some(out)
+}
+
+/// 本机全部 IP（IPv4 + IPv6，含回环）：`GetAdaptersAddresses`（XP+，Win7 兼容）。
+#[cfg(target_os = "windows")]
+fn local_addresses() -> Option<Vec<IpAddr>> {
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6,
+    };
+
+    // 第一遍：只取所需缓冲区大小（返回 ERROR_BUFFER_OVERFLOW）
+    let mut size: u32 = 0;
+    let rc = unsafe {
+        GetAdaptersAddresses(
+            u32::from(AF_UNSPEC),
+            0,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if rc != ERROR_BUFFER_OVERFLOW {
+        return None;
+    }
+    // u64 缓冲保证 8 字节对齐（结构含 u64 字段；Vec<u8> 只对齐 1，直接 cast 会 UB）
+    let mut buf = vec![0u64; size.div_ceil(8) as usize];
+    let rc = unsafe {
+        GetAdaptersAddresses(
+            u32::from(AF_UNSPEC),
+            0,
+            std::ptr::null(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if rc != NO_ERROR {
+        return None;
+    }
+    let mut out = Vec::new();
+    unsafe {
+        let mut cur = buf.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        while !cur.is_null() {
+            let adapter = &*cur;
+            let mut ua = adapter.FirstUnicastAddress;
+            while !ua.is_null() {
+                let entry = &*ua;
+                let sa = entry.Address.lpSockaddr;
+                if !sa.is_null() {
+                    match (*sa).sa_family {
+                        AF_INET => {
+                            let sin = sa.cast::<SOCKADDR_IN>();
+                            let b = (*sin).sin_addr.S_un.S_un_b;
+                            out.push(IpAddr::V4(Ipv4Addr::new(b.s_b1, b.s_b2, b.s_b3, b.s_b4)));
+                        }
+                        AF_INET6 => {
+                            let sin6 = sa.cast::<SOCKADDR_IN6>();
+                            out.push(IpAddr::V6(Ipv6Addr::from((*sin6).sin6_addr.u.Byte)));
+                        }
+                        _ => {}
+                    }
+                }
+                ua = entry.Next;
+            }
+            cur = adapter.Next;
+        }
+    }
+    Some(out)
 }
 
 /// 打印一帧：`[frame] src:port → dst:port PROTO N B` + 全栈 dissect。
@@ -166,7 +310,8 @@ fn show_frame(frame: &[u8]) {
 }
 
 /// 裸 IP 包（无链路层头，如 macOS lo0 的 DLT_NULL 剥掉 4 字节族头后）→ 帧元数据。
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+/// 仅 macOS 回环抓包路径使用（Windows Npcap / Linux AF_PACKET 都是完整链路层帧）。
+#[cfg(any(target_os = "macos", test))]
 fn bare_ip_meta(ip: &[u8]) -> Option<FrameMeta> {
     match ip.first()? >> 4 {
         4 => ip_meta(ip, false),
@@ -175,14 +320,9 @@ fn bare_ip_meta(ip: &[u8]) -> Option<FrameMeta> {
     }
 }
 
-/// 裸 IP 是否命中监听端口。
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
-fn bare_ip_matches_port(ip: &[u8], port: u16) -> bool {
-    bare_ip_meta(ip).is_some_and(|m| m.sport == port || m.dport == port)
-}
-
 /// 打印裸 IP 包（macOS lo0 回环帧；无 eth 层，dissect 走裸 IP 路径）。
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+/// 仅 macOS 抓包循环调用（无测试引用）。
+#[cfg(target_os = "macos")]
 fn show_bare_ip(ip: &[u8]) {
     use std::io::Write;
     let report = packet_dsl::dissect(ip);
@@ -234,10 +374,10 @@ fn spawn_linux(addr: SocketAddr) -> CaptureStatus {
         unsafe { libc::close(fd) };
         return CaptureStatus::Unavailable(format!("AF_PACKET bind failed: {msg}"));
     }
-    let port = addr.port();
+    let filter = ServiceFilter::new(addr);
     match std::thread::Builder::new()
         .name("server-capture".into())
-        .spawn(move || linux_loop(fd, port))
+        .spawn(move || linux_loop(fd, filter))
     {
         Ok(_) => CaptureStatus::Active(vec![rust_i18n::t!("server.capture_iface_all").to_string()]),
         Err(e) => {
@@ -248,7 +388,7 @@ fn spawn_linux(addr: SocketAddr) -> CaptureStatus {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_loop(fd: libc::c_int, port: u16) {
+fn linux_loop(fd: libc::c_int, filter: ServiceFilter) {
     let mut buf = vec![0u8; 65536];
     loop {
         if crate::interrupted() {
@@ -279,12 +419,12 @@ fn linux_loop(fd: libc::c_int, port: u16) {
         if n <= 0 {
             continue;
         }
-        // 只收本机入向（PACKET_HOST）：回环上服务端回包也以 HOST 回环，完整会话可见
+        // 只收本机入向（PACKET_HOST）：服务端自己的出向回包（PACKET_OUTGOING）不显示
         if sll.sll_pkttype != libc::PACKET_HOST {
             continue;
         }
         let frame = &buf[..n as usize];
-        if !frame_matches_port(frame, port) {
+        if !filter.matches_frame(frame) {
             continue;
         }
         show_frame(frame);
@@ -297,33 +437,62 @@ fn linux_loop(fd: libc::c_int, port: u16) {
 #[cfg(target_os = "windows")]
 fn spawn_windows(addr: SocketAddr) -> CaptureStatus {
     use crate::engine::rawpcap;
-    let dev = match rawpcap::select_device_name(Some(&addr), None) {
+    let devs = match rawpcap::list_devices() {
         Ok(d) => d,
         Err(e) => return CaptureStatus::Unavailable(e.to_string()),
     };
-    let mut cap = match rawpcap::open_capture(&dev) {
-        Ok(c) => c,
-        Err(e) => return CaptureStatus::Unavailable(e.to_string()),
-    };
-    let port = addr.port();
-    match std::thread::Builder::new()
-        .name("server-capture".into())
-        .spawn(move || windows_loop(&mut cap, port))
-    {
-        Ok(_) => CaptureStatus::Active(vec![dev]),
-        Err(e) => CaptureStatus::Unavailable(e.to_string()),
+    // 通配绑定（0.0.0.0/::）→ 开全部设备；指定绑定 → 开拥有该 IP 的设备。
+    // 不能只开 `pick_device` 的首个非回环：多网卡 Windows（Hyper-V vEthernet /
+    // VPN / WiFi Direct 等虚拟适配器排在真网卡前面）上流量网卡不排第一时会把
+    // 本服务收到的帧全部漏掉——Linux AF_PACKET 是全接口、macOS 也是多设备，
+    // Windows 必须一致（每个设备一个抓包线程）。
+    let wanted = rawpcap::capture_devices(&devs, addr);
+    if wanted.is_empty() {
+        let list = rawpcap::format_device_list(&devs);
+        return CaptureStatus::Unavailable(format!("找不到可用的抓包设备；可用：\n{list}"));
+    }
+    // 每个设备一个抓包线程；至少一个成功才算 Active（失败原因留到全失败时返回）
+    let filter = ServiceFilter::new(addr);
+    let mut started: Vec<String> = Vec::new();
+    let mut first_err: Option<String> = None;
+    for idx in wanted {
+        let dev = devs[idx].name.clone();
+        match rawpcap::open_capture(&dev) {
+            Ok(mut cap) => {
+                let filter = filter.clone();
+                match std::thread::Builder::new()
+                    .name("server-capture".into())
+                    .spawn(move || windows_loop(&mut cap, filter))
+                {
+                    Ok(_) => started.push(dev),
+                    Err(e) => {
+                        first_err.get_or_insert_with(|| e.to_string());
+                    }
+                }
+            }
+            Err(e) => {
+                first_err.get_or_insert_with(|| e.to_string());
+            }
+        }
+    }
+    if started.is_empty() {
+        CaptureStatus::Unavailable(
+            first_err.unwrap_or_else(|| rust_i18n::t!("server.capture_iface_all").to_string()),
+        )
+    } else {
+        CaptureStatus::Active(started)
     }
 }
 
 #[cfg(target_os = "windows")]
-fn windows_loop(cap: &mut pcap::Capture<pcap::Active>, port: u16) {
+fn windows_loop(cap: &mut pcap::Capture<pcap::Active>, filter: ServiceFilter) {
     loop {
         if crate::interrupted() {
             break;
         }
         match cap.next_packet() {
             Ok(p) => {
-                if frame_matches_port(p.data, port) {
+                if filter.matches_frame(p.data) {
                     show_frame(p.data);
                 }
             }
@@ -359,36 +528,16 @@ fn spawn_macos(addr: SocketAddr) -> CaptureStatus {
     };
     let iface_all = rust_i18n::t!("server.capture_iface_all").to_string();
     // 目标设备集合（libpcap 一次只能抓一个设备，按需开多个线程）：
-    // - 回环目标 → 仅回环设备（lo0）
-    // - 指定非回环 → 首个非回环
-    // - 未指定（0.0.0.0/::，如 `server 0.0.0.0:PORT`）→ lo0 + 首个非回环，
-    //   本地客户端走回环、远程客户端走网卡，两者都能看到
-    let mut wanted: Vec<usize> = Vec::new();
-    let loop_idx = devs.iter().position(|d| d.loopback);
-    let lan_idx = devs.iter().position(|d| !d.loopback);
-    if addr.ip().is_unspecified() {
-        if let Some(i) = loop_idx {
-            wanted.push(i);
-        }
-        if let Some(i) = lan_idx {
-            wanted.push(i);
-        }
-    } else if addr.ip().is_loopback() {
-        if let Some(i) = loop_idx {
-            wanted.push(i);
-        }
-    } else if let Some(i) = lan_idx {
-        wanted.push(i);
-    }
+    // 通配绑定（0.0.0.0/::）→ 全部设备（回环 + 所有非回环），本地客户端走回环、
+    // 远程客户端走网卡，两者都能看到；指定绑定 → 拥有该 IP 的设备
+    // （与 Windows 共用 capture_devices，Linux 的 AF_PACKET 是全接口）
+    let wanted = crate::engine::rawpcap::capture_devices(&devs, addr);
     if wanted.is_empty() {
-        let list: Vec<String> = devs.iter().map(|d| d.name.clone()).collect();
-        return CaptureStatus::Unavailable(format!(
-            "找不到可用的抓包设备；可用：{}",
-            list.join(", ")
-        ));
+        let list = crate::engine::rawpcap::format_device_list(&devs);
+        return CaptureStatus::Unavailable(format!("找不到可用的抓包设备；可用：\n{list}"));
     }
     // 每个设备一个抓包线程；至少一个成功才算 Active（失败原因留到全失败时返回）
-    let port = addr.port();
+    let filter = ServiceFilter::new(addr);
     let mut started: Vec<String> = Vec::new();
     let mut first_err: Option<String> = None;
     for idx in wanted {
@@ -396,9 +545,10 @@ fn spawn_macos(addr: SocketAddr) -> CaptureStatus {
         match open_macos_capture(&dev) {
             Ok(mut cap) => {
                 let dlt = cap.get_datalink();
+                let filter = filter.clone();
                 match std::thread::Builder::new()
                     .name("server-capture".into())
-                    .spawn(move || macos_loop(&mut cap, port, dlt))
+                    .spawn(move || macos_loop(&mut cap, filter, dlt))
                 {
                     Ok(_) => started.push(dev),
                     Err(e) => {
@@ -431,7 +581,7 @@ fn open_macos_capture(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Active>> 
 }
 
 #[cfg(target_os = "macos")]
-fn macos_loop(cap: &mut pcap::Capture<pcap::Active>, port: u16, dlt: pcap::Linktype) {
+fn macos_loop(cap: &mut pcap::Capture<pcap::Active>, filter: ServiceFilter, dlt: pcap::Linktype) {
     loop {
         if crate::interrupted() {
             break;
@@ -443,11 +593,11 @@ fn macos_loop(cap: &mut pcap::Capture<pcap::Active>, port: u16, dlt: pcap::Linkt
                     let Some(ip) = strip_null(p.data) else {
                         continue;
                     };
-                    if !bare_ip_matches_port(ip, port) {
+                    if !filter.matches_bare(ip) {
                         continue;
                     }
                     show_bare_ip(ip);
-                } else if frame_matches_port(p.data, port) {
+                } else if filter.matches_frame(p.data) {
                     show_frame(p.data);
                 }
             }
@@ -483,21 +633,27 @@ fn strip_null(data: &[u8]) -> Option<&[u8]> {
 mod tests {
     use super::*;
 
-    /// 构造 eth + ipv4 + tcp 帧（端口 sport/dport，flags 任意）。
-    fn eth_ip4_tcp(sport: u16, dport: u16) -> Vec<u8> {
+    /// 构造 eth + ipv4 + tcp 帧（端口 sport/dport，dst 由参数指定）。
+    fn eth_ip4_tcp_to(sport: u16, dport: u16, dst: Ipv4Addr) -> Vec<u8> {
         let mut f = Vec::new();
         f.extend_from_slice(&[0xaa; 6]); // dst MAC
         f.extend_from_slice(&[0xbb; 6]); // src MAC
         f.extend_from_slice(&[0x08, 0x00]); // IPv4
-        // IPv4 头：ihl=5, total=40, proto=6, src/dst 127.0.0.1
+        // IPv4 头：ihl=5, total=40, proto=6, src=127.0.0.1, dst 由参数指定
+        let d = dst.octets();
         f.extend_from_slice(&[
             0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 127, 0, 0, 1,
-            127, 0, 0, 1,
+            d[0], d[1], d[2], d[3],
         ]);
         f.extend_from_slice(&sport.to_be_bytes());
         f.extend_from_slice(&dport.to_be_bytes());
         f.extend_from_slice(&[0; 12]); // seq/ack/off+flags/win/checksum/urg
         f
+    }
+
+    /// 构造 eth + ipv4 + tcp 帧（端口 sport/dport，dst=127.0.0.1）。
+    fn eth_ip4_tcp(sport: u16, dport: u16) -> Vec<u8> {
+        eth_ip4_tcp_to(sport, dport, Ipv4Addr::LOCALHOST)
     }
 
     #[test]
@@ -512,11 +668,105 @@ mod tests {
     }
 
     #[test]
-    fn frame_meta_port_match() {
+    fn service_filter_only_received() {
+        // 帧：sport=49320 dport=80，dst=127.0.0.1（本机）
         let f = eth_ip4_tcp(49320, 80);
-        assert!(frame_matches_port(&f, 80)); // dport 命中
-        assert!(frame_matches_port(&f, 49320)); // sport 命中
-        assert!(!frame_matches_port(&f, 443));
+        // 服务监听 80：发往本服务监听端口的包 → 命中
+        let sf80 = ServiceFilter {
+            port: 80,
+            dsts: Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+        };
+        assert!(sf80.matches_frame(&f));
+        // 服务监听 49320：帧只是「从 49320 发出」（对端回包方向），不是本服务收到的 → 不命中
+        let sf_ephemeral = ServiceFilter {
+            port: 49320,
+            dsts: Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+        };
+        assert!(!sf_ephemeral.matches_frame(&f));
+        // 端口不对 → 不命中
+        assert!(
+            !ServiceFilter {
+                port: 443,
+                dsts: None
+            }
+            .matches_frame(&f)
+        );
+        // dst 不是本机地址（如 `ping 别机:1234` 回给本机临时端口的 SYN-ACK）→ 不命中
+        let foreign = eth_ip4_tcp_to(49320, 80, Ipv4Addr::new(192, 168, 1, 99));
+        assert!(!sf80.matches_frame(&foreign));
+        // dsts=None（本机地址枚举失败兜底）：仅剩端口条件
+        assert!(
+            ServiceFilter {
+                port: 80,
+                dsts: None
+            }
+            .matches_frame(&f)
+        );
+    }
+
+    #[test]
+    fn captured_syn_frame_dissects_full_stack() {
+        // 服务端 -v 抓包路径的回归：ensure_proto_registry 加载 eng_lib 后，
+        // 完整帧应逐层识别 eth → ipv4 → tcp。此前 Windows 上出现「未能识别
+        // 任何层、remaining 74 B」= 注册表为空（eng_lib 路径在构建机缺失），
+        // 此测试守住这条链路至少能认出三层。
+        crate::engine::eng::ensure_proto_registry();
+        // 真实抓包帧：Windows Npcap 捕获的 TCP SYN（.114:45388 → .162:1234，74 B）
+        let frame: Vec<u8> = vec![
+            0x08, 0x00, 0x27, 0x5e, 0x76, 0xc6, 0x2c, 0xf0, 0x5d, 0xac, 0x20, 0x6a, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x3c, 0x15, 0x93, 0x40, 0x00, 0x40, 0x06, 0x00, 0xc4, 0xc0, 0xa8,
+            0x51, 0x72, 0xc0, 0xa8, 0x51, 0xa2, 0xb1, 0x4c, 0x04, 0xd2, 0xa2, 0xf9, 0xe6, 0xfb,
+            0x00, 0x00, 0x00, 0x00, 0xa0, 0x02, 0xfa, 0xf0, 0xd9, 0x63, 0x00, 0x00, 0x02, 0x04,
+            0x05, 0xb4, 0x04, 0x02, 0x08, 0x0a, 0x82, 0x16, 0x8d, 0x18, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x03, 0x03, 0x0a,
+        ];
+        let report = packet_dsl::dissect(&frame);
+        assert!(
+            report.remaining.is_empty(),
+            "整帧应被逐层消费，剩余 {} B",
+            report.remaining.len()
+        );
+        assert!(
+            report
+                .layers
+                .iter()
+                .any(|l| matches!(l, packet_dsl::ir::Layer::Ethernet(_))),
+            "应识别 eth 层：{report:?}"
+        );
+        assert!(
+            report
+                .layers
+                .iter()
+                .any(|l| matches!(l, packet_dsl::ir::Layer::Ipv4(_))),
+            "应识别 ipv4 层：{report:?}"
+        );
+        assert!(
+            report
+                .layers
+                .iter()
+                .any(|l| matches!(l, packet_dsl::ir::Layer::Tcp(_))),
+            "应识别 tcp 层：{report:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    fn service_filter_new_specific_bind() {
+        // 指定绑定：只收该 IP 的包（不枚举本机地址）
+        let sf = ServiceFilter::new("127.0.0.1:1234".parse().unwrap());
+        assert_eq!(sf.port, 1234);
+        assert_eq!(sf.dsts, Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]));
+        // 通配绑定：枚举本机地址，getifaddrs 一定含回环 127.0.0.1
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let wild = ServiceFilter::new("0.0.0.0:1234".parse().unwrap());
+            assert_eq!(wild.port, 1234);
+            assert!(
+                wild.dsts
+                    .as_ref()
+                    .is_some_and(|d| d.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            );
+        }
     }
 
     #[test]
@@ -543,7 +793,19 @@ mod tests {
         assert_eq!(m.sport, 12345);
         assert_eq!(m.dport, 53);
         assert_eq!(m.proto, "UDP");
-        assert!(frame_matches_port(&f, 53));
+        // 只匹配「目的端口 == 监听端口」的入向包：53 命中，12345（sport 命中）不命中
+        let sf53 = ServiceFilter {
+            port: 53,
+            dsts: Some(vec![IpAddr::V6(Ipv6Addr::LOCALHOST)]),
+        };
+        assert!(sf53.matches_frame(&f));
+        assert!(
+            !ServiceFilter {
+                port: 12345,
+                dsts: Some(vec![IpAddr::V6(Ipv6Addr::LOCALHOST)]),
+            }
+            .matches_frame(&f)
+        );
     }
 
     #[test]
@@ -587,9 +849,26 @@ mod tests {
         assert_eq!(m.sport, 12345);
         assert_eq!(m.dport, 80);
         assert_eq!(m.proto, "TCP");
-        assert!(bare_ip_matches_port(&ip, 80));
-        assert!(bare_ip_matches_port(&ip, 12345));
-        assert!(!bare_ip_matches_port(&ip, 443));
+        // 裸 IP 路径同样只匹配「目的端口 == 监听端口」：80 命中，12345/443 不命中
+        let sf80 = ServiceFilter {
+            port: 80,
+            dsts: Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+        };
+        assert!(sf80.matches_bare(&ip));
+        assert!(
+            !ServiceFilter {
+                port: 12345,
+                dsts: Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+            }
+            .matches_bare(&ip)
+        );
+        assert!(
+            !ServiceFilter {
+                port: 443,
+                dsts: Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+            }
+            .matches_bare(&ip)
+        );
         // 非 IP（首字节 0x00）→ None
         assert!(bare_ip_meta(&[0x00; 20]).is_none());
     }
@@ -603,7 +882,13 @@ mod tests {
         let ip = strip_null(&data).unwrap();
         assert_eq!(ip.len(), 36);
         assert_eq!(ip[0] >> 4, 4);
-        assert!(bare_ip_matches_port(ip, 200));
+        assert!(
+            ServiceFilter {
+                port: 200,
+                dsts: Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]),
+            }
+            .matches_bare(ip)
+        );
         // AF_INET6 = 30 → 剥掉后是 IPv6
         let mut v6 = vec![30u8, 0, 0, 0];
         v6.extend_from_slice(&[0x60u8; 40]);

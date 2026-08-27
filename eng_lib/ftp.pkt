@@ -41,7 +41,7 @@
 #                   - CWD：目录路径
 #                   - PORT：h1,h2,h3,h4,p1,p2（IP 和端口）
 # @auto: 无自动字段
-#[proto(kind="ftp")]
+#[proto]
 func ftp_command(command="USER", arguments="") -> bytes {
     concat(
         line(command),                      # 命令名：文本行
@@ -183,7 +183,7 @@ func ftp_type(type="I") -> bytes {
 func ftp_port(h1=0, h2=0, h3=0, h4=0, p1=0, p2=0) -> bytes {
     concat(
         line("PORT"),                       # PORT 命令
-        line(format!("{h1},{h2},{h3},{h4},{p1},{p2}"))  # IP 和端口参数
+        line(concat(h1, ",", h2, ",", h3, ",", h4, ",", p1, ",", p2))  # IP 和端口参数
     )
 }
 

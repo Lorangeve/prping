@@ -7,7 +7,8 @@ pub fn rand_u16() -> u16 {
     RandomState::new().build_hasher().finish() as u16
 }
 
-/// 随机 u32（用于 TCP seq 等）。
+/// 随机 u32（用于 TCP seq 等；仅 `trace --tcp` 的 Unix raw TCP 路径使用）。
+#[cfg(unix)]
 pub fn rand_u32() -> u32 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};

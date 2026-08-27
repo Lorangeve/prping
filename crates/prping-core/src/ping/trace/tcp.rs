@@ -1,19 +1,29 @@
 //! TCP SYN 逐跳探测：raw TCP socket 收发，回复按内嵌 TCP 头的 (sport, dport) 匹配。
 
-use std::mem::MaybeUninit;
 use std::net::IpAddr;
-use std::time::{Duration, Instant};
 
 use termcolor::StandardStream;
 
-use super::{Hop, PROBE_TIMEOUT, PROBES_PER_HOP, PingConfig, finish_hop};
+use super::{Hop, PingConfig};
+
+// 以下仅 Unix raw TCP 路径使用（Windows 的 trace_tcp 直接报错不支持）
+#[cfg(unix)]
+use std::mem::MaybeUninit;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
+#[cfg(unix)]
+use super::{PROBE_TIMEOUT, PROBES_PER_HOP, finish_hop};
+#[cfg(unix)]
 use crate::util;
 
 /// TCP SYN 探测源端口范围（避免与 IPv6 version nibble 冲突）。
+#[cfg(unix)]
 const TCP_SPORT_MIN: u16 = 0x4000;
+#[cfg(unix)]
 const TCP_SPORT_MAX: u16 = 0x5FFF;
 
 /// 获取本机路由地址（用于源地址填充）。
+#[cfg(unix)]
 fn local_ip_for(target: IpAddr) -> Option<IpAddr> {
     use std::net::UdpSocket;
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -160,6 +170,7 @@ pub(crate) fn trace_tcp(
 }
 
 /// 构建 TCP SYN 段（无 IP 头，raw socket 由内核加 IP 头）。
+#[cfg(unix)]
 fn build_tcp_syn(dst: IpAddr, src: IpAddr, sport: u16, dport: u16) -> Vec<u8> {
     let mut b = vec![0u8; 20]; // TCP 头最小 20 字节
     b[0] = (sport >> 8) as u8;
@@ -185,6 +196,7 @@ fn build_tcp_syn(dst: IpAddr, src: IpAddr, sport: u16, dport: u16) -> Vec<u8> {
 }
 
 /// TCP 校验和（伪头部 + TCP 段）。
+#[cfg(unix)]
 fn tcp_checksum(tcp: &[u8], src: IpAddr, dst: IpAddr) -> u16 {
     let mut sum = 0u32;
     // 伪头部
@@ -221,6 +233,7 @@ fn tcp_checksum(tcp: &[u8], src: IpAddr, dst: IpAddr) -> u16 {
 }
 
 /// 匹配 IPv4 TCP 回包（SYN-ACK/RST）。
+#[cfg(unix)]
 fn match_tcp_reply_v4(buf: &[u8], _target: IpAddr, dport: u16, want: &[u16]) -> Option<u16> {
     if buf.len() < 20 {
         return None;
@@ -239,6 +252,7 @@ fn match_tcp_reply_v4(buf: &[u8], _target: IpAddr, dport: u16, want: &[u16]) -> 
 }
 
 /// 匹配 IPv6 TCP 回包。
+#[cfg(unix)]
 fn match_tcp_reply_v6(buf: &[u8], _target: IpAddr, dport: u16, want: &[u16]) -> Option<u16> {
     // 框架探测：首字节 version nibble == 6 且长度足够 → 含 40B IPv6 头
     let tcp = if buf.len() >= 60 && buf[0] >> 4 == 6 {

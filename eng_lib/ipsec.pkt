@@ -1,0 +1,100 @@
+# eng_lib/ipsec.pkt —— IPSec 协议定义（RFC 4301-4309）
+#
+# IPSec (IP Security) 是 IP 层安全协议，提供：
+#   - 认证：验证数据来源和完整性
+#   - 加密：保护数据机密性
+#   - 防重放：防止重放攻击
+#
+# IPSec 工作模式：
+#   - 传输模式：只加密/认证 IP 载荷
+#   - 隧道模式：加密/认证整个 IP 数据包
+#
+# IPSec 协议：
+#   - AH (Authentication Header)：认证头（RFC 4302）
+#   - ESP (Encapsulating Security Payload)：封装安全载荷（RFC 4303）
+
+# IPSec AH 头部（RFC 4302 §2）
+# ── AH 头部结构 ─────────────────────────────────────────────────────────────
+# AH 提供数据完整性和认证，但不加密：
+#   - 下一个头：紧跟 AH 的协议头类型
+#   - 载荷长度：AH 头部的长度（以 4 字节为单位）
+#   - 保留：保留字段（必须为 0）
+#   - SPI：安全参数索引
+#   - 序列号：防止重放攻击
+#   - 认证数据：完整性校验值（ICV）
+# ───────────────────────────────────────────────────────────────────────────────
+# @param next_header: 下一个头（1字节）
+#                     紧跟 AH 的协议头类型
+#                     6 = TCP, 17 = UDP, 4 = IPv4, 41 = IPv6
+# @param payload_len: 载荷长度（1字节）
+#                     AH 头部的长度（以 4 字节为单位，减 2）
+#                     例如：4 = 24 字节（4*4+2*4=24）
+# @param reserved: 保留字段（2字节）
+#                  必须为 0
+# @param spi: 安全参数索引（4字节，大端序）
+#             用于标识安全关联（SA）
+#             0 = 保留（本地实现使用）
+# @param sequence_number: 序列号（4字节，大端序）
+#                         单调递增的计数器
+#                         用于防止重放攻击
+# @param authentication_data: 认证数据（变长）
+#                             完整性校验值（ICV）
+#                             通常是 HMAC-MD5-96 或 HMAC-SHA1-96
+# @auto: payload_len 自动计算
+#[proto]
+func ipsec_ah(next_header=6, spi=0, sequence_number=0, authentication_data="") -> bytes {
+    concat(
+        u8(next_header),                    # 下一个头：1字节
+        #[meta(len="authentication_data", expr="sub(div(len + 8, 4), 2)")] u8(payload_len),  # 载荷长度：1字节
+        be16(0),                            # 保留：2字节
+        be32(spi),                          # SPI：4字节
+        be32(sequence_number),              # 序列号：4字节
+        #[meta(rest="authentication_data")] authentication_data  # 认证数据：变长
+    )
+}
+
+# IPSec ESP 头部（RFC 4303 §2）
+# ── ESP 头部结构 ────────────────────────────────────────────────────────────
+# ESP 提供数据加密和认证：
+#   - SPI：安全参数索引
+#   - 序列号：防止重放攻击
+#   - 载荷数据：加密的载荷
+#   - 填充：加密算法需要的填充
+#   - 填充长度：填充的字节数
+#   - 下一个头：紧跟 ESP 的协议头类型
+#   - 认证数据：完整性校验值（可选）
+# ───────────────────────────────────────────────────────────────────────────────
+# @param spi: 安全参数索引（4字节，大端序）
+#             用于标识安全关联（SA）
+#             0 = 保留（本地实现使用）
+# @param sequence_number: 序列号（4字节，大端序）
+#                         单调递增的计数器
+#                         用于防止重放攻击
+# @param payload_data: 载荷数据（变长）
+#                      加密的载荷数据
+# @param padding: 填充（变长）
+#                 加密算法需要的填充字节
+# @param pad_length: 填充长度（1字节）
+#                    填充的字节数
+# @param next_header: 下一个头（1字节）
+#                     紧跟 ESP 的协议头类型
+# @param authentication_data: 认证数据（变长，可选）
+#                             完整性校验值（ICV）
+#                             通常是 HMAC-MD5-96 或 HMAC-SHA1-96
+# @auto: 无自动字段（ESP 载荷已加密）
+#[proto]
+func ipsec_esp(spi=0, sequence_number=0, payload_data="", padding="", pad_length=0, next_header=6, authentication_data="") -> bytes {
+    concat(
+        be32(spi),                          # SPI：4字节
+        be32(sequence_number),              # 序列号：4字节
+        #[meta(rest="payload_data")] payload_data,  # 载荷数据：变长（已加密）
+        #[meta(rest="padding")] padding,    # 填充：变长
+        u8(pad_length),                     # 填充长度：1字节
+        u8(next_header),                    # 下一个头：1字节
+        #[meta(rest="authentication_data")] authentication_data  # 认证数据：变长
+    )
+}
+
+export:
+- ipsec_ah
+- ipsec_esp

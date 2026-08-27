@@ -7,6 +7,7 @@ use prping_core::{
     resolve_source, run, serve, set_json, set_pretty, stderr, toc, writeln_orange, writeln_red,
 };
 use rust_i18n::t;
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 
 /// 全部子命令名（唯一前缀展开的匹配表；顺序不影响解析）。
@@ -205,13 +206,12 @@ struct TraceArgs {
     target: String,
 }
 
-/// engine 子命令（packet-dsl 宿主：分析/LSP/--ls/--ls-page/--hex/--pcap/转码）
+/// engine 子命令（packet-dsl 宿主：分析/LSP/--ls/--hex/--pcap/转码）
 #[derive(Clone)]
 struct EngineArgs {
     file: Option<String>,
     lsp: bool,
     ls: bool,
-    ls_page: bool,
     hex: Option<String>,
     pcap: Option<String>,
     /// pcap → .pkt/.pktl 转码输出目录（配合 --pcap；缺省无损字节级，--structured 语义化）。
@@ -424,9 +424,6 @@ fn engine_cmd() -> impl Parser<Command> {
             .switch()
             .help(t!("help.options.lsp").as_ref())),
         ls(long("ls").switch().help(t!("help.options.ls").as_ref())),
-        ls_page(long("ls-page")
-            .switch()
-            .help(t!("help.options.ls_page").as_ref())),
         hex(long("hex")
             .argument::<String>("0102...")
             .help(t!("help.options.hex").as_ref())
@@ -942,8 +939,8 @@ fn run_trace(a: TraceArgs) -> anyhow::Result<()> {
 /// engine 子命令校验：--ls/--hex/--pcap 互斥、不能与 --lsp 组合、子动作不带文件；
 /// 转码选项（--to-pkt/--structured/--skip/--limit）须配合 --pcap。
 fn validate_engine(a: &EngineArgs) -> anyhow::Result<()> {
-    let sub = a.ls || a.ls_page || a.hex.is_some() || a.pcap.is_some();
-    if (a.ls as u8 + a.ls_page as u8 + a.hex.is_some() as u8 + a.pcap.is_some() as u8) > 1 {
+    let sub = a.ls || a.hex.is_some() || a.pcap.is_some();
+    if (a.ls as u8 + a.hex.is_some() as u8 + a.pcap.is_some() as u8) > 1 {
         anyhow::bail!(t!("errors.eng_sub_conflict"));
     }
     if sub && a.lsp {
@@ -987,8 +984,8 @@ fn run_engine(a: EngineArgs) -> anyhow::Result<()> {
     if a.lsp {
         return prping_core::run_lsp(&libs);
     }
-    if a.ls || a.ls_page {
-        return prping_core::ls_builtins(&libs, a.ls_page);
+    if a.ls {
+        return prping_core::ls_builtins(&libs);
     }
     if let Some(hex) = &a.hex {
         return prping_core::decode_hex(hex);
@@ -1194,14 +1191,19 @@ fn handle_help_pkg(section: &str) -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
                 1 => {
-                    println!("{}", hits[0].body);
+                    // 单章节：使用 print_paged 确保管道/文件场景完整输出
+                    print_paged(&hits[0].body)?;
                     Ok(())
                 }
                 n => {
-                    println!("{}", t!("errors.help_pkg_ambiguous", count = n));
+                    // 多章节候选：使用 write_all 确保一次性输出
+                    let mut stdout = std::io::stdout();
+                    let msg = t!("errors.help_pkg_ambiguous", count = n);
+                    stdout.write_all(format!("{msg}\n").as_bytes())?;
                     for h in &hits {
-                        println!("  {}. {}", h.number, h.title);
+                        stdout.write_all(format!("  {}. {}\n", h.number, h.title).as_bytes())?;
                     }
+                    stdout.flush()?;
                     Ok(())
                 }
             }

@@ -1,0 +1,201 @@
+# eng_lib/ospf.pkt —— OSPF 协议定义（RFC 2328）
+#
+# OSPF (Open Shortest Path First) 是内部网关路由协议（IGP），
+# 用于在单一自治系统（AS）内部分发 IP 路由信息。
+#
+# OSPF 特点：
+#   - 链路状态路由协议：使用 Dijkstra 算法计算最短路径
+#   - 支持 VLSM 和 CIDR：可变长度子网掩码和无类别域间路由
+#   - 支持多区域：减少路由表大小和 SPF 计算开销
+#   - 快速收敛：触发更新，无需等待定时器
+#   - 支持认证：明文和 MD5 认证
+
+# OSPF 头部（RFC 2328 §A.3.1）
+# ── OSPF 头部结构 ───────────────────────────────────────────────────────────
+# 所有 OSPF 消息都包含相同的头部：
+#   - 版本：OSPF 版本号（2 = OSPFv2, 3 = OSPFv3）
+#   - 类型：消息类型（Hello, DB Description, LS Request, LS Update, LS Ack）
+#   - 长度：整个 OSPF 消息的长度（字节）
+#   - 路由器 ID：发送路由器的标识符
+#   - 区域 ID：消息所属的区域
+#   - 校验和：整个消息的校验和（不含认证字段）
+#   - 认证类型：认证类型（0=无, 1=明文, 2=MD5）
+#   - 认证：认证数据（可变长度）
+# ───────────────────────────────────────────────────────────────────────────────
+# @param version: OSPF 版本（1字节）
+#                 2 = OSPFv2（IPv4）
+#                 3 = OSPFv3（IPv6）
+# @param type: 消息类型（1字节）
+#              1 = Hello（发现和维护邻居）
+#              2 = Database Description（数据库描述）
+#              3 = Link State Request（链路状态请求）
+#              4 = Link State Update（链路状态更新）
+#              5 = Link State Acknowledgment（链路状态确认）
+# @param length: 消息长度（2字节，大端序）
+#                整个 OSPF 消息的长度（字节）
+# @param router_id: 路由器 ID（4字节）
+#                   发送路由器的唯一标识符（通常是最大的环回接口 IP）
+# @param area_id: 区域 ID（4字节）
+#                 消息所属的 OSPF 区域
+#                 0.0.0.0 = 骨干区域（Area 0）
+# @param checksum: 校验和（2字节，大端序）
+#                  整个消息的校验和（不含认证字段）
+# @param auth_type: 认证类型（2字节，大端序）
+#                   0 = 无认证
+#                   1 = 明文认证（密码）
+#                   2 = MD5 认证（密码摘要）
+# @param authentication: 认证数据（8字节）
+#                        对于明文认证：8字节密码
+#                        对于 MD5 认证：16字节摘要
+# @auto: checksum 自动计算
+#[proto]
+func ospf_header(version=2, type=1, router_id="0.0.0.0", area_id="0.0.0.0", auth_type=0, authentication=pad(8)) -> bytes {
+    concat(
+        u8(version),                        # OSPF版本：1字节
+        u8(type),                           # 消息类型：1字节
+        #[meta(len="auto")] be16(length),   # 消息长度：2字节（自动计算）
+        ip4(router_id),                     # 路由器ID：4字节
+        ip4(area_id),                       # 区域ID：4字节
+        #[meta(len="auto")] be16(checksum), # 校验和：2字节（自动计算）
+        be16(auth_type),                    # 认证类型：2字节
+        #[meta(bytes="8")] authentication   # 认证数据：8字节
+    )
+}
+
+# OSPF Hello 消息（RFC 2328 §A.3.2）
+# ── OSPF Hello 结构 ─────────────────────────────────────────────────────────
+# Hello 消息用于发现和维护邻居关系：
+#   - 网络掩码：发送接口的网络掩码
+#   - Hello 间隔：发送 Hello 消息的间隔（秒）
+#   - 路由器优先级：DR/BDR 选举用
+#   - 路由器死亡间隔：邻居被认为失效的时间（秒）
+#   - 指定路由器：DR 的路由器 ID
+#   - 备份指定路由器：BDR 的路由器 ID
+#   - 邻居列表：最近收到 Hello 消息的邻居列表
+# ───────────────────────────────────────────────────────────────────────────────
+# @param network_mask: 网络掩码（4字节）
+#                      发送接口的网络掩码
+# @param hello_interval: Hello 间隔（2字节，大端序）
+#                        发送 Hello 消息的间隔（秒）
+#                        通常为 10 秒（广播网络）或 30 秒（NBMA 网络）
+# @param options: 选项（1字节）
+#                 OSPF 选项位（E=外部路由能力，MC=多播能力等）
+# @param router_priority: 路由器优先级（1字节）
+#                         DR/BDR 选举用，0 表示不参与选举
+# @param router_dead_interval: 路由器死亡间隔（4字节，大端序）
+#                              邻居被认为失效的时间（秒）
+#                              通常为 Hello 间隔的 4 倍
+# @param designated_router: 指定路由器（4字节）
+#                           DR 的路由器 ID（0.0.0.0 表示无 DR）
+# @param backup_designated_router: 备份指定路由器（4字节）
+#                                  BDR 的路由器 ID（0.0.0.0 表示无 BDR）
+# @param neighbors: 邻居列表（变长，每项4字节）
+#                   最近收到 Hello 消息的邻居列表
+# @auto: 无自动字段
+#[proto]
+func ospf_hello(network_mask="255.255.255.0", hello_interval=10, options=0, router_priority=1, router_dead_interval=40, designated_router="0.0.0.0", backup_designated_router="0.0.0.0", neighbors="") -> bytes {
+    concat(
+        ip4(network_mask),                  # 网络掩码：4字节
+        be16(hello_interval),               # Hello间隔：2字节
+        u8(options),                        # 选项：1字节
+        u8(router_priority),                # 路由器优先级：1字节
+        be32(router_dead_interval),         # 路由器死亡间隔：4字节
+        ip4(designated_router),             # 指定路由器：4字节
+        ip4(backup_designated_router),      # 备份指定路由器：4字节
+        #[meta(rest="neighbors")] neighbors  # 邻居列表：变长
+    )
+}
+
+# OSPF Database Description 消息（RFC 2328 §A.3.3）
+# ── OSPF Database Description 结构 ──────────────────────────────────────────
+# Database Description 消息用于交换链路状态数据库摘要：
+#   - 接口 MTU：接口的最大传输单元
+#   - 选项：OSPF 选项位
+#   - 标志位：I（初始）、M（更多）、MS（主/从）
+#   - DD 序列号：用于同步数据库描述交换
+#   - LSA 头部：链路状态通告头部列表
+# ───────────────────────────────────────────────────────────────────────────────
+# @param interface_mtu: 接口 MTU（2字节，大端序）
+#                       接口的最大传输单元（字节）
+#                       通常为 1500（以太网）
+# @param options: 选项（1字节）
+#                 OSPF 选项位
+# @param flags: 标志位（1字节）
+#               I = 0x04（初始：第一个 DD 消息）
+#               M = 0x02（更多：还有更多 DD 消息）
+#               MS = 0x01（主/从：1=主，0=从）
+# @param dd_sequence: DD 序列号（4字节，大端序）
+#                     用于同步数据库描述交换
+# @param lsa_headers: LSA 头部列表（变长）
+#                     链路状态通告头部列表
+# @auto: 无自动字段
+#[proto]
+func ospf_database_description(interface_mtu=1500, options=0, flags=0, dd_sequence=0, lsa_headers="") -> bytes {
+    concat(
+        be16(interface_mtu),                # 接口MTU：2字节
+        u8(options),                        # 选项：1字节
+        u8(flags),                          # 标志位：1字节
+        be32(dd_sequence),                  # DD序列号：4字节
+        #[meta(rest="lsa_headers")] lsa_headers  # LSA头部列表：变长
+    )
+}
+
+# OSPF Link State Request 消息（RFC 2328 §A.3.4）
+# ── OSPF Link State Request 结构 ────────────────────────────────────────────
+# Link State Request 消息用于请求特定的链路状态通告：
+#   - 请求列表：每个请求包含 LS 类型、LS ID、通告路由器
+# ───────────────────────────────────────────────────────────────────────────────
+# @param requests: 请求列表（变长）
+#                  每个请求包含：
+#                  - LS 类型（4字节）：链路状态类型
+#                  - LS ID（4字节）：链路状态标识
+#                  - 通告路由器（4字节）：产生该 LSA 的路由器
+# @auto: 无自动字段
+#[proto]
+func ospf_link_state_request(requests="") -> bytes {
+    concat(
+        #[meta(rest="requests")] requests   # 请求列表：变长
+    )
+}
+
+# OSPF Link State Update 消息（RFC 2328 §A.3.5）
+# ── OSPF Link State Update 结构 ─────────────────────────────────────────────
+# Link State Update 消息用于广播链路状态通告：
+#   - LSA 数量：消息中包含的 LSA 数量
+#   - LSA 列表：链路状态通告列表
+# ───────────────────────────────────────────────────────────────────────────────
+# @param lsa_count: LSA 数量（4字节，大端序）
+#                   消息中包含的 LSA 数量
+# @param lsas: LSA 列表（变长）
+#              链路状态通告列表
+# @auto: 无自动字段
+#[proto]
+func ospf_link_state_update(lsa_count=0, lsas="") -> bytes {
+    concat(
+        be32(lsa_count),                    # LSA数量：4字节
+        #[meta(rest="lsas")] lsas           # LSA列表：变长
+    )
+}
+
+# OSPF Link State Acknowledgment 消息（RFC 2328 §A.3.6）
+# ── OSPF Link State Acknowledgment 结构 ─────────────────────────────────────
+# Link State Acknowledgment 消息用于确认收到的 LSA：
+#   - LSA 头部列表：确认的 LSA 头部列表
+# ───────────────────────────────────────────────────────────────────────────────
+# @param lsa_headers: LSA 头部列表（变长）
+#                     确认的 LSA 头部列表
+# @auto: 无自动字段
+#[proto]
+func ospf_link_state_acknowledgment(lsa_headers="") -> bytes {
+    concat(
+        #[meta(rest="lsa_headers")] lsa_headers  # LSA头部列表：变长
+    )
+}
+
+export:
+- ospf_header
+- ospf_hello
+- ospf_database_description
+- ospf_link_state_request
+- ospf_link_state_update
+- ospf_link_state_acknowledgment

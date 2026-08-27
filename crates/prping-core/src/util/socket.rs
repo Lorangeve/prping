@@ -95,6 +95,8 @@ pub fn set_ttl(sock: &socket2::Socket, ttl: u32, is_ipv6: bool) -> anyhow::Resul
 }
 
 /// IPv4 raw socket 收包的外层头偏移：Linux/BSD 恒含 IP 头；Windows 不含。
+/// 仅 raw ICMP 收包路径用（Windows ping 走 ICMP.DLL，不在此列）。
+#[cfg(not(windows))]
 pub(crate) fn icmp_offset_v4(buf: &[u8]) -> usize {
     if !buf.is_empty() && buf[0] >> 4 == 4 {
         ((buf[0] & 0x0F) as usize) * 4
@@ -103,7 +105,7 @@ pub(crate) fn icmp_offset_v4(buf: &[u8]) -> usize {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
 

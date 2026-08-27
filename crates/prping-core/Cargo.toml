@@ -38,5 +38,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_Networking_WinSock",
     "Win32_Networking",
     "Win32_NetworkManagement_IpHelper",
+    # GetAdaptersAddresses / IP_ADAPTER_ADDRESSES_LH（serve 抓包枚举本机 IP 用）
+    "Win32_NetworkManagement_Ndis",
     "Win32_Foundation",
+    # IcmpSendEcho2 / Icmp6SendEcho2 声明带 `feature = "Win32_System_IO"` 门控
+    # （apcroutine 参数类型 PIO_APC_ROUTINE 来自 Win32::System::IO）
+    "Win32_System_IO",
 ]}

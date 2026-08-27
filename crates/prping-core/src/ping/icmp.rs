@@ -168,7 +168,7 @@ async fn send_recv_win(
     source: Option<IpAddr>,
 ) -> Result<(Duration, u8, usize), IcmpErr> {
     let payload = echo_payload(payload_size);
-    // HANDLE（isize）非 Send：unblock 闭包须 Send，句柄按 usize 传值
+    // HANDLE（*mut c_void）非 Send：unblock 闭包须 Send，句柄按 usize 传值
     let handle = session.handle() as usize;
     // v6 源绑定经 SourceAddress 参数；v4 不支持（IcmpSendEcho2 无源地址参数）
     let src6 = match source {
@@ -177,7 +177,7 @@ async fn send_recv_win(
     };
     smol::unblock(move || {
         crate::ping::icmpwin::ws::probe_once(
-            handle as isize,
+            handle as *mut core::ffi::c_void,
             dest,
             &payload,
             src6,

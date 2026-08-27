@@ -196,8 +196,7 @@ help:
     fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkt)
     out: Save built packets to a pcap file (like scapy wrpcap, with --pkt)
     summary: 'Summary mode: print a single result line (packet count, target, sent/failed); suppress per-packet detail'
-    ls: List all builtin layer functions with fields and auto behavior (with --eng)
-    ls_page: List all builtin layer functions with fields and auto behavior, paged (with --eng)
+    ls: List all builtin layer functions with fields and auto behavior, paged (with --eng)
     hex: Dissect and show raw bytes from a hex string (with --eng)
     pcap: Read a pcap file and dissect every record (with --eng)
     to_pkt: Convert a pcap to per-record .pkt/.pktl files (with --pcap; lossless by default)

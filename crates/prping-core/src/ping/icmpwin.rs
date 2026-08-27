@@ -13,10 +13,6 @@
 //! `"iphlpapi.dll"`（非伞状 `windows.lib`），xwin SDK 自带 `Iphlpapi.lib`。
 
 use crate::ping::icmp::IcmpErr;
-#[cfg(windows)]
-use std::net::IpAddr;
-#[cfg(windows)]
-use std::time::{Duration, Instant};
 
 // IP_STATUS（iphlpapi.h；IcmpSendEcho2 回填在应答结构 Status 字段）
 const IP_SUCCESS: u32 = 0;
@@ -48,11 +44,11 @@ pub(crate) fn classify_status(code: u32) -> Option<IcmpErr> {
 }
 
 #[cfg(windows)]
-mod ws {
-    use windows_sys::Win32::Foundation::{BOOL, HANDLE, INVALID_HANDLE_VALUE};
+pub(crate) mod ws {
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        ICMP_ECHO_REPLY, ICMPV6_ECHO_REPLY_LH, IP_OPTION_INFORMATION, Icmp6CreateFile,
-        Icmp6SendEcho2, IcmpCloseHandle, IcmpCreateFile, IcmpParseReplies, IcmpSendEcho2,
+        ICMP_ECHO_REPLY, ICMPV6_ECHO_REPLY_LH, Icmp6CreateFile, Icmp6SendEcho2, IcmpCloseHandle,
+        IcmpCreateFile, IcmpParseReplies, IcmpSendEcho2,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET6, SOCKADDR_IN6};
 
@@ -110,8 +106,6 @@ mod ws {
         source6: Option<[u8; 16]>,
         timeout: std::time::Duration,
     ) -> Result<(std::time::Duration, u8, usize), IcmpErr> {
-        use windows_sys::Win32::Foundation::BOOL;
-
         let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
         let t0 = std::time::Instant::now();
         let out = match dest {
@@ -121,13 +115,14 @@ mod ws {
                     (std::mem::size_of::<ICMP_ECHO_REPLY>() + payload.len() + 64) as u32;
                 let mut reply = vec![0u8; reply_size as usize];
                 // SAFETY: 参数类型与 Iphlpapi.dll 约定一致；reply 缓冲足够容纳应答。
+                // windows-sys 0.59 的 HANDLE 是 `*mut c_void`：Event 传空指针。
                 let rc = unsafe {
                     IcmpSendEcho2(
                         handle,
-                        0,                // Event
-                        None,             // ApcRoutine
-                        std::ptr::null(), // ApcContext
-                        dest,             // DestinationAddress
+                        std::ptr::null_mut(), // Event
+                        None,                 // ApcRoutine
+                        std::ptr::null(),     // ApcContext
+                        dest,                 // DestinationAddress
                         payload.as_ptr().cast(),
                         payload.len() as u16,
                         std::ptr::null(), // RequestOptions
@@ -157,7 +152,7 @@ mod ws {
                 let mut dst: SOCKADDR_IN6 = unsafe { std::mem::zeroed() };
                 dst.sin6_family = AF_INET6;
                 dst.sin6_addr.u.Byte = v6.octets();
-                let mut src_opt: Option<SOCKADDR_IN6> = source6.map(|addr| {
+                let src_opt: Option<SOCKADDR_IN6> = source6.map(|addr| {
                     let mut s: SOCKADDR_IN6 = unsafe { std::mem::zeroed() };
                     s.sin6_family = AF_INET6;
                     s.sin6_addr.u.Byte = addr;
@@ -173,7 +168,7 @@ mod ws {
                 let rc = unsafe {
                     Icmp6SendEcho2(
                         handle,
-                        0,
+                        std::ptr::null_mut(), // Event
                         None,
                         std::ptr::null(),
                         src_ptr,
@@ -197,9 +192,11 @@ mod ws {
                 }
                 let r = unsafe { &*(reply.as_ptr() as *const ICMPV6_ECHO_REPLY_LH) };
                 match super::classify_status(r.Status) {
-                    // ICMPV6_ECHO_REPLY 无 TTL 字段 → 0（与 Windows raw ICMPv6 收包一致）
+                    // ICMPV6_ECHO_REPLY 无 TTL 字段 → 0（与 Windows raw ICMPv6 收包一致）；
+                    // 结构也无 DataSize 字段（仅 Address/Status/RoundTripTime），应答数据
+                    // 回显请求载荷 → 总字节 = ICMPv6 头 8 + 载荷长度。
                     Some(e) => Err(e),
-                    None => Ok((0, 8 + r.DataSize as usize)),
+                    None => Ok((0, 8 + payload.len())),
                 }
             }
         };
@@ -261,6 +258,12 @@ mod tests {
     }
 
     /// windows-sys 官方类型布局与 Windows SDK 文档一致。
+    ///
+    /// 数值按 windows-sys 0.59 结构体定义推算：
+    /// - `IP_OPTION_INFORMATION`：4 标量字节 + 指针（x64 对齐 8 → 16B；x86 → 8B）
+    /// - `ICMP_ECHO_REPLY`：16B 定长前缀 + Data 指针 + Options
+    /// - `ICMPV6_ECHO_REPLY_LH`：`IPV6_ADDRESS_EX`（sin6_port + sin6_flowinfo +
+    ///   sin6_addr[16] + sin6_scope_id = 28B）+ Status + RoundTripTime = 36B（两宽度一致）
     #[cfg(windows)]
     #[test]
     fn reply_layout_sizes() {
@@ -269,13 +272,15 @@ mod tests {
         };
         if cfg!(target_pointer_width = "64") {
             assert_eq!(std::mem::size_of::<ICMP_ECHO_REPLY>(), 40);
-            assert_eq!(std::mem::size_of::<ICMPV6_ECHO_REPLY_LH>(), 48);
+            assert_eq!(std::mem::size_of::<ICMPV6_ECHO_REPLY_LH>(), 36);
+            assert_eq!(std::mem::size_of::<IP_OPTION_INFORMATION>(), 16);
+            assert_eq!(std::mem::offset_of!(ICMP_ECHO_REPLY, Options), 24);
         } else {
             assert_eq!(std::mem::size_of::<ICMP_ECHO_REPLY>(), 28);
-            assert_eq!(std::mem::size_of::<ICMPV6_ECHO_REPLY_LH>(), 44);
+            assert_eq!(std::mem::size_of::<ICMPV6_ECHO_REPLY_LH>(), 36);
+            assert_eq!(std::mem::size_of::<IP_OPTION_INFORMATION>(), 8);
+            assert_eq!(std::mem::offset_of!(ICMP_ECHO_REPLY, Options), 20);
         }
-        assert_eq!(std::mem::size_of::<IP_OPTION_INFORMATION>(), 8);
-        assert_eq!(std::mem::offset_of!(ICMP_ECHO_REPLY, Options), 24);
         assert_eq!(std::mem::offset_of!(IP_OPTION_INFORMATION, Ttl), 0);
     }
 }

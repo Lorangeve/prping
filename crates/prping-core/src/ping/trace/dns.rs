@@ -83,7 +83,8 @@ fn reverse_dns(ip: IpAddr) -> Option<String> {
         IpAddr::V6(v6) => {
             let mut addr: SOCKADDR_IN6 = unsafe { std::mem::zeroed() };
             addr.sin6_family = AF_INET6;
-            addr.sin6_addr.s6_addr = v6.octets();
+            // windows-sys 的 IN6_ADDR 是 union（字段 `u`），非 libc 的 `s6_addr`
+            addr.sin6_addr.u.Byte = v6.octets();
             (
                 &addr as *const _ as *const SOCKADDR,
                 std::mem::size_of::<SOCKADDR_IN6>() as i32,

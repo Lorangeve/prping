@@ -2,6 +2,8 @@
 
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, SocketAddr};
+// Duration 仅 Unix 的 connect_timeout 路径用（Windows 走 select workaround）
+#[cfg(not(windows))]
 use std::time::Duration;
 
 /// 创建带大收发缓冲的 UDP socket（socket2 设置后包成 smol::Async）。

@@ -22,14 +22,15 @@
 // 以下导入仅 pcap 后端使用（纯函数与测试不依赖它们）
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 use crate::engine::pkg::{Reply, SendOutcome};
-#[cfg(any(windows, target_os = "macos", feature = "pcap"))]
+// indent 仅 macOS 的 ARP 兜底提示用（macos_resolve_dst_mac 内）
+#[cfg(all(not(windows), any(target_os = "macos", feature = "pcap")))]
 use crate::output::indent;
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 use packet_dsl::ir::{Layer, PacketSpec};
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 use rust_i18n::t;
-#[cfg(any(windows, target_os = "macos", feature = "pcap"))]
-use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 use std::time::{Duration, Instant};
 
@@ -40,12 +41,33 @@ pub(crate) struct DeviceInfo {
     pub name: String,
     pub desc: Option<String>,
     pub loopback: bool,
+    /// 设备上配置的 IP 地址（服务端抓包按绑定 IP 匹配设备用；发送路径不依赖）。
+    pub addrs: Vec<IpAddr>,
+}
+
+/// 格式化设备列表：每行一个设备，Windows 下同时显示显示名。
+///
+/// 格式示例：
+/// - Windows: `  \Device\NPF_{...} (Intel Ethernet Connection I219-V)`
+/// - 其它平台: `  \Device\NPF_{...}` 或 `  en0`
+#[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
+pub(crate) fn format_device_list(devs: &[DeviceInfo]) -> String {
+    devs.iter()
+        .map(|d| {
+            if let Some(desc) = &d.desc
+                && !desc.is_empty()
+            {
+                return format!("  {} ({})", d.name, desc);
+            }
+            format!("  {}", d.name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 选择发送/抓包设备：`--iface` 按名字（不区分大小写）精确匹配，或描述子串匹配；
 /// 否则回环目标优先回环设备，其余取首个非回环设备（全回环时兜底取第一个）。
-/// （macOS server 抓包不用本函数：0.0.0.0 未指定绑定需同时开 lo0 + 非回环设备，
-/// 设备集合选择内联在 `capture::spawn_macos`。）
+/// （服务端抓包不用本函数：0.0.0.0 未指定绑定需开全部设备，见 `capture_devices`。）
 #[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
 pub(crate) fn pick_device(
     devs: &[DeviceInfo],
@@ -68,6 +90,36 @@ pub(crate) fn pick_device(
     devs.iter()
         .position(|d| !d.loopback)
         .or_else(|| (!devs.is_empty()).then_some(0))
+}
+
+/// 服务端抓包目标设备索引集合（Windows/macOS 共用），等价 Linux AF_PACKET 的
+/// 「全接口」语义：
+/// - 通配绑定（0.0.0.0/::）→ **全部设备**（回环 + 所有非回环）。流量可能从任何
+///   网卡到达，只开 `pick_device` 的首个非回环在多网卡机器上会漏抓——Windows
+///   常见 Hyper-V vEthernet / VPN / WiFi Direct 等虚拟适配器排在真网卡前面，
+///   帧全部看不见（Linux 全接口、macOS 多设备都正常，唯独 Windows 曾漏帧）。
+/// - 回环绑定 → 回环设备（无则兜底第一个）。
+/// - 指定非回环 IP → 拥有该 IP 的设备（IPv4/IPv6 均可）；找不到则首个非回环
+///   （保持 v1 兜底行为）。
+#[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
+pub(crate) fn capture_devices(devs: &[DeviceInfo], addr: SocketAddr) -> Vec<usize> {
+    let ip = addr.ip();
+    if ip.is_unspecified() {
+        return (0..devs.len()).collect();
+    }
+    if ip.is_loopback() {
+        if let Some(i) = devs.iter().position(|d| d.loopback) {
+            return vec![i];
+        }
+        return if devs.is_empty() { Vec::new() } else { vec![0] };
+    }
+    if let Some(i) = devs.iter().position(|d| d.addrs.contains(&ip)) {
+        return vec![i];
+    }
+    devs.iter()
+        .position(|d| !d.loopback)
+        .map(|i| vec![i])
+        .unwrap_or_default()
 }
 
 /// IP 版本 → 以太网类型（IPv4 0x0800 / IPv6 0x86DD）。
@@ -308,8 +360,8 @@ pub(crate) fn select_device_name(
     let loopback = target.is_some_and(|t| t.ip().is_loopback());
     let idx = pick_device(&devs, loopback, iface).ok_or_else(|| {
         let hint = iface.map(|i| format!("（匹配 `{i}`）")).unwrap_or_default();
-        let list: Vec<String> = devs.iter().map(|d| d.name.clone()).collect();
-        anyhow::anyhow!("找不到可用的 pcap 设备{hint}；可用：{}", list.join(", "))
+        let list = format_device_list(&devs);
+        anyhow::anyhow!("找不到可用的 pcap 设备{hint}；可用：\n{list}")
     })?;
     Ok(devs[idx].name.clone())
 }
@@ -324,6 +376,7 @@ pub(crate) fn list_devices() -> anyhow::Result<Vec<DeviceInfo>> {
             name: d.name,
             desc: d.desc,
             loopback: d.flags.is_loopback(),
+            addrs: d.addresses.into_iter().map(|a| a.addr).collect(),
         })
         .collect())
 }
@@ -832,11 +885,13 @@ mod tests {
                 name: r"\Device\NPF_{AAA}".into(),
                 desc: Some("Realtek PCIe Ethernet".into()),
                 loopback: false,
+                addrs: Vec::new(),
             },
             DeviceInfo {
                 name: r"\Device\NPF_{BBB}".into(),
                 desc: Some("Npcap Loopback Adapter".into()),
                 loopback: true,
+                addrs: Vec::new(),
             },
         ];
         // 名字精确匹配（不区分大小写）
@@ -857,11 +912,13 @@ mod tests {
                 name: "loop".into(),
                 desc: None,
                 loopback: true,
+                addrs: Vec::new(),
             },
             DeviceInfo {
                 name: "eth".into(),
                 desc: None,
                 loopback: false,
+                addrs: Vec::new(),
             },
         ];
         assert_eq!(pick_device(&devs, false, None), Some(1)); // 非回环目标 → 首个非回环
@@ -870,9 +927,101 @@ mod tests {
             name: "loop".into(),
             desc: None,
             loopback: true,
+            addrs: Vec::new(),
         }];
         assert_eq!(pick_device(&only_loop, false, None), Some(0)); // 全回环 → 兜底第一个
         assert_eq!(pick_device(&[], false, None), None);
+    }
+
+    #[test]
+    fn capture_devices_selects_by_bind() {
+        let devs = vec![
+            DeviceInfo {
+                name: "loop".into(),
+                desc: None,
+                loopback: true,
+                addrs: Vec::new(),
+            },
+            DeviceInfo {
+                name: "eth0".into(),
+                desc: None,
+                loopback: false,
+                addrs: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))],
+            },
+            DeviceInfo {
+                name: "eth1".into(),
+                desc: None,
+                loopback: false,
+                addrs: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
+            },
+        ];
+        // 通配绑定 → 全部设备（回环 + 所有非回环，等价 Linux AF_PACKET 全接口）
+        assert_eq!(
+            capture_devices(&devs, "0.0.0.0:1234".parse().unwrap()),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            capture_devices(&devs, "[::]:1234".parse().unwrap()),
+            vec![0, 1, 2]
+        );
+        // 回环绑定 → 回环设备
+        assert_eq!(
+            capture_devices(&devs, "127.0.0.1:1234".parse().unwrap()),
+            vec![0]
+        );
+        // 指定 IP → 拥有该 IP 的设备（IPv4 / IPv6 都认）
+        assert_eq!(
+            capture_devices(&devs, "192.168.1.5:1234".parse().unwrap()),
+            vec![1]
+        );
+        assert_eq!(
+            capture_devices(&devs, "10.0.0.2:1234".parse().unwrap()),
+            vec![2]
+        );
+        // 没有设备拥有该 IP → 首个非回环兜底（v1 行为）
+        assert_eq!(
+            capture_devices(&devs, "172.16.0.9:1234".parse().unwrap()),
+            vec![1]
+        );
+        // 空设备表 → 空集合
+        assert_eq!(
+            capture_devices(&[], "0.0.0.0:1234".parse().unwrap()),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn format_device_list_shows_desc() {
+        let devs = vec![
+            DeviceInfo {
+                name: r"\Device\NPF_{AAA}".into(),
+                desc: Some("Realtek PCIe Ethernet".into()),
+                loopback: false,
+                addrs: Vec::new(),
+            },
+            DeviceInfo {
+                name: r"\Device\NPF_{BBB}".into(),
+                desc: None,
+                loopback: true,
+                addrs: Vec::new(),
+            },
+            DeviceInfo {
+                name: r"\Device\NPF_{CCC}".into(),
+                desc: Some("".into()),
+                loopback: false,
+                addrs: Vec::new(),
+            },
+        ];
+        let list = format_device_list(&devs);
+        assert!(list.contains(r"\Device\NPF_{AAA} (Realtek PCIe Ethernet)"));
+        assert!(list.contains(r"  \Device\NPF_{BBB}"));
+        assert!(!list.contains(r"\Device\NPF_{BBB} ("));
+        assert!(list.contains(r"  \Device\NPF_{CCC}"));
+        assert!(!list.contains(r"\Device\NPF_{CCC} ("));
+        // 每行前缀 2 空格缩进
+        for line in list.lines() {
+            assert!(line.starts_with("  "), "line should be indented: {line:?}");
+        }
     }
 
     #[test]

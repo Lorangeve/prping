@@ -45,6 +45,21 @@ pub async fn serve(addr: SocketAddr, verbose: bool) -> Result<ServerReport, Prpi
     // （OnceLock 一次性；非 verbose 不加载，保持零开销）。
     if verbose {
         crate::engine::eng::ensure_proto_registry();
+        // 注册表为空（eng_lib/lib 库目录都缺失，或全部解析失败）时，抓到的
+        // 帧/载荷只能 hexdump、无法反解层栈（每帧都显示「未能识别任何层」）——
+        // 提前警告并给出实际查找的库目录，避免看不出原因。
+        if packet_dsl::proto_registry().is_empty() {
+            let libs = crate::engine::eng::libs_display(&crate::engine::eng::registry_libs());
+            let mut w = output::stderr();
+            let _ = output::writeln_orange(
+                &mut w,
+                format!(
+                    "{}（{}）",
+                    rust_i18n::t!("server.verbose_dissect_unavailable"),
+                    libs
+                ),
+            );
+        }
     }
     // 完整帧抓包（verbose）：普通 socket 只见载荷，要显示 eth/IP/TCP 头（含握手）
     // 需 raw 抓包。成功 → 帧级显示（抑制下面 socket 载荷级打印）；失败 → 提示并

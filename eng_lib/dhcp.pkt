@@ -1,0 +1,279 @@
+# eng_lib/dhcp.pkt —— DHCP 协议定义（RFC 2131）
+#
+# DHCP (Dynamic Host Configuration Protocol) 是动态主机配置协议，
+# 用于自动分配 IP 地址和网络配置参数。
+#
+# DHCP 工作流程（DORA）：
+#   1. Discover：客户端广播发现 DHCP 服务器
+#   2. Offer：服务器提供 IP 地址
+#   3. Request：客户端请求 IP 地址
+#   4. Ack：服务器确认分配
+#
+# DHCP 基于 UDP 协议：
+#   - 客户端端口：68
+#   - 服务器端口：67
+
+# DHCP 报文（RFC 2131 §2）
+# DHCP 报文是固定长度的，包含：
+#   - 操作码：请求(1) 或应答(2)
+#   - 硬件类型：以太网(1)
+#   - 硬件地址长度：MAC 地址长度(6)
+#   - 跳数：经过的 DHCP 中继数量
+#   - 事务 ID：随机数，用于匹配请求和应答
+#   - 秒数：客户端开始获取或刷新地址后消耗的秒数
+#   - 标志：广播标志
+#   - 客户端 IP：客户端当前 IP（如果已知）
+#   - 你的 IP：服务器分配的 IP
+#   - 服务器 IP：下一个服务器的 IP（引导过程用）
+#   - 网关 IP：DHCP 中继的 IP
+#   - 客户端 MAC：客户端的 MAC 地址
+#   - 服务器主机名：服务器主机名（可选）
+#   - 引导文件名：引导文件名（可选）
+#   - 选项：可变长度的配置参数
+# @param op: 操作码（1字节）
+#            1 = BOOTREQUEST（客户端请求）
+#            2 = BOOTREPLY（服务器应答）
+# @param htype: 硬件类型（1字节）
+#               1 = 以太网（最常见的链路层类型）
+# @param hlen: 硬件地址长度（1字节）
+#              6 = MAC 地址长度（48位 = 6字节）
+# @param hops: 跳数（1字节）
+#              客户端设置为 0
+#              每经过一个 DHCP 中继加 1
+# @param xid: 事务 ID（4字节，大端序）
+#             随机数，用于匹配请求和应答
+# @param secs: 秒数（2字节，大端序）
+#              客户端开始获取或刷新地址后消耗的秒数
+# @param flags: 标志（2字节，大端序）
+#               0x8000 = 广播应答（客户端请求广播应答）
+#               0x0000 = 单播应答
+# @param ciaddr: 客户端 IP 地址（4字节）
+#                客户端当前的 IP 地址（如果已知）
+#                在 REQUEST 状态时填写
+# @param yiaddr: 你的 IP 地址（4字节）
+#                服务器分配给客户端的 IP 地址
+#                在 OFFER 和 ACK 中填写
+# @param siaddr: 服务器 IP 地址（4字节）
+#                下一个服务器的 IP 地址（引导过程用）
+# @param giaddr: 网关 IP 地址（4字节）
+#                DHCP 中继的 IP 地址
+# @param chaddr: 客户端硬件地址（16字节，前6字节是MAC）
+#                客户端的 MAC 地址（以太网）
+# @param sname: 服务器主机名（64字节，可选）
+#               服务器的主机名
+# @param file: 引导文件名（128字节，可选）
+#              引导文件的路径名
+# @param options: 选项（变长）
+#                 DHCP 选项，格式：类型(1B) + 长度(1B) + 数据
+#                 常见选项：
+#                 1 = 子网掩码
+#                 3 = 默认网关
+#                 6 = DNS 服务器
+#                 12 = 主机名
+#                 15 = 域名
+#                 51 = IP 地址租约时间
+#                 53 = DHCP 消息类型
+#                 54 = DHCP 服务器标识符
+#                 55 = 参数请求列表
+#                 58 = 租约更新时间
+#                 59 = 租约重新绑定时间
+#                 60 = 客户端类别
+#                 61 = 客户端标识符
+#                 82 = 中继代理信息
+# @auto: 无自动字段
+#[proto]
+func dhcp(op=1, htype=1, hlen=6, hops=0, xid=0, secs=0, flags=0, ciaddr="0.0.0.0", yiaddr="0.0.0.0", siaddr="0.0.0.0", giaddr="0.0.0.0", chaddr=pad(16), sname=pad(64), file=pad(128), options="") -> bytes {
+    concat(
+        u8(op),                             # 操作码：1字节
+        u8(htype),                          # 硬件类型：1字节
+        u8(hlen),                           # 硬件地址长度：1字节
+        u8(hops),                           # 跳数：1字节
+        be32(xid),                          # 事务ID：4字节
+        be16(secs),                         # 秒数：2字节
+        be16(flags),                        # 标志：2字节
+        ip4(ciaddr),                        # 客户端IP：4字节
+        ip4(yiaddr),                        # 你的IP：4字节
+        ip4(siaddr),                        # 服务器IP：4字节
+        ip4(giaddr),                        # 网关IP：4字节
+        #[meta(bytes="16")] chaddr,         # 客户端MAC：16字节（前6字节是MAC）
+        #[meta(bytes="64")] sname,          # 服务器主机名：64字节
+        #[meta(bytes="128")] file,          # 引导文件名：128字节
+        #[meta(rest="options")] options     # 选项：变长
+    )
+}
+
+# DHCP Discover 报文
+# 客户端广播发送，寻找可用的 DHCP 服务器：
+#   - 操作码：1（BOOTREQUEST）
+#   - 事务ID：随机数
+#   - 客户端MAC：客户端的MAC地址
+#   - 选项：包含 DHCP 消息类型（53=1）
+# @param xid: 事务 ID（4字节，大端序）
+#             随机数，用于匹配请求和应答
+# @param chaddr: 客户端硬件地址（16字节，前6字节是MAC）
+#                客户端的 MAC 地址（以太网）
+# @param options: 选项（变长）
+#                 必须包含：
+#                 53=1：DHCP 消息类型（Discover）
+#                 可选包含：
+#                 55：参数请求列表（请求的配置参数）
+#                 60：客户端类别
+#                 61：客户端标识符
+# @auto: 无自动字段
+#[proto]
+func dhcp_discover(xid=0, chaddr=pad(16), sname=pad(64), file=pad(128), options="") -> bytes {
+    concat(
+        u8(1),                              # 操作码：BOOTREQUEST
+        u8(1),                              # 硬件类型：以太网
+        u8(6),                              # 硬件地址长度：MAC
+        u8(0),                              # 跳数：0
+        be32(xid),                          # 事务ID：4字节
+        be16(0),                            # 秒数：0
+        be16(0x8000),                       # 标志：广播应答
+        ip4("0.0.0.0"),                     # 客户端IP：0.0.0.0
+        ip4("0.0.0.0"),                     # 你的IP：0.0.0.0
+        ip4("0.0.0.0"),                     # 服务器IP：0.0.0.0
+        ip4("0.0.0.0"),                     # 网关IP：0.0.0.0
+        #[meta(bytes="16")] chaddr,         # 客户端MAC：16字节（前6字节是MAC）
+        #[meta(bytes="64")] sname,          # 服务器主机名：64字节（空）
+        #[meta(bytes="128")] file,          # 引导文件名：128字节（空）
+        #[meta(rest="options")] options     # 选项：变长
+    )
+}
+
+# DHCP Offer 报文
+# 服务器回复，提供 IP 地址：
+#   - 操作码：2（BOOTREPLY）
+#   - 事务ID：与 Discover 相同
+#   - 你的IP：服务器分配的 IP 地址
+#   - 服务器IP：DHCP 服务器的 IP
+#   - 选项：包含 DHCP 消息类型（53=2）
+# @param xid: 事务 ID（4字节，大端序）
+#             与 Discover 相同
+# @param yiaddr: 你的 IP 地址（4字节）
+#                服务器分配给客户端的 IP 地址
+# @param siaddr: 服务器 IP 地址（4字节）
+#                DHCP 服务器的 IP 地址
+# @param chaddr: 客户端硬件地址（16字节，前6字节是MAC）
+#                客户端的 MAC 地址（以太网）
+# @param options: 选项（变长）
+#                 必须包含：
+#                 53=2：DHCP 消息类型（Offer）
+#                 51：IP 地址租约时间
+#                 1：子网掩码
+#                 3：默认网关
+#                 6：DNS 服务器
+#                 54：DHCP 服务器标识符
+# @auto: 无自动字段
+#[proto]
+func dhcp_offer(xid=0, yiaddr="0.0.0.0", siaddr="0.0.0.0", chaddr=pad(16), sname=pad(64), file=pad(128), options="") -> bytes {
+    concat(
+        u8(2),                              # 操作码：BOOTREPLY
+        u8(1),                              # 硬件类型：以太网
+        u8(6),                              # 硬件地址长度：MAC
+        u8(0),                              # 跳数：0
+        be32(xid),                          # 事务ID：4字节
+        be16(0),                            # 秒数：0
+        be16(0),                            # 标志：单播应答
+        ip4("0.0.0.0"),                     # 客户端IP：0.0.0.0
+        ip4(yiaddr),                        # 你的IP：分配的IP
+        ip4(siaddr),                        # 服务器IP：DHCP服务器IP
+        ip4("0.0.0.0"),                     # 网关IP：0.0.0.0
+        #[meta(bytes="16")] chaddr,         # 客户端MAC：16字节（前6字节是MAC）
+        #[meta(bytes="64")] sname,          # 服务器主机名：64字节（空）
+        #[meta(bytes="128")] file,          # 引导文件名：128字节（空）
+        #[meta(rest="options")] options     # 选项：变长
+    )
+}
+
+# DHCP Request 报文
+# 客户端请求分配 IP 地址：
+#   - 操作码：1（BOOTREQUEST）
+#   - 事务ID：随机数
+#   - 选项：包含 DHCP 消息类型（53=3）
+# @param xid: 事务 ID（4字节，大端序）
+#             随机数，用于匹配请求和应答
+# @param chaddr: 客户端硬件地址（16字节，前6字节是MAC）
+#                客户端的 MAC 地址（以太网）
+# @param options: 选项（变长）
+#                 必须包含：
+#                 53=3：DHCP 消息类型（Request）
+#                 54：DHCP 服务器标识符（选择的服务器）
+#                 50：请求的 IP 地址
+#                 可选包含：
+#                 55：参数请求列表
+#                 60：客户端类别
+#                 61：客户端标识符
+# @auto: 无自动字段
+#[proto]
+func dhcp_request(xid=0, chaddr=pad(16), sname=pad(64), file=pad(128), options="") -> bytes {
+    concat(
+        u8(1),                              # 操作码：BOOTREQUEST
+        u8(1),                              # 硬件类型：以太网
+        u8(6),                              # 硬件地址长度：MAC
+        u8(0),                              # 跳数：0
+        be32(xid),                          # 事务ID：4字节
+        be16(0),                            # 秒数：0
+        be16(0x8000),                       # 标志：广播应答
+        ip4("0.0.0.0"),                     # 客户端IP：0.0.0.0
+        ip4("0.0.0.0"),                     # 你的IP：0.0.0.0
+        ip4("0.0.0.0"),                     # 服务器IP：0.0.0.0
+        ip4("0.0.0.0"),                     # 网关IP：0.0.0.0
+        #[meta(bytes="16")] chaddr,         # 客户端MAC：16字节（前6字节是MAC）
+        #[meta(bytes="64")] sname,          # 服务器主机名：64字节（空）
+        #[meta(bytes="128")] file,          # 引导文件名：128字节（空）
+        #[meta(rest="options")] options     # 选项：变长
+    )
+}
+
+# DHCP Ack 报文
+# 服务器确认 IP 地址分配：
+#   - 操作码：2（BOOTREPLY）
+#   - 事务ID：与 Request 相同
+#   - 你的IP：服务器分配的 IP 地址
+#   - 服务器IP：DHCP 服务器的 IP
+#   - 选项：包含 DHCP 消息类型（53=5）
+# @param xid: 事务 ID（4字节，大端序）
+#             与 Request 相同
+# @param yiaddr: 你的 IP 地址（4字节）
+#                服务器分配给客户端的 IP 地址
+# @param siaddr: 服务器 IP 地址（4字节）
+#                DHCP 服务器的 IP 地址
+# @param chaddr: 客户端硬件地址（16字节，前6字节是MAC）
+#                客户端的 MAC 地址（以太网）
+# @param options: 选项（变长）
+#                 必须包含：
+#                 53=5：DHCP 消息类型（Ack）
+#                 51：IP 地址租约时间
+#                 1：子网掩码
+#                 3：默认网关
+#                 6：DNS 服务器
+#                 54：DHCP 服务器标识符
+# @auto: 无自动字段
+#[proto]
+func dhcp_ack(xid=0, yiaddr="0.0.0.0", siaddr="0.0.0.0", chaddr=pad(16), sname=pad(64), file=pad(128), options="") -> bytes {
+    concat(
+        u8(2),                              # 操作码：BOOTREPLY
+        u8(1),                              # 硬件类型：以太网
+        u8(6),                              # 硬件地址长度：MAC
+        u8(0),                              # 跳数：0
+        be32(xid),                          # 事务ID：4字节
+        be16(0),                            # 秒数：0
+        be16(0),                            # 标志：单播应答
+        ip4("0.0.0.0"),                     # 客户端IP：0.0.0.0
+        ip4(yiaddr),                        # 你的IP：分配的IP
+        ip4(siaddr),                        # 服务器IP：DHCP服务器IP
+        ip4("0.0.0.0"),                     # 网关IP：0.0.0.0
+        #[meta(bytes="16")] chaddr,         # 客户端MAC：16字节（前6字节是MAC）
+        #[meta(bytes="64")] sname,          # 服务器主机名：64字节（空）
+        #[meta(bytes="128")] file,          # 引导文件名：128字节（空）
+        #[meta(rest="options")] options     # 选项：变长
+    )
+}
+
+export:
+- dhcp
+- dhcp_discover
+- dhcp_offer
+- dhcp_request
+- dhcp_ack

@@ -80,7 +80,7 @@ prping latency [OPTIONS] HOST:PORT   Latency test（-l 缺省 64；-u UDP；-r �
 prping bandwidth [OPTIONS] HOST:PORT Bandwidth test（-l 缺省 8k；--parallel 并发；-u/-r）
 prping server ADDR:PORT     Server（同时服务 latency/bandwidth）
 prping trace [OPTIONS] HOST[:PORT] Traceroute（ICMP echo 默认；-t/--tcp 用 TCP SYN 需端口；-u/--udp 经典 UDP 33434 起递增；-m 最大跳数 / -d 免 DNS / --json）
-prping engine [OPTIONS] FILE.pkt|.pktl  引擎：分析/LSP/--ls/--hex/--pcap/配方概览（无扩展名参数自动定位 pktl：先 `<arg>.pktl`，再同名文件夹 `<arg>/<arg>.pktl`）
+prping engine [OPTIONS] FILE.pkt|.pktl  引擎：分析/LSP/--ls/--hex/--pcap/配方概览（无扩展名参数自动定位 pktl：先 `<arg>.pktl`，再同名文件夹 `<arg>/<arg>.pktl`；--ls 自动分页）
 prping packet [OPTIONS] FILE.pkt|.pktl [HOST:PORT]  构建发送/配方执行（--raw/--wait/--fuzz/--out）
 prping document [SECTION]   使用手册（全文 / 章节跳转）
 prping -s ADDR|IFACE ...    指定源地址/网卡（测量子命令内）
@@ -125,6 +125,25 @@ engine/packet 含引擎选项（`--lsp/--ls/--hex/--pcap` 互斥且不带文件�
   - QUIC 长头 Initial 包（quic_initial）
   - QUIC 短头包（quic_short）
   - CRYPTO 帧（quic_crypto）
+- **`tls.pkt`** — TLS/SSL 安全传输层协议（RFC 8446/5246）
+- **`ssh.pkt`** — SSH 安全远程登录协议（RFC 4251-4254）
+- **`ftp.pkt`** — FTP 文件传输协议（RFC 959）
+- **`smtp.pkt`** — SMTP 邮件传输协议（RFC 5321）
+- **`dhcp.pkt`** — DHCP 动态主机配置协议（RFC 2131）
+- **`ntp.pkt`** — NTP 网络时间协议（RFC 5905）
+- **`igmp.pkt`** — IGMP 组播组管理协议（RFC 3376）
+- **`ospf.pkt`** — OSPF 开放最短路径优先协议（RFC 2328）
+- **`bgp.pkt`** — BGP 边界网关协议（RFC 4271）
+- **`ipsec.pkt`** — IPSec IP 层安全协议（RFC 4301-4309）
+- **`wireguard.pkt`** — WireGuard 现代 VPN 协议
+- **`gre.pkt`** — GRE 通用路由封装协议（RFC 2784/2890）
+- **`mqtt.pkt`** — MQTT 消息队列遥测传输协议（IoT）
+- **`coap.pkt`** — CoAP 受限应用协议（RFC 7252）
+- **`rtp.pkt`** — RTP 实时传输协议（RFC 3550）
+- **`rtcp.pkt`** — RTCP RTP 控制协议（RFC 3550）
+- **`vnc.pkt`** — VNC 远程桌面协议（RFC 6143）
+- **`rdp.pkt`** — RDP 远程桌面协议（MS-RDPBCGR）
+- **`smb.pkt`** — SMB 文件共享协议（MS-SMB2）
 - **`bytes.pkt`** — 字节构建值函数和层标注具名包装
 - **`net.pkt`** — IP + 以太网组合层（net4/net6）
 - **`vint.pkt`** — 变长整数编解码
@@ -143,6 +162,10 @@ engine/packet 含引擎选项（`--lsp/--ls/--hex/--pcap` 互斥且不带文件�
 - 通过 `prping engine --hex headers.pkt` 查看协议的十六进制表示
 - 通过 `prping document` 查看完整的使用手册
 - 通过 `docs/protocol-learning.md` 查看详细的协议学习指南
+- 通过 `PROTOCOL_SUPPORT.md` 查看完整的协议支持清单
+- 通过 `PROTOCOL_SUMMARY.md` 查看协议支持总结
+- 通过 `PROTOCOL_FINAL_SUMMARY.md` 查看最终总结
+- 通过 `PROTOCOL_COMPLETE_LIST.md` 查看完整协议列表
 
 ## 编码约定
 

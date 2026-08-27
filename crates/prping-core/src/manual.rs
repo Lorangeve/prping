@@ -5,7 +5,8 @@
 //!   `--help-pkg 目录标题` → 按编号 / 标题前缀 / 标题包含匹配章节，单命中打印、多命中列候选。
 
 #[cfg(unix)]
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
+use std::io::Write;
 
 /// 中文手册（内嵌）。
 pub const MANUAL_ZH: &str = include_str!("../../../docs/manual-zh.md");
@@ -100,6 +101,10 @@ pub fn find_sections(manual: &str, query: &str) -> Vec<Section> {
 }
 
 /// pager 自动分页：unix + tty → `$PAGER`（默认 `less -R`），否则直接输出全文。
+///
+/// 非 tty（管道/文件重定向）时，确保一次性写入全部内容：
+/// - 使用 `write_all` 避免缓冲区截断
+/// - 显式 flush 确保数据完整落盘
 pub fn print_paged(text: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     if std::io::stdout().is_terminal() {
@@ -120,9 +125,10 @@ pub fn print_paged(text: &str) -> std::io::Result<()> {
         }
         // pager 启动失败 → 落到直接输出
     }
-    #[cfg(not(unix))]
-    let _ = text; // Windows：无 less，直接输出（PAGER 可另行配置，见手册 FAQ）
-    print!("{text}");
+    // 非 tty（管道/文件）或 Windows：一次性写入全部内容
+    let mut stdout = std::io::stdout();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()?;
     Ok(())
 }
 

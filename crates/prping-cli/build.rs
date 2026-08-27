@@ -3,6 +3,12 @@
 //! 运行 `sudo cargo run -- icmp 8.8.8.8` 一次授权后，后续 `cargo run` 即可直接使用 ICMP。
 
 fn main() {
+    // locale 文案变更需重编译：rust-i18n 的 i18n! 宏展开期读 locales/*.yml，
+    // cargo 不追踪该文件依赖，改 yml 后不重编译会一直显示旧文案。
+    // 放在平台分支前：所有平台（含 Windows/macOS）都要追踪。
+    println!("cargo:rerun-if-changed=locales/zh-CN.yml");
+    println!("cargo:rerun-if-changed=locales/en-US.yml");
+
     if !cfg!(target_os = "linux") {
         return;
     }

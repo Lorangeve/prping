@@ -235,12 +235,35 @@ pub fn ensure_dns_resolver() {
     });
 }
 
+/// 注册表加载用库目录：编译期烘焙的 `eng_lib` 优先；缺失（发布版布局，只有
+/// `lib/` 没有 `eng_lib/`）时回退运行时 `lib/`——先找可执行文件同目录，再找
+/// 当前工作目录（与 CLI `resolve_libs` 的 CWD `lib/` 语义一致；serve 在部署
+/// 目录运行、engine/packet 在仓库运行都能加载到协议声明）。
+pub(crate) fn registry_libs() -> Vec<PathBuf> {
+    let baked = packet_dsl::default_libs();
+    if !baked.is_empty() {
+        return baked;
+    }
+    let mut runtime = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && dir.join("lib").is_dir()
+    {
+        runtime.push(dir.join("lib"));
+    }
+    let cwd = Path::new("lib");
+    if cwd.is_dir() {
+        runtime.push(cwd.to_path_buf());
+    }
+    runtime
+}
+
 /// 从默认 eng_lib 目录加载 proto 声明进注册表（进程级，首个生效）。
 pub fn ensure_proto_registry() {
     if !packet_dsl::proto_registry().is_empty() {
         return;
     }
-    let libs = packet_dsl::default_libs();
+    let libs = registry_libs();
     let mut protos = Vec::new();
     for dir in libs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -335,7 +358,8 @@ pub fn run_lsp_on<R: io::Read, W: io::Write>(
 }
 
 /// 列出全部内置原语与库层头函数的字段表（对标 scapy `ls()`）。
-pub fn ls_builtins(libs: &[PathBuf], paged: bool) -> anyhow::Result<()> {
+/// 输出自动分页（tty 时使用 $PAGER，非 tty 时确保完整输出）。
+pub fn ls_builtins(libs: &[PathBuf]) -> anyhow::Result<()> {
     let libs = effective_libs(libs);
     let mut buf = Vec::new();
     {
@@ -419,11 +443,7 @@ pub fn ls_builtins(libs: &[PathBuf], paged: bool) -> anyhow::Result<()> {
         }
     }
     let output = String::from_utf8_lossy(&buf);
-    if paged {
-        crate::manual::print_paged(&output)?;
-    } else {
-        print!("{}", output);
-    }
+    crate::manual::print_paged(&output)?;
     Ok(())
 }
 

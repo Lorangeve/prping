@@ -36,13 +36,13 @@
 #             用于验证数据完整性
 #             在加密模式下计算，明文模式下为空
 # @auto: packet_length 自动计算
-#[proto(kind="ssh")]
-func ssh_packet(payload="", padding="") -> bytes {
+#[proto]
+func ssh_packet(payload_len=0, payload="", padding="") -> bytes {
     concat(
         #[meta(len="auto")] be32(packet_length),    # 包长度：4字节（自动计算）
         u8(count(padding)),                          # 填充长度：1字节
-        payload,                                     # 载荷：变长
-        padding                                      # 填充：变长
+        #[meta(bytes="payload_len")] payload,        # 载荷：变长
+        #[meta(rest="padding")] padding              # 填充：变长
     )
 }
 
@@ -118,27 +118,27 @@ func ssh_version(protocol_version="SSH-2.0", software_version="", comments="") -
 #[proto]
 func ssh_kexinit(cookie="", kex_algorithms="", server_host_key_algorithms="", encryption_algorithms_client_to_server="", encryption_algorithms_server_to_client="", mac_algorithms_client_to_server="", mac_algorithms_server_to_client="", compression_algorithms_client_to_server="", compression_algorithms_server_to_client="", languages_client_to_server="", languages_server_to_client="", first_kex_packet_follows=0, reserved=0) -> bytes {
     concat(
-        cookie,                                             # Cookie：16字节随机数
+        #[meta(bytes="16")] cookie,                                  # Cookie：16字节随机数
         #[meta(len="kex_algorithms")] be32(kex_algorithms_len),  # 密钥交换算法列表长度：4字节
-        kex_algorithms,                                     # 密钥交换算法列表：变长
+        #[meta(bytes="kex_algorithms_len")] kex_algorithms,                    # 密钥交换算法列表：变长
         #[meta(len="server_host_key_algorithms")] be32(server_host_key_algorithms_len),  # 服务器主机密钥算法列表长度：4字节
-        server_host_key_algorithms,                         # 服务器主机密钥算法列表：变长
+        #[meta(bytes="server_host_key_algorithms_len")] server_host_key_algorithms, # 服务器主机密钥算法列表：变长
         #[meta(len="encryption_algorithms_client_to_server")] be32(encryption_algorithms_client_to_server_len),  # 客户端到服务器加密算法列表长度：4字节
-        encryption_algorithms_client_to_server,             # 客户端到服务器加密算法列表：变长
+        #[meta(bytes="encryption_algorithms_client_to_server_len")] encryption_algorithms_client_to_server, # 客户端到服务器加密算法列表：变长
         #[meta(len="encryption_algorithms_server_to_client")] be32(encryption_algorithms_server_to_client_len),  # 服务器到客户端加密算法列表长度：4字节
-        encryption_algorithms_server_to_client,             # 服务器到客户端加密算法列表：变长
+        #[meta(bytes="encryption_algorithms_server_to_client_len")] encryption_algorithms_server_to_client, # 服务器到客户端加密算法列表：变长
         #[meta(len="mac_algorithms_client_to_server")] be32(mac_algorithms_client_to_server_len),  # 客户端到服务器 MAC 算法列表长度：4字节
-        mac_algorithms_client_to_server,                    # 客户端到服务器 MAC 算法列表：变长
+        #[meta(bytes="mac_algorithms_client_to_server_len")] mac_algorithms_client_to_server, # 客户端到服务器 MAC 算法列表：变长
         #[meta(len="mac_algorithms_server_to_client")] be32(mac_algorithms_server_to_client_len),  # 服务器到客户端 MAC 算法列表长度：4字节
-        mac_algorithms_server_to_client,                    # 服务器到客户端 MAC 算法列表：变长
+        #[meta(bytes="mac_algorithms_server_to_client_len")] mac_algorithms_server_to_client, # 服务器到客户端 MAC 算法列表：变长
         #[meta(len="compression_algorithms_client_to_server")] be32(compression_algorithms_client_to_server_len),  # 客户端到服务器压缩算法列表长度：4字节
-        compression_algorithms_client_to_server,            # 客户端到服务器压缩算法列表：变长
+        #[meta(bytes="compression_algorithms_client_to_server_len")] compression_algorithms_client_to_server, # 客户端到服务器压缩算法列表：变长
         #[meta(len="compression_algorithms_server_to_client")] be32(compression_algorithms_server_to_client_len),  # 服务器到客户端压缩算法列表长度：4字节
-        compression_algorithms_server_to_client,            # 服务器到客户端压缩算法列表：变长
+        #[meta(bytes="compression_algorithms_server_to_client_len")] compression_algorithms_server_to_client, # 服务器到客户端压缩算法列表：变长
         #[meta(len="languages_client_to_server")] be32(languages_client_to_server_len),  # 客户端到服务器语言列表长度：4字节
-        languages_client_to_server,                         # 客户端到服务器语言列表：变长
+        #[meta(bytes="languages_client_to_server_len")] languages_client_to_server, # 客户端到服务器语言列表：变长
         #[meta(len="languages_server_to_client")] be32(languages_server_to_client_len),  # 服务器到客户端语言列表长度：4字节
-        languages_server_to_client,                         # 服务器到客户端语言列表：变长
+        #[meta(bytes="languages_server_to_client_len")] languages_server_to_client, # 服务器到客户端语言列表：变长
         u8(first_kex_packet_follows),                       # 是否有第一个密钥交换包跟随：1字节
         be32(reserved)                                      # 保留字段：4字节
     )
@@ -167,10 +167,14 @@ func ssh_kexinit(cookie="", kex_algorithms="", server_host_key_algorithms="", en
 #[proto]
 func ssh_auth_request(user_name="root", service_name="ssh-connection", method_name="password", password="") -> bytes {
     concat(
-        string(user_name),                  # 用户名：字符串
-        string(service_name),               # 服务名：字符串
-        string(method_name),                # 认证方法：字符串
-        string(password)                    # 密码：字符串（仅 password 方法）
+        #[meta(len="user_name")] be32(user_name_len),    # 用户名长度：4字节
+        #[meta(rest="user_name")] user_name,              # 用户名：变长
+        #[meta(len="service_name")] be32(service_name_len), # 服务名长度：4字节
+        #[meta(rest="service_name")] service_name,        # 服务名：变长
+        #[meta(len="method_name")] be32(method_name_len), # 认证方法长度：4字节
+        #[meta(rest="method_name")] method_name,          # 认证方法：变长
+        #[meta(len="password")] be32(password_len),       # 密码长度：4字节
+        #[meta(rest="password")] password                 # 密码：变长
     )
 }
 
@@ -200,7 +204,8 @@ func ssh_auth_request(user_name="root", service_name="ssh-connection", method_na
 #[proto]
 func ssh_channel_open(channel_type="session", sender_channel=0, initial_window_size=2097152, maximum_packet_size=32768) -> bytes {
     concat(
-        string(channel_type),               # 通道类型：字符串
+        #[meta(len="channel_type")] be32(channel_type_len), # 通道类型长度：4字节
+        #[meta(rest="channel_type")] channel_type,          # 通道类型：变长
         be32(sender_channel),               # 发送方通道号：4字节
         be32(initial_window_size),          # 初始窗口大小：4字节
         be32(maximum_packet_size)           # 最大包大小：4字节
@@ -222,7 +227,8 @@ func ssh_channel_open(channel_type="session", sender_channel=0, initial_window_s
 func ssh_channel_data(recipient_channel=0, data="") -> bytes {
     concat(
         be32(recipient_channel),            # 接收方通道号：4字节
-        string(data)                        # 数据：字符串
+        #[meta(len="data")] be32(data_len), # 数据长度：4字节
+        #[meta(rest="data")] data           # 数据：变长
     )
 }
 

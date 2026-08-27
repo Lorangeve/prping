@@ -1,0 +1,146 @@
+# eng_lib/igmp.pkt —— IGMP 协议定义（RFC 3376）
+#
+# IGMP (Internet Group Management Protocol) 是组播组管理协议。
+# 本文件定义 IGMP 协议的消息结构，用于学习和调试组播通信。
+#
+# IGMP 工作原理：
+#   - 主机通过 IGMP 消息加入或离开组播组
+#   - 路由器通过 IGMP 消息查询组成员状态
+#   - 用于支持 IP 组播（一对多通信）
+
+# IGMPv3 查询消息（RFC 3376 §4.1）
+# ── IGMPv3 查询结构 ─────────────────────────────────────────────────────────
+# 路由器发送查询消息，了解组成员状态：
+#   - 类型：0x11（查询）
+#   - 最大响应时间：100ms 为单位
+#   - 校验和：整个 IGMP 消息的校验和
+#   - 组地址：要查询的组播组地址（全零表示所有组）
+#   - S 标志：抑制路由器端处理
+#   - QRV：健壮性变量
+#   - QQIC：查询间隔
+#   - 源地址数量：查询中包含的源地址数量
+#   - 源地址列表：要查询的源地址
+# ───────────────────────────────────────────────────────────────────────────────
+# @param type: 消息类型（1字节）
+#              0x11 = 成员查询（Membership Query）
+#              0x12 = IGMPv1 成员报告（已废弃）
+#              0x16 = IGMPv2 成员报告
+#              0x17 = IGMPv2 离开组
+#              0x22 = IGMPv3 成员报告
+# @param max_resp_time: 最大响应时间（1字节）
+#                       单位：100 毫秒
+#                       例如：100 = 10 秒
+#                       0 = 查询所有组
+# @param checksum: 校验和（2字节，大端序）
+#                  整个 IGMP 消息的校验和
+# @param group_address: 组地址（4字节）
+#                       要查询的组播组地址
+#                       0.0.0.0 = 查询所有组
+# @param s_flag: 抑制标志（1位）
+#                0 = 正常处理
+#                1 = 抑制路由器端处理
+# @param qrv: 健壮性变量（3位）
+#             0 = 使用默认值
+#             1-7 = 健壮性变量值
+# @param qqic: 查询间隔（1字节）
+#              查询消息的发送间隔（秒）
+# @param src_count: 源地址数量（2字节，大端序）
+#                   查询中包含的源地址数量
+# @param src_addresses: 源地址列表（变长，每项4字节）
+#                       要查询的源地址列表
+#                       空表示查询所有源
+# @auto: checksum 自动计算
+#[proto]
+func igmpv3_query(type=0x11, max_resp_time=100, group_address="0.0.0.0", s_flag=0, qrv=0, qqic=0, src_addresses="") -> bytes {
+    concat(
+        u8(type),                           # 消息类型：1字节
+        u8(max_resp_time),                  # 最大响应时间：1字节
+        #[meta(len="auto")] be16(checksum), # 校验和：2字节（自动计算）
+        ip4(group_address),                 # 组地址：4字节
+        u8(bor(shl(s_flag, 3), band(qrv, 0x07))),  # S标志+QRV：1字节
+        u8(qqic),                           # 查询间隔：1字节
+        be16(div(count(src_addresses), 4)),  # 源地址数量：2字节
+        #[meta(rest="src_addresses")] src_addresses  # 源地址列表：变长
+    )
+}
+
+# IGMPv3 报告消息（RFC 3376 §4.2）
+# ── IGMPv3 报告结构 ─────────────────────────────────────────────────────────
+# 主机发送报告消息，通知组成员状态：
+#   - 类型：0x22（报告）
+#   - 保留：必须为零
+#   - 校验和：整个 IGMP 消息的校验和
+#   - 组记录数量：报告中包含的组记录数量
+#   - 组记录列表：每个组记录包含组地址和源地址
+# ───────────────────────────────────────────────────────────────────────────────
+# @param type: 消息类型（1字节）
+#              0x22 = IGMPv3 成员报告
+# @param reserved: 保留字段（2字节）
+#                  必须为零
+# @param group_record_count: 组记录数量（2字节，大端序）
+#                            报告中包含的组记录数量
+# @param group_records: 组记录列表（变长）
+#                       每个组记录包含：
+#                       - 记录类型（1字节）
+#                       - 辅助数据长度（1字节）
+#                       - 源地址数量（2字节）
+#                       - 组地址（4字节）
+#                       - 源地址列表（变长）
+#                       - 辅助数据（变长）
+# @auto: checksum 自动计算
+#[proto]
+func igmpv3_report(type=0x22, group_records="") -> bytes {
+    concat(
+        u8(type),                           # 消息类型：1字节
+        be16(0),                            # 保留：2字节（必须为零）
+        #[meta(len="auto")] be16(checksum), # 校验和：2字节（自动计算）
+        be16(count(group_records)),         # 组记录数量：2字节
+        #[meta(rest="group_records")] group_records  # 组记录列表：变长
+    )
+}
+
+# IGMP 组记录（RFC 3376 §4.2.4）
+# ── 组记录结构 ──────────────────────────────────────────────────────────────
+# 每个组记录描述一个组播组的状态：
+#   - 记录类型：当前状态、过滤模式变化、源地址变化
+#   - 辅助数据长度：辅助数据的长度（通常为 0）
+#   - 源地址数量：源地址的数量
+#   - 组地址：组播组地址
+#   - 源地址列表：源地址列表
+#   - 辅助数据：附加数据（通常为空）
+# ───────────────────────────────────────────────────────────────────────────────
+# @param record_type: 记录类型（1字节）
+#                     1 = 当前状态记录（MODE_IS_INCLUDE）
+#                     2 = 当前状态记录（MODE_IS_EXCLUDE）
+#                     3 = 过滤模式变化记录（CHANGE_TO_INCLUDE_MODE）
+#                     4 = 过滤模式变化记录（CHANGE_TO_EXCLUDE_MODE）
+#                     5 = 源地址变化记录（ALLOW_NEW_SOURCES）
+#                     6 = 源地址变化记录（BLOCK_OLD_SOURCES）
+# @param aux_data_len: 辅助数据长度（1字节）
+#                      以 4 字节为单位
+#                      通常为 0
+# @param src_count: 源地址数量（2字节，大端序）
+#                   源地址的数量
+# @param group_address: 组地址（4字节）
+#                       组播组地址
+# @param src_addresses: 源地址列表（变长，每项4字节）
+#                       源地址列表
+# @param aux_data: 辅助数据（变长）
+#                  附加数据（通常为空）
+# @auto: 无自动字段
+#[proto]
+func igmp_group_record(record_type=1, aux_data_len=0, group_address="0.0.0.0", src_len=0, src_addresses="", aux_data="") -> bytes {
+    concat(
+        u8(record_type),                    # 记录类型：1字节
+        u8(aux_data_len),                   # 辅助数据长度：1字节
+        be16(div(count(src_addresses), 4)),  # 源地址数量：2字节
+        ip4(group_address),                 # 组地址：4字节
+        #[meta(bytes="src_len")] src_addresses,  # 源地址列表：变长
+        #[meta(rest="aux_data")] aux_data   # 辅助数据：变长
+    )
+}
+
+export:
+- igmpv3_query
+- igmpv3_report
+- igmp_group_record
