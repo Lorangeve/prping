@@ -67,13 +67,13 @@ func http_bytes(bytes) { layer("http", bytes) }
 # @auto: 原样字节，无自动字段
 func dns_bytes(bytes) { layer("dns", bytes) }
 
-# ── 字节构建值函数（引擎字节原语组合）───────────────────────
+# 字节构建值函数（引擎字节原语组合）
 
 # 随机 6 字节 MAC（构建期随机）：rand_bytes(6) 直接产出 6 随机字节；
 # tpl 的字节列表等宽直通 → 直接 mac(rand_mac()) 用（如随机源 MAC）
 func rand_mac() -> bytes { rand_bytes(6) }
 
-# ── 地址值函数（tpl 模板实现；原引擎 ip4/ip6/mac 值原语下沉至此）────────
+# 地址值函数（tpl 模板实现；原引擎 ip4/ip6/mac 值原语下沉至此）
 
 # IPv4 文本 → 4 字节（点分十进制）
 # @param s: "1.2.3.4" 或 4 字节列表（等宽直通）；域名需显式 dns()：ip4(dns("host"))
@@ -111,7 +111,7 @@ func len(x) -> int { count(raw(x)) }
 # cksum（RFC 1071 反码校验和）与 md5/sha1/sha256 摘要是引擎原语（值位置，
 # 输入字节列表或字符串），不再需要库层组合——见 `--eng --ls` 原语清单。
 
-# ── 协议标志位常量（引擎 tcpflags/ip4flags/arpop 原语下沉至此）──────
+# 协议标志位常量（引擎 tcpflags/ip4flags/arpop 原语下沉至此）
 # 组合用位运算原语：tcp(flags=bor(syn(), ack()))、ipv4(flags=bor(df(), mf()))；
 # 数字直写也可（u8/be16 直通）。doc 注释约定同 net.pkt。
 

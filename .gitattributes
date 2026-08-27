@@ -1,0 +1,4 @@
+# 所有 shell 脚本统一 LF 行尾：GitHub Actions Windows runner（Git for Windows
+# 默认 core.autocrlf=true）检出会转 CRLF，破坏 shebang 与 awk/grep 锚点匹配
+# （如 CI 中 `just lint` 调用的 doc-sync-check.sh）。
+*.sh text eol=lf

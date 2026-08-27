@@ -10,12 +10,11 @@
 #   - 可靠传输：基于 TCP（端口 179）
 
 # BGP 头部（RFC 4271 §4.1）
-# ── BGP 头部结构 ────────────────────────────────────────────────────────────
+# BGP 头部结构
 # 所有 BGP 消息都包含相同的头部：
 #   - 标记：16 字节全 1（用于同步和认证）
 #   - 长度：整个 BGP 消息的长度（字节）
 #   - 类型：消息类型（OPEN, UPDATE, NOTIFICATION, KEEPALIVE）
-# ───────────────────────────────────────────────────────────────────────────────
 # @param marker: 标记（16字节）
 #                通常为全 1（0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF）
 #                用于同步和认证
@@ -40,7 +39,7 @@ func bgp_header(type=1, data="") -> bytes {
 }
 
 # BGP OPEN 消息（RFC 4271 §4.2）
-# ── BGP OPEN 结构 ───────────────────────────────────────────────────────────
+# BGP OPEN 结构
 # OPEN 消息用于建立 BGP 连接：
 #   - 版本：BGP 版本号（4 = BGP-4）
 #   - My AS：发送方的 AS 号
@@ -48,7 +47,6 @@ func bgp_header(type=1, data="") -> bytes {
 #   - BGP Identifier：BGP 标识符（通常是路由器 ID）
 #   - Opt Parm Len：可选参数长度
 #   - Optional Parameters：可选参数（如认证、能力）
-# ───────────────────────────────────────────────────────────────────────────────
 # @param version: BGP 版本（1字节）
 #                 4 = BGP-4（当前版本）
 # @param my_as: 我的 AS 号（2字节，大端序）
@@ -78,14 +76,13 @@ func bgp_open(version=4, my_as=0, hold_time=180, bgp_identifier="0.0.0.0", opt_p
 }
 
 # BGP UPDATE 消息（RFC 4271 §4.3）
-# ── BGP UPDATE 结构 ─────────────────────────────────────────────────────────
+# BGP UPDATE 结构
 # UPDATE 消息用于更新路由信息：
 #   - Withdrawn Routes Length：撤回路由的长度
 #   - Withdrawn Routes：撤回的路由列表
 #   - Path Attributes Length：路径属性的长度
 #   - Path Attributes：路径属性列表
 #   - NLRI：网络层可达性信息（新的路由）
-# ───────────────────────────────────────────────────────────────────────────────
 # @param withdrawn_routes_len: 撤回路由长度（2字节，大端序）
 #                              撤回路由的总长度（字节）
 # @param withdrawn_routes: 撤回路由列表（变长）
@@ -115,12 +112,11 @@ func bgp_update(withdrawn_routes_len=0, withdrawn_routes="", path_attributes_len
 }
 
 # BGP NOTIFICATION 消息（RFC 4271 §4.4）
-# ── BGP NOTIFICATION 结构 ───────────────────────────────────────────────────
+# BGP NOTIFICATION 结构
 # NOTIFICATION 消息用于通知错误并关闭连接：
 #   - Error Code：错误代码
 #   - Error Subcode：错误子代码
 #   - Data：错误数据（可选）
-# ───────────────────────────────────────────────────────────────────────────────
 # @param error_code: 错误代码（1字节）
 #                    1 = 消息头错误
 #                    2 = OPEN 消息错误
@@ -166,11 +162,10 @@ func bgp_notification(error_code=1, error_subcode=0, data="") -> bytes {
 }
 
 # BGP KEEPALIVE 消息（RFC 4271 §4.4）
-# ── BGP KEEPALIVE 结构 ──────────────────────────────────────────────────────
+# BGP KEEPALIVE 结构
 # KEEPALIVE 消息用于保持连接活跃：
 #   - 仅包含 BGP 头部（19字节）
 #   - 发送间隔：保持时间的 1/3
-# ───────────────────────────────────────────────────────────────────────────────
 # @auto: 无自动字段
 #[proto]
 func bgp_keepalive() -> bytes {

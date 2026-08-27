@@ -15,55 +15,63 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install just
+        uses: extractions/setup-just@v3
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
+      # 质量门禁统一走 justfile 配方（justfile 为唯一构建/检查入口）
       - name: Format check
-        run: cargo fmt --check
+        run: just fmt-check
 
-      - name: Clippy
-        run: cargo clippy --all-targets --workspace -- -D warnings
+      # lint = 原语文档同步门禁（doc-sync-check）+ clippy 零警告
+      - name: Lint
+        run: just lint
 
       - name: Docs
-        run: cargo doc --no-deps --workspace
+        run: just doc
 
       # --workspace --all-targets：core 单元 + bin + 集成测试 + doc 测试
       - name: All tests
-        run: cargo test --all-targets --workspace
+        run: just test
 
   bench:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install just
+        uses: extractions/setup-just@v3
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Build release
-        run: cargo build --release --workspace
+        run: just build-release
       # 基准非门禁：失败只告警不拦合并
       - name: Run benchmark
         continue-on-error: true
-        run: bash scripts/bench.sh target/release/prping
+        run: just bench
 
   win7-build:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install just
+        uses: extractions/setup-just@v3
       - name: Install nightly + rust-src
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
       - name: Install cargo-xwin
         run: cargo install cargo-xwin
-      # XWIN_ARCH 统一 x86,x86_64：cargo-xwin 默认只下载 x86_64+aarch64 库，
-      # 且 DONE 标记只记录最近一次架构，不统一指定会反复重下载
+      # 配方内置 XWIN_ARCH=x86,x86_64 与 Npcap SDK 自动拉取（windows-deps → fetch-npcap-sdk）
       - name: Build Win7 MSVC x64 (build-std)
-        run: XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
+        run: just build-win7
       - name: Build Win7 MSVC x86 (build-std)
-        run: XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target i686-win7-windows-msvc --release
+        run: just build-win7-32
       - name: Upload artifact (x64)
         uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,185 @@
+name: Release
+
+# 用 justfile 配方为各平台构建发布包（二进制 + eng_lib/lib/ + examples/，布局与
+# `just dist` 一致），打 v* tag 时自动发布到 GitHub Release；workflow_dispatch
+# 可手动构建并下载 artifacts。平台矩阵对应 CLAUDE.md「平台支持」表。
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # 创建 GitHub Release 需要
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    # 只在打 tag 或手动触发时构建（普通 push/PR 走 ci.yml）
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows 10+（本机 MSVC；xwin 交叉仅在 Linux 上需要）
+          - name: windows-x86_64
+            os: windows-latest
+            recipe: build-release
+            src_dir: target/release
+            bin: prping.exe
+            ext: zip
+          # macOS（本机；macos-13 = Intel x86_64，macos-14 = Apple Silicon arm64）
+          - name: macos-x86_64
+            os: macos-13
+            recipe: build-release
+            src_dir: target/release
+            bin: prping
+            ext: tar.gz
+          - name: macos-arm64
+            os: macos-14
+            recipe: build-release
+            src_dir: target/release
+            bin: prping
+            ext: tar.gz
+          # Linux 本机 + 交叉编译（apt 为链接所需交叉工具链，runners 未预装时自动安装）
+          - name: linux-x86_64
+            os: ubuntu-latest
+            recipe: build-release
+            src_dir: target/release
+            bin: prping
+            ext: tar.gz
+          - name: linux-i686
+            os: ubuntu-latest
+            recipe: build-linux-32
+            src_dir: target/i686-unknown-linux-gnu/release
+            bin: prping
+            ext: tar.gz
+            apt: gcc-multilib
+          - name: linux-armv7
+            os: ubuntu-latest
+            recipe: build-linux-arm
+            src_dir: target/armv7-unknown-linux-gnueabihf/release
+            bin: prping
+            ext: tar.gz
+            apt: gcc-arm-linux-gnueabihf
+          - name: linux-arm64
+            os: ubuntu-latest
+            recipe: build-linux-arm64
+            src_dir: target/aarch64-unknown-linux-gnu/release
+            bin: prping
+            ext: tar.gz
+            apt: gcc-aarch64-linux-gnu
+          # Windows 7（Linux 上 xwin 交叉；需 nightly + rust-src + cargo-xwin）
+          - name: win7-x64
+            os: ubuntu-latest
+            recipe: build-win7
+            src_dir: target/x86_64-win7-windows-msvc/release
+            bin: prping.exe
+            ext: zip
+            nightly: true
+            xwin: true
+          - name: win7-x86
+            os: ubuntu-latest
+            recipe: build-win7-32
+            src_dir: target/i686-win7-windows-msvc/release
+            bin: prping.exe
+            ext: zip
+            nightly: true
+            xwin: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install just
+        uses: extractions/setup-just@v3
+
+      - name: Install Rust (stable)
+        if: ${{ !matrix.nightly }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust (nightly + rust-src, Win7 build-std 用)
+        if: ${{ matrix.nightly }}
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install cargo-xwin (Win7 交叉编译)
+        if: ${{ matrix.xwin }}
+        run: cargo install cargo-xwin
+
+      - name: Install cross toolchain
+        if: ${{ matrix.apt }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+
+      # 构建走 just 配方；配方未内置 dist 的（build-release/build-linux-*）手动补跑，
+      # 使产物目录包含 lib/（eng_lib）与 examples/
+      - name: Build via just (${{ matrix.recipe }})
+        run: |
+          just ${{ matrix.recipe }}
+          just dist ${{ matrix.src_dir }}
+
+      - name: Package release archive
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -m1 '^version = ' crates/prping-cli/Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')"
+          NAME="prping-${VERSION}-${{ matrix.name }}"
+          STAGE="dist/${NAME}"
+          rm -rf "${STAGE}"
+          mkdir -p "${STAGE}"
+          cp "${{ matrix.src_dir }}/${{ matrix.bin }}" "${STAGE}/"
+          cp -r "${{ matrix.src_dir }}/lib" "${STAGE}/lib"
+          cp -r "${{ matrix.src_dir }}/examples" "${STAGE}/examples"
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            if [ "${RUNNER_OS}" = "Windows" ]; then
+              powershell -NoProfile -Command "Compress-Archive -Path 'dist/${NAME}' -DestinationPath 'dist/${NAME}.zip' -Force"
+            else
+              python3 -c "import shutil; shutil.make_archive('dist/${NAME}', 'zip', 'dist', '${NAME}')"
+            fi
+          else
+            tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+          fi
+          echo "packaged dist/${NAME}.${{ matrix.ext }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/prping-*.${{ matrix.ext }}
+          if-no-files-found: error
+
+  # 打 tag 时把各平台产物汇总发布到 GitHub Release（workflow_dispatch 仅留 artifacts）
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "prping $GITHUB_REF_NAME" \
+            --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber

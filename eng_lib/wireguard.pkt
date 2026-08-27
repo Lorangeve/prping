@@ -13,7 +13,7 @@
 #   - 类型 4：传输数据（双向）
 
 # WireGuard 握手初始化（类型 1）
-# ── WireHandshakeInitiation 结构 ─────────────────────────────────────────────
+# WireHandshakeInitiation 结构
 # 握手初始化消息，发起方发送：
 #   - 消息类型：1
 #   - 发送方索引：随机数，用于标识会话
@@ -22,7 +22,6 @@
 #   - 发送方临时公钥：32 字节，Curve25519 公钥
 #   - 加载的预共享密钥：32 字节，Poly1305 认证标签
 #   - 时间戳：12 字节，ChaCha20-Poly1305 加密的时间戳
-# ───────────────────────────────────────────────────────────────────────────────
 # @param message_type: 消息类型（4字节，大端序）
 #                      固定为 1
 # @param sender_index: 发送方索引（4字节，大端序）
@@ -52,7 +51,7 @@ func wireguard_handshake_initiation(message_type=1, sender_index=0, random=pad(3
 }
 
 # WireGuard 握手响应（类型 2）
-# ── WireHandshakeResponse 结构 ──────────────────────────────────────────────
+# WireHandshakeResponse 结构
 # 握手响应消息，响应方发送：
 #   - 消息类型：2
 #   - 发送方索引：响应方的随机数
@@ -60,7 +59,6 @@ func wireguard_handshake_initiation(message_type=1, sender_index=0, random=pad(3
 #   - 随机数：32 字节，防止重放
 #   - 发送方临时公钥：32 字节，Curve25519 公钥
 #   - 加密的空数据：16 字节，Poly1305 认证标签
-# ───────────────────────────────────────────────────────────────────────────────
 # @param message_type: 消息类型（4字节，大端序）
 #                      固定为 2
 # @param sender_index: 发送方索引（4字节，大端序）
@@ -87,13 +85,12 @@ func wireguard_handshake_response(message_type=2, sender_index=0, receiver_index
 }
 
 # WireGuard 传输数据（类型 4）
-# ── WireTransportData 结构 ──────────────────────────────────────────────────
+# WireTransportData 结构
 # 传输数据消息，双向发送：
 #   - 消息类型：4
 #   - 接收方索引：对方的随机数
 #   - 随机数：8 字节，ChaCha20 随机数
 #   - 加密数据：变长，ChaCha20-Poly1305 加密的载荷
-# ───────────────────────────────────────────────────────────────────────────────
 # @param message_type: 消息类型（4字节，大端序）
 #                      固定为 4
 # @param receiver_index: 接收方索引（4字节，大端序）

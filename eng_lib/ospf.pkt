@@ -11,7 +11,7 @@
 #   - 支持认证：明文和 MD5 认证
 
 # OSPF 头部（RFC 2328 §A.3.1）
-# ── OSPF 头部结构 ───────────────────────────────────────────────────────────
+# OSPF 头部结构
 # 所有 OSPF 消息都包含相同的头部：
 #   - 版本：OSPF 版本号（2 = OSPFv2, 3 = OSPFv3）
 #   - 类型：消息类型（Hello, DB Description, LS Request, LS Update, LS Ack）
@@ -21,7 +21,6 @@
 #   - 校验和：整个消息的校验和（不含认证字段）
 #   - 认证类型：认证类型（0=无, 1=明文, 2=MD5）
 #   - 认证：认证数据（可变长度）
-# ───────────────────────────────────────────────────────────────────────────────
 # @param version: OSPF 版本（1字节）
 #                 2 = OSPFv2（IPv4）
 #                 3 = OSPFv3（IPv6）
@@ -63,7 +62,7 @@ func ospf_header(version=2, type=1, router_id="0.0.0.0", area_id="0.0.0.0", auth
 }
 
 # OSPF Hello 消息（RFC 2328 §A.3.2）
-# ── OSPF Hello 结构 ─────────────────────────────────────────────────────────
+# OSPF Hello 结构
 # Hello 消息用于发现和维护邻居关系：
 #   - 网络掩码：发送接口的网络掩码
 #   - Hello 间隔：发送 Hello 消息的间隔（秒）
@@ -72,7 +71,6 @@ func ospf_header(version=2, type=1, router_id="0.0.0.0", area_id="0.0.0.0", auth
 #   - 指定路由器：DR 的路由器 ID
 #   - 备份指定路由器：BDR 的路由器 ID
 #   - 邻居列表：最近收到 Hello 消息的邻居列表
-# ───────────────────────────────────────────────────────────────────────────────
 # @param network_mask: 网络掩码（4字节）
 #                      发送接口的网络掩码
 # @param hello_interval: Hello 间隔（2字节，大端序）
@@ -107,14 +105,13 @@ func ospf_hello(network_mask="255.255.255.0", hello_interval=10, options=0, rout
 }
 
 # OSPF Database Description 消息（RFC 2328 §A.3.3）
-# ── OSPF Database Description 结构 ──────────────────────────────────────────
+# OSPF Database Description 结构
 # Database Description 消息用于交换链路状态数据库摘要：
 #   - 接口 MTU：接口的最大传输单元
 #   - 选项：OSPF 选项位
 #   - 标志位：I（初始）、M（更多）、MS（主/从）
 #   - DD 序列号：用于同步数据库描述交换
 #   - LSA 头部：链路状态通告头部列表
-# ───────────────────────────────────────────────────────────────────────────────
 # @param interface_mtu: 接口 MTU（2字节，大端序）
 #                       接口的最大传输单元（字节）
 #                       通常为 1500（以太网）
@@ -141,10 +138,9 @@ func ospf_database_description(interface_mtu=1500, options=0, flags=0, dd_sequen
 }
 
 # OSPF Link State Request 消息（RFC 2328 §A.3.4）
-# ── OSPF Link State Request 结构 ────────────────────────────────────────────
+# OSPF Link State Request 结构
 # Link State Request 消息用于请求特定的链路状态通告：
 #   - 请求列表：每个请求包含 LS 类型、LS ID、通告路由器
-# ───────────────────────────────────────────────────────────────────────────────
 # @param requests: 请求列表（变长）
 #                  每个请求包含：
 #                  - LS 类型（4字节）：链路状态类型
@@ -159,11 +155,10 @@ func ospf_link_state_request(requests="") -> bytes {
 }
 
 # OSPF Link State Update 消息（RFC 2328 §A.3.5）
-# ── OSPF Link State Update 结构 ─────────────────────────────────────────────
+# OSPF Link State Update 结构
 # Link State Update 消息用于广播链路状态通告：
 #   - LSA 数量：消息中包含的 LSA 数量
 #   - LSA 列表：链路状态通告列表
-# ───────────────────────────────────────────────────────────────────────────────
 # @param lsa_count: LSA 数量（4字节，大端序）
 #                   消息中包含的 LSA 数量
 # @param lsas: LSA 列表（变长）
@@ -178,10 +173,9 @@ func ospf_link_state_update(lsa_count=0, lsas="") -> bytes {
 }
 
 # OSPF Link State Acknowledgment 消息（RFC 2328 §A.3.6）
-# ── OSPF Link State Acknowledgment 结构 ─────────────────────────────────────
+# OSPF Link State Acknowledgment 结构
 # Link State Acknowledgment 消息用于确认收到的 LSA：
 #   - LSA 头部列表：确认的 LSA 头部列表
-# ───────────────────────────────────────────────────────────────────────────────
 # @param lsa_headers: LSA 头部列表（变长）
 #                     确认的 LSA 头部列表
 # @auto: 无自动字段
