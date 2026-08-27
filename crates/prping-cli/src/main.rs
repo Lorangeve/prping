@@ -1732,11 +1732,22 @@ mod tests {
         let p = dir.join("named.pktl");
         assert_eq!(resolve_pktl_arg(&p).unwrap(), p);
 
-        // 4. 两者都不存在 → 报错，消息带两条候选路径
+        // 4. 两者都不存在 → 报错，消息带两条候选路径（跨平台：用 Path 分隔符断言）
         let err = resolve_pktl_arg(&dir.join("missing")).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("missing.pktl"), "{msg}");
-        assert!(msg.contains("missing/missing.pktl"), "{msg}");
+        assert!(
+            msg.contains(dir.join("missing.pktl").to_string_lossy().as_ref()),
+            "{msg}"
+        );
+        assert!(
+            msg.contains(
+                dir.join("missing")
+                    .join("missing.pktl")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "{msg}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
