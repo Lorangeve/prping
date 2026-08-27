@@ -43,3 +43,15 @@ rustflags = [
     "-C", "link-arg=/DELAYLOAD:wpcap.dll",
     "-C", "link-arg=delayimp.lib",
 ]
+
+# ── Linux 交叉编译链接器 ─────────────────────────────────────
+# rustc 1.9x 对 armv7/aarch64 的默认 linker 是**宿主 `cc`**（不带交叉语义），
+# 交叉链接会因架构不符报 `incompatible with elf64-x86-64`——必须指定目标 gcc。
+# i686 无需配置：rustc 自动加 `-m32`，宿主 `cc` + gcc-multilib 即可（见 justfile）。
+# 依赖：armv7 需 gcc-arm-linux-gnueabihf、aarch64 需 gcc-aarch64-linux-gnu。
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
