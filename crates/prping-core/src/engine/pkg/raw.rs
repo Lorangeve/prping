@@ -11,16 +11,16 @@ use super::SendOutcome;
 use super::sniffer::SnifferMatcher;
 
 // 以下仅 Linux/IPPROTO_RAW 路径使用（Windows/macOS/Linux+feature=pcap 走 rawpcap）
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+use super::icmp_echo_ids;
+#[cfg(target_os = "linux")]
+use super::{Reply, match_reply};
+#[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
+use packet_dsl::ir::Layer;
 #[cfg(not(windows))]
 use std::io;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
-#[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
-use packet_dsl::ir::Layer;
-#[cfg(target_os = "linux")]
-use super::{Reply, match_reply};
-#[cfg(all(target_os = "linux", not(feature = "pcap")))]
-use super::icmp_echo_ids;
 
 pub(crate) fn send_raw_bytes(
     bytes: &[u8],

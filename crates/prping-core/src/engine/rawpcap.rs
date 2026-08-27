@@ -714,7 +714,10 @@ fn macos_resolve_dst_mac(target: Ipv4Addr, iface: &str) -> anyhow::Result<[u8; 6
     // 4. 兜底：广播 MAC
     let _ = crate::output::writeln_orange(
         &mut crate::output::stderr(),
-        format!("{}ARP 解析 {target} 失败（接口 {iface}），使用广播 MAC 兜底", indent(1)),
+        format!(
+            "{}ARP 解析 {target} 失败（接口 {iface}），使用广播 MAC 兜底",
+            indent(1)
+        ),
     );
     Ok([0xff; 6])
 }

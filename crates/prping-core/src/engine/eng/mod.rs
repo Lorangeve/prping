@@ -437,7 +437,10 @@ pub fn ls_builtins(libs: &[PathBuf]) -> anyhow::Result<()> {
                         writeln!(&mut w)?;
                     }
                 }
-                print_dim(&mut w, format!("{}[{}] 库函数（隐式可见）", indent(2), e.module))?;
+                print_dim(
+                    &mut w,
+                    format!("{}[{}] 库函数（隐式可见）", indent(2), e.module),
+                )?;
                 writeln!(&mut w)?;
             }
         }
@@ -631,7 +634,10 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                         .join(", ")
                 )
             };
-            print_dim(&mut w, format!("{}- {name} ({def}; {step_desc})", indent(1)))?;
+            print_dim(
+                &mut w,
+                format!("{}- {name} ({def}; {step_desc})", indent(1)),
+            )?;
             writeln!(&mut w)?;
         }
         writeln!(&mut w)?;

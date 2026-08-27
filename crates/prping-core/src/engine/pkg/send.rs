@@ -253,7 +253,10 @@ pub(crate) fn send_module(
             if extracted.is_none() && !raw_sendable_outer {
                 skipped += 1;
                 if !opts.summary {
-                    crate::output::print_yellow(w, format!("{}{}", indent(1), t!("engine.note_bare_export")))?;
+                    crate::output::print_yellow(
+                        w,
+                        format!("{}{}", indent(1), t!("engine.note_bare_export")),
+                    )?;
                     writeln!(w)?;
                     writeln!(w)?;
                 }
@@ -261,7 +264,10 @@ pub(crate) fn send_module(
             }
             let is_raw = matches!(opts.mode, SendMode::Raw { .. }) || extracted.is_none();
             if !opts.summary && extracted.is_none() && !matches!(opts.mode, SendMode::Raw { .. }) {
-                crate::output::print_yellow(w, format!("{}{}", indent(1), t!("engine.note_raw_fallback")))?;
+                crate::output::print_yellow(
+                    w,
+                    format!("{}{}", indent(1), t!("engine.note_raw_fallback")),
+                )?;
                 writeln!(w)?;
             }
             // 目标：显式指定 > 包内 IP 层 dst 推导；raw 链路层帧（eth 外层、无 IP 层可
@@ -372,7 +378,10 @@ pub(crate) fn send_module(
                         )?;
                         writeln!(w)?;
                     } else {
-                        print_dim(w, format!("{}{}", indent(1), t!("engine.note_src_filled", ip = ip)))?;
+                        print_dim(
+                            w,
+                            format!("{}{}", indent(1), t!("engine.note_src_filled", ip = ip)),
+                        )?;
                         writeln!(w)?;
                     }
                 } else if src_warn {

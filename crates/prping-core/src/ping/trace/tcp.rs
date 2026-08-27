@@ -8,13 +8,13 @@ use super::{Hop, PingConfig};
 
 // 以下仅 Unix raw TCP 路径使用（Windows 的 trace_tcp 直接报错不支持）
 #[cfg(unix)]
-use std::mem::MaybeUninit;
-#[cfg(unix)]
-use std::time::{Duration, Instant};
-#[cfg(unix)]
 use super::{PROBE_TIMEOUT, PROBES_PER_HOP, finish_hop};
 #[cfg(unix)]
 use crate::util;
+#[cfg(unix)]
+use std::mem::MaybeUninit;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 /// TCP SYN 探测源端口范围（避免与 IPv6 version nibble 冲突）。
 #[cfg(unix)]

@@ -23,9 +23,7 @@ pub use net::{
 // icmp_offset_v4 仅 raw 收包路径用（Windows ping 走 ICMP.DLL，不解析外层 IP 头）
 #[cfg(not(windows))]
 pub(crate) use socket::icmp_offset_v4;
-pub use socket::{
-    create_icmp_socket, create_udp_socket, raw_socket_error, set_ttl,
-};
+pub use socket::{create_icmp_socket, create_udp_socket, raw_socket_error, set_ttl};
 // raw TCP socket 仅 `trace --tcp` 用（Windows 不支持 raw TCP）
 #[cfg(unix)]
 pub use socket::create_tcp_socket;

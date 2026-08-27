@@ -118,7 +118,11 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
                 format!("{}payload={mid:>5} → {}", output::indent(1), t!("mtu.ok"))
             } else {
                 match reported {
-                    Some(m) => format!("{}payload={mid:>5} → {} (mtu={m})", output::indent(1), t!("mtu.frag")),
+                    Some(m) => format!(
+                        "{}payload={mid:>5} → {} (mtu={m})",
+                        output::indent(1),
+                        t!("mtu.frag")
+                    ),
                     None => format!("{}payload={mid:>5} → {}", output::indent(1), t!("mtu.fail")),
                 }
             };
@@ -166,7 +170,11 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
             )
         );
         if let Some(m) = report.frag_needed_mtu {
-            println!("{}{}", output::indent(1), t!("mtu.frag_needed_mtu", mtu = m));
+            println!(
+                "{}{}",
+                output::indent(1),
+                t!("mtu.frag_needed_mtu", mtu = m)
+            );
         }
         for n in &report.notes {
             output::print_dim(&mut w, format!("{}{n}", output::indent(1)))?;

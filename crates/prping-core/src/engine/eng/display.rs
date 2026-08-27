@@ -297,7 +297,10 @@ pub fn render_dissected<W: WriteColor>(
         writeln!(w)?;
     }
     if !report.remaining.is_empty() {
-        print_dim(w, format!("{}remaining: {} B", spaces(2), report.remaining.len()))?;
+        print_dim(
+            w,
+            format!("{}remaining: {} B", spaces(2), report.remaining.len()),
+        )?;
         writeln!(w)?;
     }
     // hexdump 放在最后
@@ -880,7 +883,12 @@ pub(crate) fn render_module_header<W: WriteColor>(
                 .collect();
             print_dim(
                 w,
-                format!("{}- match {}({})", spaces(2), clause.layer, fields.join(", ")),
+                format!(
+                    "{}- match {}({})",
+                    spaces(2),
+                    clause.layer,
+                    fields.join(", ")
+                ),
             )?;
             writeln!(w)?;
         }
@@ -964,9 +972,6 @@ mod tests {
         let mut w = Buf(Vec::new());
         render_dissected(&mut w, &report, "  frame:", &frame).unwrap();
         let out = String::from_utf8(w.0).unwrap();
-        assert!(
-            out.starts_with("  frame:"),
-            "非空标题行应保留：{out:?}"
-        );
+        assert!(out.starts_with("  frame:"), "非空标题行应保留：{out:?}");
     }
 }

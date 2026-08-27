@@ -702,11 +702,20 @@ fn render_summary(path: &Path, opts: &ConvertOptions, report: &ConvertReport, ou
     for ro in out {
         let _ = print_dim(
             &mut w,
-            format!("{}{}  ({} {} B)", indent(1), ro.file.display(), ro.mode, ro.len),
+            format!(
+                "{}{}  ({} {} B)",
+                indent(1),
+                ro.file.display(),
+                ro.mode,
+                ro.len
+            ),
         );
         let _ = writeln!(&mut w);
     }
-    let _ = print_dim(&mut w, format!("{}recipe: {}", indent(1), report.recipe.display()));
+    let _ = print_dim(
+        &mut w,
+        format!("{}recipe: {}", indent(1), report.recipe.display()),
+    );
     let _ = writeln!(&mut w);
 }
 
