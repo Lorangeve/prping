@@ -145,6 +145,8 @@ errors:
   conflict_json_graph: "--json 与 -g/--graph 不能同时使用"
   conflict_json_histogram: "--json 与 -H/--histogram 不能同时使用"
   receive_requires_latency_bandwidth: "-r 需要配合 -b（带宽测试）或 -l + HOST:PORT（延迟测试）使用"
+  capture_all_requires_verbose: "--capture-all 需要配合 --verbose 使用"
+  filter_requires_capture_all: "--filter 需要配合 --capture-all 使用"
   lib_requires_eng_pkg: "--lib 需要 --eng 或 --pkt"
   ambiguous_prefix: "子命令前缀 '%{token}' 有歧义：可匹配 %{candidates}"
   legacy_host_hint: "无法识别的子命令 '%{host}' — prping 现在使用子命令；试试: prping ping %{host}（迁移指南: prping document）"
@@ -215,6 +217,8 @@ help:
     pretty: 用 ploot 渲染图表（Unicode/Braille）
     graph: 显示延迟时间线图（配合 -p 用 ploot 渲染）
     verbose: 详细模式：打印每个收到的数据包的解析详情（反解层栈 + hexdump）
+    capture_all: 抓取并显示所有可见帧（ARP/ICMP/广播/出向），而不只是发往监听端口的流量（需 -v）
+    capture_filter: 只显示匹配该 tcpdump 风格表达式的帧（需 -a）：arp/icmp/tcp/udp/ip/ip6、port N、host IP、and/or/not、括号——另支持 eng_lib 可反解协议（如 dns/http/quic_initial）。如 "arp or icmp"、"tcp port 53"、"dns"
     version: 显示版本号
     help_pkg: 使用手册（分页）；--help-pkg 章节标题 跳转（编号或标题）
   usage_ping: 'prping ping [选项] <HOST[:PORT]>'
@@ -242,6 +246,7 @@ help:
   footer_server: |-
     示例:
       prping server 0.0.0.0:9000
+      prping server -a -v 0.0.0.0:9000  显示所有可见帧（ARP/ICMP/广播/出向）
   footer_trace: |-
     示例:
       prping trace 8.8.8.8                   ICMP echo 路由跟踪

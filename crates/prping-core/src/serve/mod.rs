@@ -39,7 +39,20 @@ struct ServerAgg {
 /// 无限运行直到 `set_interrupted(true)`（Ctrl+C 或测试注入），返回聚合报告。
 /// 连接日志直接打印到 stdout（语义化配色）。
 /// `verbose` 为 true 时，每个收发数据包打印 dissect 反解层栈 + hexdump。
-pub async fn serve(addr: SocketAddr, verbose: bool) -> Result<ServerReport, PrpingError> {
+/// `capture_all`（`-a`/`--capture-all`）使抓包不过滤，显示所有可见帧
+/// （ARP/ICMP/广播/组播/出向）。CLI 层校验要求显式配合 `-v`。
+/// `filter`（`--filter`，tcpdump 风格子集）只显示匹配表达式的帧，CLI 层
+/// 校验要求显式配合 `-a`；表达式非法返回错误。
+/// （lib 层仍做防御性归一：capture_all/filter 存在时强制 verbose 与全帧，
+/// 保证直接 API 调用方不会拿到「开了抓包却不反解」的无效组合。）
+pub async fn serve(
+    addr: SocketAddr,
+    verbose: bool,
+    capture_all: bool,
+    filter: Option<&str>,
+) -> Result<ServerReport, PrpingError> {
+    let verbose = verbose || capture_all || filter.is_some();
+    let capture_all = capture_all || filter.is_some();
     // verbose 模式需要 dissect 反解应用层（http/dns 等）：proto 注册表在
     // engine/packet 路径由 ensure_proto_registry 加载，服务端进程必须自己加载
     // （OnceLock 一次性；非 verbose 不加载，保持零开销）。
@@ -66,15 +79,24 @@ pub async fn serve(addr: SocketAddr, verbose: bool) -> Result<ServerReport, Prpi
     // 回退载荷级 dissect（Linux 需 root/cap_net_raw，Windows 需装 Npcap）。
     let mut capture_active = false;
     if verbose {
-        match capture::spawn(addr) {
-            capture::CaptureStatus::Active(devs) => {
+        match capture::spawn(addr, capture_all, filter) {
+            Ok(capture::CaptureStatus::Active(devs)) => {
                 capture_active = true;
                 println!(
                     "{}",
                     rust_i18n::t!("server.verbose_capture_active", devs = devs.join(", "))
                 );
+                if capture_all {
+                    println!("{}", rust_i18n::t!("server.capture_all_active"));
+                }
+                if let Some(f) = filter {
+                    println!(
+                        "{}",
+                        rust_i18n::t!("server.capture_filter_active", filter = f)
+                    );
+                }
             }
-            capture::CaptureStatus::Unavailable(reason) => {
+            Ok(capture::CaptureStatus::Unavailable(reason)) => {
                 let mut w = output::stderr();
                 let _ = output::writeln_orange(
                     &mut w,
@@ -86,6 +108,10 @@ pub async fn serve(addr: SocketAddr, verbose: bool) -> Result<ServerReport, Prpi
                     &mut w,
                     rust_i18n::t!("server.verbose_capture_macos_hint"),
                 );
+            }
+            Err(e) => {
+                // --filter 表达式非法：配置错误，直接终止而不是回退
+                return Err(anyhow::anyhow!("invalid capture filter: {e}").into());
             }
         }
     }

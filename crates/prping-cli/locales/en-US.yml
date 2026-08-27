@@ -145,6 +145,8 @@ errors:
   conflict_json_graph: "--json and -g/--graph cannot be used together"
   conflict_json_histogram: "--json and -H/--histogram cannot be used together"
   receive_requires_latency_bandwidth: "-r requires -b (bandwidth) or -l (latency) with HOST:PORT"
+  capture_all_requires_verbose: "--capture-all requires --verbose"
+  filter_requires_capture_all: "--filter requires --capture-all"
   lib_requires_eng_pkg: "--lib requires --eng or --pkt"
   ambiguous_prefix: "ambiguous subcommand prefix '%{token}': matches %{candidates}"
   legacy_host_hint: "unrecognized subcommand '%{host}' — prping now uses subcommands; try: prping ping %{host} (migration guide: prping document)"
@@ -217,6 +219,8 @@ help:
     pretty: Render graphs with ploot (Unicode/Braille)
     graph: Print latency timeline graph (combine with -p for ploot rendering)
     verbose: "Verbose mode: print parsed packet details (dissected layers + hexdump)"
+    capture_all: "Capture and show all visible frames (ARP/ICMP/broadcast/outgoing), not just traffic to the listening port (requires -v)"
+    capture_filter: "Show only frames matching this tcpdump-style expression (requires -a): arp/icmp/tcp/udp/ip/ip6, port N, host IP, and/or/not, parentheses — plus eng_lib dissectable protocols (e.g. dns/http/quic_initial). Examples: \"arp or icmp\", \"tcp port 53\", \"dns\""
     version: Show version
     help_pkg: Full manual (paged); --help-pkg SECTION jumps to a chapter (number or title)
   usage_ping: 'prping ping [OPTIONS] <HOST[:PORT]>'
@@ -244,6 +248,7 @@ help:
   footer_server: |-
     Example:
       prping server 0.0.0.0:9000
+      prping server -a -v 0.0.0.0:9000  show all visible frames (ARP/ICMP/broadcast/outgoing)
   footer_trace: |-
     Examples:
       prping trace 8.8.8.8                   ICMP echo traceroute

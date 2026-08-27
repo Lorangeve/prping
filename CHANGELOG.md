@@ -6,6 +6,17 @@
 
 ### 新增
 
+- 服务端 `server -a`/`--capture-all` 全帧抓包：不做「目的端口 == 监听端口」过滤，显示网卡上所有可见帧
+  （ARP/ICMP/广播/组播/其他端口流量/出向回包，隐含 `-v`）；`[frame]` 摘要行对 ARP/ICMP 等非
+  TCP-UDP 帧也给出地址级摘要（`serve/capture.rs` 新增 `FrameSummary`，Linux/Windows/macOS 三平台
+  一致）；Linux 尽力开启混杂模式（需 CAP_NET_ADMIN，仅 cap_net_raw 时仍收本机地址/广播/组播帧）
+- 服务端 `server --filter "表达式"`：tcpdump 风格子集过滤器（隐含 `-a`），只显示匹配帧——协议
+  `arp`/`icmp`/`icmp6`/`tcp`/`udp`/`ip`/`ip6`、`port N`/`src port`/`dst port`、`host IP`/`src host`/
+  `dst host`（ARP 按 spa/tpa）、`and`/`or`/`not` + 括号（`and` 优先）；表达式非法报错退出，
+  三平台一致（`serve/capture.rs` 纯解析/匹配，不依赖 BPF 编译）；**所有协议令牌按注册表
+  （dissect）匹配**——内置 arp/icmp/icmp6/tcp/udp/ip/ip6 归一化为反解层名，加固定层
+  eth/ipv4/ipv6/http/dns/raw 与声明了 `#[rule]` 的 eng_lib 协议（如 dns/http/quic_initial），
+  port/host 限定取自反解层（`--filter "dns"` 只显示 DNS 帧）；注册表缺失时报错
 - pcap → .pkt/.pktl 转码（`engine --pcap FILE.pcap --to-pkt DIR`，`--out` 的逆操作）：每条记录生成
   一个 `record_%05d.pkt`（按原始序号命名）+ 一个 `.pktl` 配方按序引用全部 `.pkt`；缺省**无损字节级**
   （整帧/整包 `layer("eth"/"ipv4"/"ipv6", hex(...))` 或 `raw(bytes=hex(...))` 直喂，字节 100%
@@ -90,6 +101,13 @@
 - 服务端 1ms echo 超时导致跨网络延迟测试失真 → 100ms + 排空模式
 - 静默忽略的参数（`-r` 普通 ping、`-b -u -P`）现在明确提示
 - 本地快测时服务端聚合吞吐显示 0.00 → 微秒精度
+
+### 变更
+
+- 服务端抓包选项改为**显式依赖链**（不再隐含开启）：`-a`/`--capture-all` 必须配合 `-v`/`--verbose`，
+  `--filter` 必须配合 `-a`——缺前置标志直接报错退出（`-a` 单独用报
+  「`--capture-all` 需要配合 `--verbose` 使用」，`--filter` 单独用报
+  「`--filter` 需要配合 `--capture-all` 使用」）；三个标志原样传给 `serve`，lib 层保留防御性归一
 
 ### 重构
 

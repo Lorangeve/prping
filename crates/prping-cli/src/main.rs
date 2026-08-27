@@ -188,6 +188,10 @@ struct BandwidthArgs {
 /// server 子命令（同时服务 latency/bandwidth/接收模式）
 struct ServerArgs {
     verbose: bool,
+    /// 全帧抓包：显示所有可见帧（ARP/ICMP/广播/出向），需显式配合 -v
+    capture_all: bool,
+    /// --filter 表达式（tcpdump 风格子集），需显式配合 -a
+    filter: Option<String>,
     lang: Option<String>,
     addr: String,
 }
@@ -373,6 +377,14 @@ fn server_cmd() -> impl Parser<Command> {
             .short('v')
             .switch()
             .help(t!("help.options.verbose").as_ref())),
+        capture_all(long("capture-all")
+            .short('a')
+            .switch()
+            .help(t!("help.options.capture_all").as_ref())),
+        filter(long("filter")
+            .help(t!("help.options.capture_filter").as_ref())
+            .argument::<String>("EXPR")
+            .optional()),
         lang(opt_lang()),
         addr(positional::<String>("ADDR:PORT")),
     })
@@ -639,6 +651,18 @@ fn validate_bandwidth(_a: &BandwidthArgs) -> Option<String> {
     None
 }
 
+/// server 依赖链校验：--capture-all 需显式 --verbose；--filter 需显式
+/// --capture-all（不隐含开启，缺前置标志直接报错）。
+fn validate_server(a: &ServerArgs) -> Option<String> {
+    if a.capture_all && !a.verbose {
+        return Some(t!("errors.capture_all_requires_verbose").to_string());
+    }
+    if a.filter.is_some() && !a.capture_all {
+        return Some(t!("errors.filter_requires_capture_all").to_string());
+    }
+    None
+}
+
 /// 非法 -H 解析（-n 的非法值在 parse_count 路径报错；-H 返回 None 时这里报错）。
 fn bad_histogram(histogram: &Option<String>) -> Option<String> {
     let hist = histogram.as_deref().and_then(parse_histogram);
@@ -877,15 +901,22 @@ fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
 
 fn run_server(a: ServerArgs) -> anyhow::Result<()> {
     apply_lang(&a.lang);
+    if let Some(msg) = validate_server(&a) {
+        let mut w = stderr();
+        let _ = writeln_red(&mut w, format!("Error: {msg}"));
+        std::process::exit(1);
+    }
     let addr: SocketAddr = a
         .addr
         .parse()
         .map_err(|_| anyhow::anyhow!(t!("errors.invalid_bind", addr = a.addr.as_str())))?;
     println!("{}", t!("server.bandwidth_listening", addr = addr));
+    // 依赖链由 validate_server 保证（-a 需 -v、--filter 需 -a），
+    // 三个标志原样传给 serve，不再隐含开启。
     if a.verbose {
         println!("{}", t!("server.verbose_hint"));
     }
-    let report = smol::block_on(serve(addr, a.verbose))?;
+    let report = smol::block_on(serve(addr, a.verbose, a.capture_all, a.filter.as_deref()))?;
     println!(
         "{}",
         t!(
@@ -1646,6 +1677,33 @@ mod tests {
         let mut bad = base.clone();
         bad.threads = 2;
         assert!(validate_engine(&bad).is_err());
+    }
+
+    /// server 依赖链校验：--capture-all 需显式 --verbose；--filter 需显式
+    /// --capture-all（不隐含开启）。
+    #[test]
+    fn validate_server_dependencies() {
+        rust_i18n::set_locale("en-US");
+        let args = |verbose, capture_all, filter: Option<&str>| ServerArgs {
+            verbose,
+            capture_all,
+            filter: filter.map(String::from),
+            lang: None,
+            addr: "0.0.0.0:9000".to_string(),
+        };
+        // 合法组合：无标志 / 仅 -v / -v -a / -v -a --filter
+        assert!(validate_server(&args(false, false, None)).is_none());
+        assert!(validate_server(&args(true, false, None)).is_none());
+        assert!(validate_server(&args(true, true, None)).is_none());
+        assert!(validate_server(&args(true, true, Some("arp or icmp"))).is_none());
+        // -a 缺 -v → 报错
+        let msg = validate_server(&args(false, true, None)).unwrap();
+        assert!(msg.contains("--capture-all"), "{msg}");
+        // --filter 缺 -a（即使给了 -v）→ 报错
+        let msg = validate_server(&args(true, false, Some("tcp"))).unwrap();
+        assert!(msg.contains("--filter"), "{msg}");
+        let msg = validate_server(&args(false, false, Some("tcp"))).unwrap();
+        assert!(msg.contains("--filter"), "{msg}");
     }
 
     /// 无扩展名参数 → pktl 定位：先 `<arg>.pktl`，再 `<arg>/<basename>.pktl`；

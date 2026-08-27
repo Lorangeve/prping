@@ -12,7 +12,7 @@
   - **`lib.rs`** — 公开 API 入口 + `run()` 模式分派（ICMP/TCP/UDP/latency/bandwidth/MTU/traceroute）+ 核心类型（`OutcomeKind`/`BandwidthReport`/`PrpingWarning`/`PrpingError`）
   - **`serve/`** — TCP/UDP 服务端回显 + 接收模式触发协议
     - `mod.rs` — 服务端主循环（TCP 回显/接收 + UDP 回显/触发 + 并发控制 + verbose dissect）
-    - `capture.rs` — 服务端 verbose 完整帧抓包（AF_PACKET / Npcap / BPF，仅 serve 使用）
+    - `capture.rs` — 服务端 verbose 完整帧抓包（AF_PACKET / Npcap / BPF，仅 serve 使用）；`-a` 全帧模式不过滤，显示 ARP/ICMP/广播/出向等所有可见帧（Linux 按接口逐个开混杂，需 CAP_NET_ADMIN；lo 上 AF_PACKET 双投递出向+入向），摘要行支持非 TCP-UDP 帧；`--filter` tcpdump 风格子集表达式（所有协议令牌按注册表/dissect 匹配：内置 arp/icmp/icmp6/tcp/udp/ip/ip6 归一化为层名，加固定层 eth/ipv4/ipv6/http/dns/raw 或带 #[rule] 的如 dns/http/quic_initial；port/host 限定取自反解层；三平台一致）
   - **`ping/`** — 网络测量功能（ICMP/TCP/UDP ping、latency、bandwidth、MTU、traceroute）
     - `icmp.rs` — ICMP echo ping（raw socket + ICMP.DLL Windows 路径）；导出 `build_v4`/`build_v6`/`icmp_cksum` 供 MTU/trace 复用
     - `tcp.rs` / `udp.rs` — TCP connect / UDP echo ping
@@ -78,7 +78,7 @@
 prping ping HOST[:PORT]     ICMP ping（无端口）/ TCP ping（有端口）/ UDP（-u）/ MTU 探测（-m）
 prping latency [OPTIONS] HOST:PORT   Latency test（-l 缺省 64；-u UDP；-r 接收）
 prping bandwidth [OPTIONS] HOST:PORT Bandwidth test（-l 缺省 8k；--parallel 并发；-u/-r）
-prping server ADDR:PORT     Server（同时服务 latency/bandwidth）
+prping server ADDR:PORT     Server（同时服务 latency/bandwidth；-v 抓包 dissect；-a 全帧抓包显示所有可见帧，需显式 -v；--filter 表达式过滤帧，需显式 -a）
 prping trace [OPTIONS] HOST[:PORT] Traceroute（ICMP echo 默认；-t/--tcp 用 TCP SYN 需端口；-u/--udp 经典 UDP 33434 起递增；-m 最大跳数 / -d 免 DNS / --json）
 prping engine [OPTIONS] FILE.pkt|.pktl  引擎：分析/LSP/--ls/--hex/--pcap/配方概览（无扩展名参数自动定位 pktl：先 `<arg>.pktl`，再同名文件夹 `<arg>/<arg>.pktl`；--ls 自动分页）
 prping packet [OPTIONS] FILE.pkt|.pktl [HOST:PORT]  构建发送/配方执行（--raw/--wait/--fuzz/--out）
@@ -89,7 +89,8 @@ prping -s ADDR|IFACE ...    指定源地址/网卡（测量子命令内）
 每个子命令的选项集只含该模式生效的选项（结构性互斥）：ping 含 `-u/-l/-g/-p/-m`，
 latency 含 `-u/-l/-r/-g/-p`，bandwidth 含 `-u/-l/-r/--parallel`，trace 含 `-m/-d`，
 engine/packet 含引擎选项（`--lsp/--ls/--hex/--pcap` 互斥且不带文件；`--to-pkt/--structured/--skip/--limit` 需 `--pcap`；`--iface` 需 `--raw`）。
-`validate_*` 只留真校验：`--json`×`-p/-g/-H`、`-m`×其他 ping 选项、非法 `-H`/`-n`。
+`validate_*` 只留真校验：`--json`×`-p/-g/-H`、`-m`×其他 ping 选项、非法 `-H`/`-n`、
+server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 
 ## 功能完成度
 

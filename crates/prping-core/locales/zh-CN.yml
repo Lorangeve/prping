@@ -62,6 +62,8 @@ server:
   verbose_hint: '详细模式：将为每个收到的数据包打印反解层栈与 hexdump'
   verbose_dissect_unavailable: 'proto 注册表为空——抓到的帧只能显示 hexdump，无法反解层栈'
   verbose_capture_active: 'raw 抓包已启动（%{devs}）'
+  capture_all_active: '全帧抓包：显示所有可见帧（ARP/ICMP/广播/出向），而不只是发往本端口的流量'
+  capture_filter_active: '抓包过滤：%{filter}'
   verbose_capture_note: 'raw 抓包不可用（%{reason}）；回退显示载荷级反解'
   capture_iface_all: '全接口'
   capture_unsupported: '本平台不支持 raw 抓包（Linux AF_PACKET / Windows Npcap）'

@@ -339,6 +339,10 @@ at the same time.
 ```bash
 prping server 0.0.0.0:8080
 prping server [::]:8080             # IPv6
+prping server -v 0.0.0.0:8080       # verbose: capture and dissect every received packet
+prping server -v -a 0.0.0.0:8080    # full-frame capture: show all visible frames (requires -v)
+prping server -v -a --filter "arp or icmp" 0.0.0.0:8080   # full-frame capture + only ARP/ICMP
+prping server -v -a --filter "tcp port 53" 0.0.0.0:8080  # full-frame capture + only TCP port 53
 ```
 
 ### Notes
@@ -347,6 +351,38 @@ prping server [::]:8080             # IPv6
 - On Ctrl+C exit it prints aggregate statistics (connection count, bytes sent/received, etc.)
 - Cannot be combined with any client arguments (`-n/-i/-l/-b/-u/--parallel/-s/-m`, etc.)
 - Kept Win7-compatible on Windows
+- With `-v`, raw capture shows full frames (eth/IP/TCP headers + handshake). By default only
+  traffic to the listening port is shown (Linux needs root/cap_net_raw, Windows needs Npcap,
+  macOS needs root or ChmodBPF)
+- `-a`/`--capture-all` disables the port/address filter and shows every frame visible on the
+  interface — ARP, ICMP (e.g. pings to this host), broadcast/multicast, traffic to other ports,
+  and the server's own outgoing replies; the `[frame]` summary line also gives address-level
+  summaries for non-TCP/UDP frames. On Linux promiscuous mode is attempted best-effort
+  (needs CAP_NET_ADMIN; with only cap_net_raw you still see host-addressed/broadcast/multicast
+  frames); the Windows/macOS pcap paths already default to promiscuous. Note that on the Linux
+  loopback (lo) AF_PACKET delivers each packet twice (an outgoing and an incoming copy), so
+  all-frame mode shows each loopback packet twice — inherent kernel behavior, same as raw
+  AF_PACKET capture (tcpdump-style); the default mode only accepts PACKET_HOST and has no such
+  duplication. **`-a` must be combined with `-v` explicitly** (full-frame display needs
+  dissection); using `-a` alone is an error
+- `--filter "expression"`: a tcpdump-style subset that only shows matching frames,
+  identical across all three platforms. **`--filter` must be combined with `-a` explicitly
+  (i.e. `-v -a`)**; using `--filter` alone is an error. Syntax: protocols `arp`/`icmp`/`icmp6`/`tcp`/`udp`/`ip`/`ip6`,
+  ports `port 53` (or `src port`/`dst port`), addresses `host 1.2.3.4` (or `src host`/`dst host`;
+  ARP matches on spa/tpa), combined with `and`/`or`/`not` and parentheses (`and` binds tighter
+  than `or`); an invalid expression is a hard error. Examples: `"arp or icmp"`,
+  `"tcp and not port 9000"`, `"(arp or icmp) and not host 10.0.0.1"`. **All
+  protocol tokens are matched through the registry (dissect)** — including the
+  built-in arp/icmp/icmp6/tcp/udp/ip/ip6 (normalized to layer names like
+  ipv4/ipv6) and eng_lib dissectable protocols: fixed layers
+  `eth`/`ipv4`/`ipv6`/`http`/`dns`/`raw`, or eng_lib protocols that declare a
+  dissect dispatch rule `#[rule]` (currently dns/http/quic_initial; adding
+  `#[rule]` to another eng_lib protocol makes it filterable). The filter matches
+  exactly the layer stack that `-a` displays, so a frame that fails to dissect as a
+  protocol is consistently not matched; `port`/`host` qualifiers also read from the
+  dissected layers (e.g. `"dns"` shows only DNS frames, `"dns port 53"` adds a port
+  qualifier). Requires the registry to be loaded (serve loads it automatically; an
+  error is raised if it is missing)
 
 ---
 

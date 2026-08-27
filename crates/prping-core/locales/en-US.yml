@@ -62,6 +62,8 @@ server:
   verbose_hint: 'verbose mode: packet dissection will be printed for each received packet'
   verbose_dissect_unavailable: 'proto registry is empty — captured frames will only show as hexdump, layer dissection unavailable'
   verbose_capture_active: 'raw packet capture active on %{devs}'
+  capture_all_active: 'full-frame capture: showing all visible frames (ARP/ICMP/broadcast/outgoing), not just traffic to this port'
+  capture_filter_active: 'capture filter: %{filter}'
   verbose_capture_note: 'raw packet capture unavailable (%{reason}); showing payload-level dissection only'
   capture_iface_all: 'all interfaces'
   capture_unsupported: 'raw packet capture is not supported on this platform (Linux AF_PACKET / Windows Npcap)'

@@ -160,9 +160,12 @@ pub fn render_layers<W: WriteColor>(w: &mut W, layers: &[Layer], header: &str) -
 }
 
 /// 渲染层栈（引用版本，用于 `render_dissected` 反转后的层列表）。
+/// `header` 为空串时省略标题行（serve 抓包 `[frame]` 摘要行后直接跟层栈）。
 fn render_layers_ref<W: WriteColor>(w: &mut W, layers: &[&Layer], header: &str) -> io::Result<()> {
-    print_cyan(w, header)?;
-    writeln!(w)?;
+    if !header.is_empty() {
+        print_cyan(w, header)?;
+        writeln!(w)?;
+    }
     let width = term_width();
     for (i, layer) in layers.iter().enumerate() {
         render_layer_line(w, i, layer_name(layer), &describe_layer(layer), width)?;
@@ -263,6 +266,8 @@ pub fn print_stack_warnings<W: WriteColor>(w: &mut W, pkt: &PacketSpec) -> io::R
 ///
 /// 输出顺序：层栈（从高到低，与 `render_packet_fields` 一致）→ 注记 → hexdump。
 /// 层栈反转 `report.layers`（外→内）为内→外展示序，与 `PacketSpec.layers` 对齐。
+/// `header` 为标题行（如 `hex:` / `frame 1:`）；传空串则不打印标题行，
+/// 层栈直接从 2 空格缩进开始（serve 抓包 `[frame]` 摘要行后紧跟层栈用）。
 pub fn render_dissected<W: WriteColor>(
     w: &mut W,
     report: &packet_dsl::dissect::DissectReport,
@@ -271,7 +276,12 @@ pub fn render_dissected<W: WriteColor>(
 ) -> io::Result<()> {
     // 层栈：report.layers 是外→内（低→高），反转为内→外（高→低）展示
     if report.layers.is_empty() {
-        print_red_plain(w, &format!("{header} — 未能识别任何层"))?;
+        if header.is_empty() {
+            // 无标题行时与层栈行同缩进（2 空格），避免孤立的「 — 」前缀
+            print_red_plain(w, &format!("{}未能识别任何层", spaces(2)))?;
+        } else {
+            print_red_plain(w, &format!("{header} — 未能识别任何层"))?;
+        }
         writeln!(w)?;
     } else {
         let mut reversed: Vec<&packet_dsl::ir::Layer> = report.layers.iter().collect();
@@ -331,7 +341,7 @@ fn print_bold_plain<W: WriteColor>(w: &mut W, text: &str) -> io::Result<()> {
 
 /// 16 字节一行的 hexdump：偏移 + hex + ASCII。
 ///
-/// 每行 8 空格缩进：hexdump 是 `sent:`/`reply:`/`frame:` 等标题下的内容块，
+/// 每行 8 空格缩进：hexdump 是 `sent:`/`reply:`/`frame N:` 等标题下的内容块，
 /// 用缩进与 2 空格标题层级区分。
 pub fn render_hexdump<W: WriteColor>(w: &mut W, bytes: &[u8]) -> io::Result<()> {
     for (off, chunk) in bytes.chunks(16).enumerate() {
@@ -879,4 +889,84 @@ pub(crate) fn render_module_header<W: WriteColor>(
     writeln!(w)?;
     writeln!(w)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 极简 WriteColor：把渲染结果收集到 Vec<u8>，便于断言文本内容。
+    struct Buf(Vec<u8>);
+
+    impl io::Write for Buf {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl termcolor::WriteColor for Buf {
+        fn supports_color(&self) -> bool {
+            false
+        }
+        fn set_color(&mut self, _: &termcolor::ColorSpec) -> io::Result<()> {
+            Ok(())
+        }
+        fn reset(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn is_synchronous(&self) -> bool {
+            true
+        }
+    }
+
+    /// 真实抓包帧：Windows Npcap 捕获的 TCP SYN（.114:45388 → .162:1234，74 B），
+    /// 与 serve/capture.rs 的回归测试同源，保证 eth → ipv4 → tcp 三层可识别。
+    fn syn_frame() -> Vec<u8> {
+        vec![
+            0x08, 0x00, 0x27, 0x5e, 0x76, 0xc6, 0x2c, 0xf0, 0x5d, 0xac, 0x20, 0x6a, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x3c, 0x15, 0x93, 0x40, 0x00, 0x40, 0x06, 0x00, 0xc4, 0xc0, 0xa8,
+            0x51, 0x72, 0xc0, 0xa8, 0x51, 0xa2, 0xb1, 0x4c, 0x04, 0xd2, 0xa2, 0xf9, 0xe6, 0xfb,
+            0x00, 0x00, 0x00, 0x00, 0xa0, 0x02, 0xfa, 0xf0, 0xd9, 0x63, 0x00, 0x00, 0x02, 0x04,
+            0x05, 0xb4, 0x04, 0x02, 0x08, 0x0a, 0x82, 0x16, 0x8d, 0x18, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x03, 0x03, 0x0a,
+        ]
+    }
+
+    /// serve 抓包 dissect：空标题 → 不打印 `frame:` 行，`[frame]` 摘要行后
+    /// 直接跟 2 空格缩进的层栈（`  [0] tcp …`）。
+    #[test]
+    fn dissected_empty_header_omits_title_line() {
+        crate::engine::eng::ensure_proto_registry();
+        let frame = syn_frame();
+        let report = packet_dsl::dissect(&frame);
+        let mut w = Buf(Vec::new());
+        render_dissected(&mut w, &report, "", &frame).unwrap();
+        let out = String::from_utf8(w.0).unwrap();
+        assert!(!out.contains("frame:"), "不应打印 frame: 标题行：{out:?}");
+        assert!(
+            out.starts_with("  [0] tcp"),
+            "层栈应从 2 空格缩进开始：{out:?}"
+        );
+        assert!(out.contains("[1] ipv4"), "应包含 ipv4 层：{out:?}");
+        assert!(out.contains("[2] eth"), "应包含 eth 层：{out:?}");
+    }
+
+    /// 其他调用方（recv:/trigger:/hex:/frame N:）的标题行行为保持不变。
+    #[test]
+    fn dissected_nonempty_header_still_prints_title() {
+        crate::engine::eng::ensure_proto_registry();
+        let frame = syn_frame();
+        let report = packet_dsl::dissect(&frame);
+        let mut w = Buf(Vec::new());
+        render_dissected(&mut w, &report, "  frame:", &frame).unwrap();
+        let out = String::from_utf8(w.0).unwrap();
+        assert!(
+            out.starts_with("  frame:"),
+            "非空标题行应保留：{out:?}"
+        );
+    }
 }

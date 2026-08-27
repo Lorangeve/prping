@@ -338,6 +338,10 @@ TCP Bandwidth test:
 ```bash
 prping server 0.0.0.0:8080
 prping server [::]:8080             # IPv6
+prping server -v 0.0.0.0:8080       # verbose：抓包并 dissect 每个收到的包
+prping server -v -a 0.0.0.0:8080    # 全帧抓包：显示所有可见帧（需配合 -v）
+prping server -v -a --filter "arp or icmp" 0.0.0.0:8080   # 全帧抓包 + 只显示 ARP/ICMP
+prping server -v -a --filter "tcp port 53" 0.0.0.0:8080  # 全帧抓包 + 只显示 TCP 53 端口
 ```
 
 ### 说明
@@ -346,6 +350,31 @@ prping server [::]:8080             # IPv6
 - Ctrl+C 退出时打印聚合统计（连接数、收发字节等）
 - 不能与任何客户端参数（`-n/-i/-l/-b/-u/--parallel/-s/-m` 等）混用
 - Windows 上为 Win7 兼容保留
+- `-v` 时启动 raw 抓包显示完整帧（eth/IP/TCP 头 + 握手）。默认只显示发往监听
+  端口的本服务流量（Linux 需 root/cap_net_raw，Windows 需装 Npcap，macOS 需
+  root 或 ChmodBPF）
+- `-a`/`--capture-all` 全帧模式：不做端口/地址过滤，显示网卡上所有可见帧——
+  ARP、ICMP（如 ping 本机）、广播/组播、其他端口流量，以及本机出向回包；
+  `[frame]` 摘要行对 ARP/ICMP 等非 TCP-UDP 帧也给出地址级摘要。Linux 下尽力
+  开启混杂模式（需 CAP_NET_ADMIN，仅有 cap_net_raw 时仍能收到本机地址/广播/
+  组播帧）；Windows/macOS 的 pcap 路径默认已开混杂。注意 Linux 回环（lo）上
+  AF_PACKET 对每个包投递出向+入向两份，全帧模式会各显示一次（内核原始行为，
+  与 tcpdump 的原始 AF_PACKET 抓包一致）；默认模式只收 PACKET_HOST 无此现象。
+  **`-a` 必须显式配合 `-v` 使用**（全帧显示需要 dissect 反解），单独 `-a` 会报错
+- `--filter "表达式"`：tcpdump 风格子集，只显示匹配的帧，三平台
+  一致。**`--filter` 必须显式配合 `-a`（即 `-v -a`）使用**，单独
+  `--filter` 会报错。语法：协议 `arp`/`icmp`/`icmp6`/`tcp`/`udp`/`ip`/`ip6`、端口 `port 53`
+  （或 `src port`/`dst port`）、地址 `host 1.2.3.4`（或 `src host`/`dst host`，
+  ARP 按 spa/tpa 匹配）、组合 `and`/`or`/`not` + 括号（`and` 优先于 `or`）；
+  表达式非法时报错退出。例：`"arp or icmp"`、`"tcp and not port 9000"`、
+  `"(arp or icmp) and not host 10.0.0.1"`。**所有协议令牌按注册表（dissect）
+  匹配**——包括内置的 arp/icmp/icmp6/tcp/udp/ip/ip6（归一化为反解层名
+  ipv4/ipv6 等）和 eng_lib 可反解协议：固定层 `eth`/`ipv4`/`ipv6`/`http`/`dns`/
+  `raw`，或 eng_lib 里声明了 dissect 分派规则 `#[rule]` 的协议（目前
+  dns/http/quic_initial；给其他协议加 `#[rule]` 即获得过滤能力）。过滤器匹配的
+  正是 `-a` 显示时 dissect 出的层栈，帧无法反解成某协议时两者一致地不命中；
+  `port`/`host` 限定符也取自反解层（如 `"dns"` 只显示 DNS 帧、`"dns port 53"`
+  加端口限定）。需要注册表已加载（serve 自动加载；缺失时 `--filter` 报错）
 
 ---
 
