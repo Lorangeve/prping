@@ -33,8 +33,8 @@
 25. [与 psping 的对比](#25-与-psping-的对比)
 26. [包构造引擎（engine / packet / packet-dsl）](#26-包构造引擎engine--packet--packet-dsl)
 
-> 提示：`prping --help-pkg 章节标题` 可直接跳转到对应章节学习；
-> `prping --help-pkg 1`（编号）、`prping --help-pkg 安装`（标题前缀）均可。
+> 提示：`prping document 章节标题` 可直接跳转到对应章节学习；
+> `prping document 1`（编号）、`prping document 安装`（标题前缀）均可。
 
 ---
 
@@ -162,7 +162,7 @@ prping 使用**子命令**组织全部功能，子命令可用任意**唯一前�
 | `engine` | 包引擎：分析 .pkt/.pktl、LSP、`--ls/--hex/--pcap`、pcap→.pkt/.pktl 转码（`--to-pkt`） | `prping --eng ...` |
 | `packet` | 构建 .pkt/.pktl 并发送（`--raw/--wait/--fuzz/--out`） | `prping --pkt ...` |
 
-顶层 `--version`、`--help-pkg [章节]`、`--lang` 不占子命令位置，可出现在任意位置
+顶层 `--version`、`--lang` 不占子命令位置，可出现在任意位置
 （如 `prping --lang zh-CN ping 8.8.8.8`）。
 
 ---
@@ -213,7 +213,7 @@ prping trace 8.8.8.8               # 见第 17 章：路由跟踪
 
 ### 说明
 
-- 原始 ICMP socket：Linux/macOS 需 root 或 `cap_net_raw`；**Windows 上 ICMP ping 走 ICMP.DLL（`IcmpSendEcho2`，同系统 ping.exe）**——不需要管理员权限，且不受 Win7 RTM（SP0）的 raw socket 缺陷影响（该版本 `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)` 管理员下也返回 WSAEINVAL 10022，SP1 修复）；Win7 SP0 上 v4 的 `-s` 源绑定不支持（ICMP.DLL 无源参数，提示后忽略，v6 支持）
+- 原始 ICMP socket：Linux/macOS 需 root 或 `cap_net_raw`；**Windows 上 ICMP ping 走 Iphlpapi.dll（`IcmpSendEcho2`，同系统 ping.exe）**——通过 windows-sys 0.59 的 `Win32_NetworkManagement_IpHelper` feature 正常链接（Iphlpapi.dll 是系统组件，必定存在），不需要管理员权限，且不受 Win7 RTM（SP0）的 raw socket 缺陷影响（该版本 `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)` 管理员下也返回 WSAEINVAL 10022，SP1 修复）；Win7 SP0 上 v4 的 `-s` 源绑定不支持（IcmpSendEcho2 无源参数，提示后忽略，v6 支持）
 - `-l` 控制 ICMP 载荷字节数（不含 ICMP/IP 头）
 - 区分三类回复：echo reply（正常）、不可达（type 3）、TTL 超时（type 11）
 
@@ -691,11 +691,11 @@ LANG=zh_CN.UTF-8 prping ping 8.8.8.8
 
 ### 手册语言
 
-`--help-pkg` 的手册随语言切换：
+`document` 的手册随语言切换：
 
 ```bash
-prping --lang zh-CN --help-pkg 16     # 中文手册第 16 章（MTU）
-prping --lang en-US --help-pkg MTU    # 英文手册
+prping --lang zh-CN document 16     # 中文手册第 16 章（MTU）
+prping --lang en-US document MTU    # 英文手册
 ```
 
 ---

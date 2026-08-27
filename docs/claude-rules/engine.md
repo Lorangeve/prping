@@ -94,8 +94,11 @@
   crate 侧副本）。
 - scapy 衍生特性（A 解剖 / B 应答 / C pcap / D ls / E fuzz）：
   - **解剖**：packet-dsl `dissect(bytes) -> DissectReport`（`packet-dsl/src/dissect.rs`）——
-    双路径（eth vs bare-IP）取更深解析；bare-app 按 kind 尝试注册表声明
-    （dns/http——无端口上下文无法 `#[rule]` 分派，DNS 全零区不认防误报）；
+    双路径（eth vs bare-IP）取更深解析；应用层先按 `#[rule]` 分派、未命中回退内容
+    识别（协议识别以内容为准、端口只是可选提示——http 靠 `#[rule(contains("HTTP/", in=start_line))]`
+    字段字节魔数、dns 靠 `#[rule(or(ne(qdcount,0), ...))]` 字段值约束、裸 proto 靠
+    `#[rule(mask(0xc0))]` 首字节掩码，防任意字节误报）；**硬编码已清零**（content_valid /
+    dns_all_zero 已删除，全部由 rule 匹配函数承载）；
     DNS 压缩指针追跳还原、IPv4/ICMP 校验和错进 `notes` 不报错；
     `dns_message_id(bytes)` 供应答匹配（读前 2B）。渲染在
     `eng.rs::render_dissected`；CLI：`engine --hex` / `engine --pcap` / `packet --wait` 应答解剖。
@@ -235,13 +238,12 @@
   支持 `+`/mul/div/sub/shl/shr——TCP data_offset 联动）；`src`/`dst` 字段兼作
   ipv4/ipv6 伪头部地址元数据；
   `#[proto(kind="eth")]`（IR 层类型闭集；裸 `#[proto]` = Raw 层）/
-  `#[rule(udp(dport=443))]`（上下文分派，调用形式）/ `#[rule(bytes(0xc0))]`
-  （首字节掩码）/ `#[rule(and(...))]`（AND 分组）/ `#[rule(or(udp(dport=443), udp(dport=4433)))]`
-  （选一，如多端口）——**同层**条件 AND 合并、**跨层**条件独立任一命中
-  （如 DNS 的 `#[rule(udp(dport=53))]` + `#[rule(tcp(dport=53))]`；
-  and/or 树内所有原子同层）；掩码只允许 AND 组合（不能
-  出现在 or 分支——掩码无层可挂，不是分派条件）；`not` 不支持（正向匹配无
-  否定用例，且违背 DSL 无 Bool 原则）。注解——注解参数
+  `#[rule(udp(dport=443))]`（上下文分派）/ `#[rule(mask(0xc0))]`（首字节掩码）/
+  `#[rule(startswith("HTTP/"))]` / `#[rule(contains("HTTP/", in=start_line))]`（字节模式匹配，
+  可选 `at=N` 偏移 / `in=字段名` 字段字节内容定位）/ `#[rule(ne(qdcount, 0))]`（字段值约束，
+  `eq`/`ne`，`or(...)` 内合并为 OR 语义）/ `#[rule(and(...))]` AND / `#[rule(or(...))]` OR
+  ——**同层**条件 AND 合并、**跨层**条件独立任一命中；字节模式匹配只允许 AND 组合（不能
+  出现在 or 分支），字段值约束允许在 or 内；`not` 不支持。注解——注解参数
   统一语法（`key=value` 项 / 调用形式 / 裸值 flag，见 GRAMMAR.md §3 attr）；
   注解可全缺（裸 proto 合法：构造产 Raw 层、可作
   `rest(子proto)` 解析目标）；proto 可导出（eng_lib prelude 依赖）。
@@ -249,11 +251,16 @@
   前序字段、`len` 计算字段正常读、`rest` 到末尾、规则掩码先验），产出通用字段表
   `ProtoHit`；`#[rule]` 分派注册表（`set_proto_registry`，OnceLock）接入 dissect
   （tcp/udp 端口、ipv4 proto、ipv6 next_header、eth ethertype 各层查表，命中即解析、
-  失败回退 raw），`DissectReport.proto` 承载命中，`engine --pcap/--hex` 展示。
+  未命中/失败回退内容识别——协议识别以内容为准、端口只是可选提示），
+  `DissectReport.proto` 承载命中，`engine --pcap/--hex` 展示。
   **dissect 注册表化（协议走 pkt 声明、硬编码 parse_* 已删除）**：应用层
-  `try_app_layer` 先查 proto 注册表（`#[rule]` 分派：dns `udp/tcp(dport=53)`、
-  http `or(tcp(80), tcp(8080))`，命中即 `proto_hit_to_layer` 转 IR 层、载荷保留
-  raw）；层头 `try_proto_layer` 按 kind 查注册表（`find_by_kind`
+  `try_app_layer` 先查 proto 注册表（`#[rule]` 分派 + 匹配函数：dns `udp/tcp(dport=53)` +
+  `or(ne(qdcount,0), ...)` 字段值约束、http `or(tcp(80), tcp(8080))` +
+  `contains("HTTP/", in=start_line)` 字段字节魔数，命中即
+  `proto_hit_to_layer` 转 IR 层、载荷保留 raw）；规则未命中时回退
+  `find_content_candidates`（http/dns + 带匹配函数的裸 proto，如 QUIC `mask(0xc0)`）按内容反解；
+  层头 `try_proto_layer` 按
+  kind 查注册表（`find_by_kind`
   + `parse_header`——**遇 rest 字段即停**，层头字节 = rest 之前的定长/变长字段，
   `proto_hit_to_layer` 回填语义 IR 层 + `set_layer_raw` 保留头字节）。**硬编码
   parse_*（含 parse_dns/parse_http）已全部退役**：未注册/字节不符时该层不产生（eth/arp/ipv4/ipv6 字节留

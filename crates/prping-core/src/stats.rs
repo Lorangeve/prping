@@ -253,10 +253,7 @@ pub fn json_sample(
     rtt: Option<Duration>,
     err: Option<&str>,
 ) -> Result<()> {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let ts = crate::util::unix_ts();
     let target = target.replace('"', "\\\"");
     if ok {
         let ms = rtt.map(|r| r.as_secs_f64() * 1000.0).unwrap_or(0.0);
@@ -282,10 +279,7 @@ pub fn print_summary(
 ) -> Result<()> {
     if json() {
         let loss = stats.loss_pct();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let ts = crate::util::unix_ts();
         let target = target.replace('"', "\\\"");
         let mut line = format!(
             "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"summary\":true,\"sent\":{},\"received\":{},\"lost\":{},\"loss_pct\":{:.1}",
@@ -332,11 +326,11 @@ pub fn print_summary(
     );
     // 丢包率着色：0% 绿，<10% 黄，≥10% 红
     if loss == 0.0 {
-        output::print_green(w, format!("  {line}"))?;
+        output::print_green(w, format!("{}{line}", output::indent(1)))?;
     } else if loss < 10.0 {
-        output::print_yellow(w, format!("  {line}"))?;
+        output::print_yellow(w, format!("{}{line}", output::indent(1)))?;
     } else {
-        output::print_red(w, format!("  {line}"))?;
+        output::print_red(w, format!("{}{line}", output::indent(1)))?;
     }
     writeln!(w)?;
 
@@ -351,7 +345,8 @@ pub fn print_summary(
 
         writeln!(
             w,
-            "  {}",
+            "{}{}",
+            output::indent(1),
             t!(
                 "stats.min_max_avg",
                 min = format!("{:.2}", min),
@@ -376,14 +371,16 @@ pub fn print_summary(
             );
             writeln!(
                 w,
-                "  {}",
+                "{}{}",
+                output::indent(1),
                 t!("stats.percentiles", p50 = p50, p95 = p95, p99 = p99)
             )?;
         }
         if let (Some(j), Some(jm)) = (stats.jitter(), stats.jitter_max()) {
             writeln!(
                 w,
-                "  {}",
+                "{}{}",
+                output::indent(1),
                 t!(
                     "stats.jitter",
                     avg = format!("{:.2}", j.as_secs_f64() * 1000.0),
@@ -466,7 +463,7 @@ fn print_bucket_histogram(w: &mut StandardStream, h: &Histogram) -> Result<()> {
             .checked_mul(bar_width)
             .and_then(|c| c.checked_div(h.max_count))
             .unwrap_or(0);
-        write!(w, "  {low:7.2} - {high:7.2} ms ")?;
+        write!(w, "{}{low:7.2} - {high:7.2} ms ", output::indent(1))?;
         output::print_yellow(w, bar_char.repeat(bar_len))?;
         writeln!(w, " ({count})")?;
     }
@@ -494,7 +491,7 @@ fn print_threshold_histogram(w: &mut StandardStream, h: &Histogram) -> Result<()
             .checked_mul(bar_width)
             .and_then(|c| c.checked_div(h.max_count))
             .unwrap_or(0);
-        write!(w, "  {range:<14} ")?;
+        write!(w, "{}{range:<14} ", output::indent(1))?;
         output::print_yellow(w, bar_char.repeat(bar_len))?;
         writeln!(w, " ({count})")?;
     }

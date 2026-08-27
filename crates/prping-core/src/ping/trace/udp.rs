@@ -19,8 +19,8 @@ pub(crate) fn trace_udp(
     max_hops: u32,
     w: &mut StandardStream,
 ) -> anyhow::Result<(Vec<Hop>, bool)> {
-    let udp_sock = super::create_udp_socket(target_ip, cfg.source, 0)?;
-    let (icmp_sock, _) = super::create_icmp_socket(target_ip, cfg.source)?;
+    let udp_sock = crate::util::create_udp_socket(target_ip, cfg.source, 0)?;
+    let (icmp_sock, _) = crate::util::create_icmp_socket(target_ip, cfg.source)?;
 
     let mut hops: Vec<Hop> = Vec::new();
     let mut port_counter: u16 = UDP_START_PORT;
@@ -30,7 +30,7 @@ pub(crate) fn trace_udp(
         if util::interrupted() {
             break;
         }
-        super::set_ttl(&udp_sock, hop_no, target_ip.is_ipv6())?;
+        crate::util::set_ttl(&udp_sock, hop_no, target_ip.is_ipv6())?;
 
         // 发送本跳全部探测
         let mut probes: Vec<(u16, Instant)> = Vec::with_capacity(PROBES_PER_HOP);
@@ -186,7 +186,7 @@ fn parse_udp_icmp_v6(buf: &[u8], target: IpAddr, want: &[u16]) -> Option<u16> {
         return None;
     }
     // type 3 code 0 (Time Exceeded) 或 type 1 code 4 (Port Unreachable)
-    if !(icmp[0] == 3 && icmp[1] == 0) && !(icmp[0] == 1 && icmp[1] == 4) {
+    if !(icmp[0] == 3 && icmp[1] == 0 || icmp[0] == 1 && icmp[1] == 4) {
         return None;
     }
     // 内嵌报文

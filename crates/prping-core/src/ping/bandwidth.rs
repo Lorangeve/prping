@@ -129,8 +129,8 @@ impl Progress {
                     "bandwidth.progress.packets",
                     done = done,
                     total = total,
-                    done_bytes = crate::format_bytes(bytes),
-                    total_bytes = crate::format_bytes(total.saturating_mul(*size)),
+                    done_bytes = crate::util::format_bytes(bytes),
+                    total_bytes = crate::util::format_bytes(total.saturating_mul(*size)),
                     mbps = format!("{mbits:.2}")
                 );
                 (pct, stats)
@@ -143,8 +143,8 @@ impl Progress {
                 };
                 let stats = t!(
                     "bandwidth.progress.bytes",
-                    done_bytes = crate::format_bytes(bytes),
-                    total_bytes = crate::format_bytes(*total),
+                    done_bytes = crate::util::format_bytes(bytes),
+                    total_bytes = crate::util::format_bytes(*total),
                     mbps = format!("{mbits:.2}")
                 );
                 (pct, stats)
@@ -157,7 +157,7 @@ impl Progress {
                 };
                 let stats = t!(
                     "bandwidth.progress.time",
-                    bytes = crate::format_bytes(bytes),
+                    bytes = crate::util::format_bytes(bytes),
                     mbps = format!("{mbits:.2}")
                 );
                 (pct, stats)
@@ -574,10 +574,7 @@ fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
         // label 可能含引号/反斜杠，做最小转义保证 JSON 合法
         let escaped = label.replace('\\', "\\\\").replace('"', "\\\"");
         let target = target.replace('"', "\\\"");
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let ts = crate::util::unix_ts();
         writeln!(
             &mut w,
             "{{\"type\":\"bandwidth\",\"target\":\"{target}\",\"ts\":{ts},\"direction\":\"{}\",\"label\":\"{escaped}\",\"bytes\":{total_bytes},\"secs\":{secs:.2},\"mbps\":{mbits:.2}}}",

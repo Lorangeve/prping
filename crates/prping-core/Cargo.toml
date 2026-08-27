@@ -5,6 +5,12 @@ edition = "2024"
 description = "prping 核心库：跨平台 psping 复刻（协议实现 + 包构造引擎）"
 license = "MIT"
 
+[features]
+# Linux 可选 libpcap 支持：启用后 `packet --raw` 走 pcap 链路层注入（替代
+# AF_PACKET / IPPROTO_RAW），与 Windows/macOS 行为一致。需系统安装 libpcap-dev。
+# 默认不启用——Linux 原生 raw socket 无需额外依赖。
+pcap = ["dep:pcap"]
+
 [dependencies]
 smol = "2"
 anyhow = "1"
@@ -20,7 +26,17 @@ serde_json = "1"
 [dev-dependencies]
 serde_json = "1"
 
-# Windows raw 发送兼容层（packet --raw）/ macOS server 抓包：pcap（Windows 用 Npcap
-# 的 wpcap.dll，macOS 链接系统自带 libpcap）
+# pcap 依赖：Windows/macOS 始终编译；Linux 通过 `--features pcap` 可选启用。
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 pcap = "2"
+[target.'cfg(target_os = "linux")'.dependencies]
+pcap = { version = "2", optional = true }
+
+# Windows 平台依赖（WinAPI 类型定义，用于 reverse_dns 等）
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Networking_WinSock",
+    "Win32_Networking",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Foundation",
+]}

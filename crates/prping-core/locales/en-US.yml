@@ -140,7 +140,7 @@ errors:
   tcp_trace_requires_port: 'TCP traceroute requires a port: prping trace --tcp HOST:PORT'
   trace_udp_tcp_conflict: "--tcp and --udp cannot be used together"
   tcp_trace_windows: 'TCP traceroute is not supported on Windows (raw TCP sockets are restricted) — use ICMP traceroute (prping trace HOST) or an Npcap-based tool'
-  raw_eth_macos: '--raw sending Ethernet frames (eth) is not supported on macOS (AF_PACKET is Linux-only; Windows requires Npcap). Run on Linux, or use packets without an eth layer (ipv4/ipv6 outer layer works fine)'
+  raw_eth_macos: '--raw sending Ethernet frames (eth) on macOS requires libpcap with root or ChmodBPF authorization — run with sudo, or use packets without an eth layer (ipv4/ipv6 outer layer works fine)'
   trace_no_local_addr: cannot determine the local source address (UDP route probe failed)
   max_hops_requires_trace: "-m only applies with -t (traceroute)"
   no_dns_requires_trace: "-d only applies with -t (traceroute)"

@@ -65,5 +65,5 @@ ICMPv6 type 1 code 4）到达，按内嵌 UDP 头 (sport, dport) 匹配归属）
 ## 子命令解析
 
 `expand_subcommand_prefix` 唯一前缀展开（bpaf `take_cmd` 精确匹配，前缀展开在
-run_inner 前做；歧义/旧语法 host 提示红字退出 2）；顶层 `--version`/`--help-pkg`/`--lang`
+run_inner 前做；歧义/旧语法 host 提示红字退出 2）；顶层 `--version`/`--lang`
 由 main() pre-scan 提取处理（`--lang` 任意位置移除，子命令解析后 `apply_lang` 幂等重设）。

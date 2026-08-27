@@ -16,8 +16,8 @@ pub(crate) fn trace_icmp(
     max_hops: u32,
     w: &mut StandardStream,
 ) -> anyhow::Result<(Vec<Hop>, bool)> {
-    let (sock, target_sa) = super::create_icmp_socket(target_ip, cfg.source)?;
-    let ident = super::rand_id();
+    let (sock, target_sa) = crate::util::create_icmp_socket(target_ip, cfg.source)?;
+    let ident = crate::util::rand_u16();
 
     let mut hops: Vec<Hop> = Vec::new();
     let mut seq_counter: u16 = 0;
@@ -27,14 +27,18 @@ pub(crate) fn trace_icmp(
         if util::interrupted() {
             break;
         }
-        super::set_ttl(&sock, hop_no, target_ip.is_ipv6())?;
+        crate::util::set_ttl(&sock, hop_no, target_ip.is_ipv6())?;
 
         // 发送本跳全部探测（背靠背，不逐包等待）
         let mut probes: Vec<(u16, Instant)> = Vec::with_capacity(PROBES_PER_HOP);
         for _ in 0..PROBES_PER_HOP {
             let seq = seq_counter;
             seq_counter = seq_counter.wrapping_add(1);
-            let pkt = super::build_echo(target_ip, ident, seq, 32);
+            let pkt = if target_ip.is_ipv4() {
+                crate::ping::icmp::build_v4(ident, seq, 32)
+            } else {
+                crate::ping::icmp::build_v6(ident, seq, 32)
+            };
             let sent = Instant::now();
             if sock.send_to(&pkt, &target_sa).is_ok() {
                 probes.push((seq, sent));

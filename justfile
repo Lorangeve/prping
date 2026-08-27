@@ -106,7 +106,30 @@ build-win7-32: build-win7-32-impl (dist "target/i686-win7-windows-msvc/release")
 # 全部 Windows 产物
 build-windows: build-windows-msvc build-win7 build-win7-32
 
-# 把 eng_lib 与 examples 复制为产物目录的 lib/ 与 examples/
+# ── Linux 交叉编译（需对应工具链；本机同架构直接用 build-release） ──
+# Linux 32-bit（i686）。需 gcc-multilib（Ubuntu: sudo apt install gcc-multilib）
+# 或交叉工具链（Debian: sudo apt install gcc-i686-linux-gnu）
+build-linux-32:
+    rustup target add i686-unknown-linux-gnu
+    cargo build --release --target i686-unknown-linux-gnu
+
+# Linux ARM 32-bit（armv7hf）。需交叉工具链：
+#   sudo apt install gcc-arm-linux-gnueabihf
+build-linux-arm:
+    rustup target add armv7-unknown-linux-gnueabihf
+    cargo build --release --target armv7-unknown-linux-gnueabihf
+
+# Linux ARM64（aarch64）。需交叉工具链：
+#   sudo apt install gcc-aarch64-linux-gnu
+build-linux-arm64:
+    rustup target add aarch64-unknown-linux-gnu
+    cargo build --release --target aarch64-unknown-linux-gnu
+
+# 全部 Linux 产物（本机 + 交叉）
+build-linux-all: build-release build-linux-32 build-linux-arm build-linux-arm64
+
+# 全平台产物（本机 + Windows + Linux 交叉）
+build-all: build-release build-windows build-linux-all
 # （与二进制同目录分发）。用法：just dist target/release
 dist DIR:
     mkdir -p {{DIR}}/lib {{DIR}}/examples
@@ -138,9 +161,6 @@ fetch-npcap-sdk:
     rm -rf target/.wlibs target/windows_x86_64_msvc.crate target/windows_i686_msvc.crate
     @echo "SDK 就绪：target/npcap-sdk/Lib/{x64/,}wpcap.lib + windows.lib（构建时 LIBPCAP_LIBDIR 已由配方设置）"
 
-# 全部产物（本机 + Windows 各目标）
-build-all: build-release build-windows
-
 # 本机 release 构建步骤（私有：仅作依赖被编排，见 publish）
 [private]
 publish-impl:
@@ -161,6 +181,42 @@ fmt:
 fmt-check:
     cargo fmt --check
 
+# 本机 check（快速编译检查）
+check:
+    cargo check --workspace
+
+# 检查全部平台语法（本机 + Windows + Linux 交叉）
+[script]
+check-all:
+    set -euo pipefail
+    echo "=== check-all: 全平台语法检查 ==="
+    echo ""
+    echo "── 本机（x86_64-unknown-linux-gnu）──"
+    cargo check --workspace 2>&1
+    echo ""
+    echo "── Windows MSVC x86_64 ──"
+    cargo xwin check --target x86_64-pc-windows-msvc --workspace 2>&1 || echo "[跳过] 未安装 cargo-xwin"
+    echo ""
+    echo "── Windows 7 x64 ──"
+    cargo +nightly xwin check -Z build-std --target x86_64-win7-windows-msvc --workspace 2>&1 || echo "[跳过] 未安装 nightly 或 cargo-xwin"
+    echo ""
+    echo "── Windows 7 x86 ──"
+    cargo +nightly xwin check -Z build-std --target i686-win7-windows-msvc --workspace 2>&1 || echo "[跳过] 未安装 nightly 或 cargo-xwin"
+    echo ""
+    echo "── Linux 32-bit ──"
+    rustup target add i686-unknown-linux-gnu 2>/dev/null || true
+    cargo check --target i686-unknown-linux-gnu --workspace 2>&1 || echo "[跳过] 未安装 i686-unknown-linux-gnu 工具链"
+    echo ""
+    echo "── Linux ARM 32-bit ──"
+    rustup target add armv7-unknown-linux-gnueabihf 2>/dev/null || true
+    cargo check --target armv7-unknown-linux-gnueabihf --workspace 2>&1 || echo "[跳过] 未安装 armv7-unknown-linux-gnueabihf 工具链"
+    echo ""
+    echo "── Linux ARM64 ──"
+    rustup target add aarch64-unknown-linux-gnu 2>/dev/null || true
+    cargo check --target aarch64-unknown-linux-gnu --workspace 2>&1 || echo "[跳过] 未安装 aarch64-unknown-linux-gnu 工具链"
+    echo ""
+    echo "=== 全部完成 ==="
+
 # 原语文档同步检查（Claude Code hook 同款：分派原语 ↔ builtin_docs(--ls/LSP) ↔ GRAMMAR.md §4.6）
 doc-sync-check:
     scripts/claude-hooks/primitive-docs-check.sh --check
@@ -176,10 +232,6 @@ test:
 # rustdoc 生成检查
 doc:
     cargo doc --no-deps --workspace
-
-# 快速编译检查
-check:
-    cargo check --workspace
 
 # ── packet-dsl（.pkt 网络包构建 DSL）────────────────────────
 
@@ -228,10 +280,21 @@ bench:
 
 # 列出各平台产物
 artifacts:
-    @ls -lh target/release/prping \
-        target/x86_64-pc-windows-msvc/release/prping.exe \
-        target/x86_64-win7-windows-msvc/release/prping.exe \
-        target/i686-win7-windows-msvc/release/prping.exe 2>/dev/null || true
+    @echo "=== prping 平台产物 ==="
+    @echo ""
+    @echo "── Windows ──────────────────────────────"
+    @ls -lh target/x86_64-pc-windows-msvc/release/prping.exe 2>/dev/null || echo "  [未构建] just build-windows-msvc"
+    @ls -lh target/x86_64-win7-windows-msvc/release/prping.exe 2>/dev/null || echo "  [未构建] just build-win7"
+    @ls -lh target/i686-win7-windows-msvc/release/prping.exe 2>/dev/null || echo "  [未构建] just build-win7-32"
+    @echo ""
+    @echo "── Linux ────────────────────────────────"
+    @ls -lh target/release/prping 2>/dev/null || echo "  [未构建] just build-release"
+    @ls -lh target/i686-unknown-linux-gnu/release/prping 2>/dev/null || echo "  [未构建] just build-linux-32"
+    @ls -lh target/armv7-unknown-linux-gnueabihf/release/prping 2>/dev/null || echo "  [未构建] just build-linux-arm"
+    @ls -lh target/aarch64-unknown-linux-gnu/release/prping 2>/dev/null || echo "  [未构建] just build-linux-arm64"
+    @echo ""
+    @echo "── macOS（Intel / Apple Silicon，本机构建）──"
+    @ls -lh target/release/prping 2>/dev/null | grep -q "darwin\|Mach" && ls -lh target/release/prping || true
 
 clean:
     cargo clean

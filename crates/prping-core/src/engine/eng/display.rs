@@ -16,7 +16,7 @@ use termcolor::WriteColor;
 
 use crate::engine::eng::{libs_display, value_display};
 use crate::output::{
-    print_cyan, print_dim, print_green, print_magenta, print_yellow, writeln_orange,
+    print_cyan, print_dim, print_green, print_magenta, print_yellow, spaces, writeln_orange,
 };
 
 /// 折行宽度回退值（stdout 非 tty 或探测失败时）。
@@ -136,7 +136,7 @@ fn render_layer_line<W: WriteColor>(
     }
     let indent = prefix.chars().count() + 2;
     let avail = width.saturating_sub(indent).max(1);
-    let pad = " ".repeat(indent);
+    let pad = spaces(indent);
     for (k, seg) in wrap_words(desc, avail).iter().enumerate() {
         if k == 0 {
             print_yellow(w, format!("  {seg}"))?;
@@ -150,6 +150,17 @@ fn render_layer_line<W: WriteColor>(
 
 /// 渲染层栈（字段 + auto/random 标注）。
 pub fn render_layers<W: WriteColor>(w: &mut W, layers: &[Layer], header: &str) -> io::Result<()> {
+    print_cyan(w, header)?;
+    writeln!(w)?;
+    let width = term_width();
+    for (i, layer) in layers.iter().enumerate() {
+        render_layer_line(w, i, layer_name(layer), &describe_layer(layer), width)?;
+    }
+    Ok(())
+}
+
+/// 渲染层栈（引用版本，用于 `render_dissected` 反转后的层列表）。
+fn render_layers_ref<W: WriteColor>(w: &mut W, layers: &[&Layer], header: &str) -> io::Result<()> {
     print_cyan(w, header)?;
     writeln!(w)?;
     let width = term_width();
@@ -188,7 +199,7 @@ pub fn render_packet_fields<W: WriteColor>(
         };
         render_layer_line(w, i, layer_name(layer), &desc, width)?;
     }
-    print_dim(w, format!("  bytes: {} B", bytes.len()))?;
+    print_dim(w, format!("{}bytes: {} B", spaces(2), bytes.len()))?;
     writeln!(w)?;
     Ok(bytes)
 }
@@ -243,36 +254,43 @@ pub fn print_stack_warnings<W: WriteColor>(w: &mut W, pkt: &PacketSpec) -> io::R
                 carriers = warn.carriers.join("/")
             ),
         };
-        writeln_orange(w, format!("  {msg}"))?;
+        writeln_orange(w, format!("{}{msg}", spaces(2)))?;
     }
     Ok(())
 }
 
 /// 渲染反解报告（层栈 + 注记 + hexdump）。
+///
+/// 输出顺序：层栈（从高到低，与 `render_packet_fields` 一致）→ 注记 → hexdump。
+/// 层栈反转 `report.layers`（外→内）为内→外展示序，与 `PacketSpec.layers` 对齐。
 pub fn render_dissected<W: WriteColor>(
     w: &mut W,
     report: &packet_dsl::dissect::DissectReport,
     header: &str,
     bytes: &[u8],
 ) -> io::Result<()> {
+    // 层栈：report.layers 是外→内（低→高），反转为内→外（高→低）展示
     if report.layers.is_empty() {
         print_red_plain(w, &format!("{header} — 未能识别任何层"))?;
         writeln!(w)?;
     } else {
-        render_layers(w, &report.layers, header)?;
+        let mut reversed: Vec<&packet_dsl::ir::Layer> = report.layers.iter().collect();
+        reversed.reverse();
+        render_layers_ref(w, &reversed, header)?;
     }
     // proto（自表示协议）解析命中，如 QUIC（含 rest(子proto) 嵌套）
     for hit in &report.proto {
         render_proto_hit(w, hit, 2)?;
     }
     for n in &report.notes {
-        print_yellow(w, format!("  note: {n}"))?;
+        print_yellow(w, format!("{}note: {n}", spaces(2)))?;
         writeln!(w)?;
     }
     if !report.remaining.is_empty() {
-        print_dim(w, format!("  remaining: {} B", report.remaining.len()))?;
+        print_dim(w, format!("{}remaining: {} B", spaces(2), report.remaining.len()))?;
         writeln!(w)?;
     }
+    // hexdump 放在最后
     if !bytes.is_empty() {
         render_hexdump(w, bytes)?;
     }
@@ -317,7 +335,7 @@ fn print_bold_plain<W: WriteColor>(w: &mut W, text: &str) -> io::Result<()> {
 /// 用缩进与 2 空格标题层级区分。
 pub fn render_hexdump<W: WriteColor>(w: &mut W, bytes: &[u8]) -> io::Result<()> {
     for (off, chunk) in bytes.chunks(16).enumerate() {
-        print_dim(w, format!("        {off:04x}  "))?;
+        print_dim(w, format!("{}{off:04x}  ", spaces(8)))?;
         let mut hex = String::new();
         let mut ascii = String::new();
         for b in chunk {
@@ -779,7 +797,7 @@ pub(crate) fn render_module_header<W: WriteColor>(
     print_cyan(w, "module: ")?;
     print_bold_plain(w, &module.name)?;
     if let Some(path) = &module.path {
-        print_dim(w, format!("  (file: {})", path.display()))?;
+        print_dim(w, format!("{}(file: {})", spaces(2), path.display()))?;
     }
     writeln!(w)?;
     if !module.imports.is_empty() {
@@ -852,7 +870,7 @@ pub(crate) fn render_module_header<W: WriteColor>(
                 .collect();
             print_dim(
                 w,
-                format!("  - match {}({})", clause.layer, fields.join(", ")),
+                format!("{}- match {}({})", spaces(2), clause.layer, fields.join(", ")),
             )?;
             writeln!(w)?;
         }

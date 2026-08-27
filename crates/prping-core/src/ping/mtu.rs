@@ -51,12 +51,12 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
         IpAddr::V6(_) => anyhow::bail!(t!("errors.mtu_ipv4_only")),
     };
     let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
-        .map_err(crate::ping::icmp::raw_socket_error)?;
+        .map_err(crate::util::raw_socket_error)?;
     set_df(&sock)?;
     if let Some(src) = cfg.source.filter(IpAddr::is_ipv4) {
         sock.bind(&SockAddr::from(SocketAddr::new(src, 0)))?;
     }
-    let ident = rand_id();
+    let ident = crate::util::rand_u16();
     let target_sa = SocketAddr::new(addr.ip(), 0);
     let mut w = termcolor::StandardStream::stdout(termcolor::ColorChoice::Auto);
 
@@ -115,11 +115,11 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
         };
         if !stats::json() {
             let line = if fits {
-                format!("  payload={mid:>5} → {}", t!("mtu.ok"))
+                format!("{}payload={mid:>5} → {}", output::indent(1), t!("mtu.ok"))
             } else {
                 match reported {
-                    Some(m) => format!("  payload={mid:>5} → {} (mtu={m})", t!("mtu.frag")),
-                    None => format!("  payload={mid:>5} → {}", t!("mtu.fail")),
+                    Some(m) => format!("{}payload={mid:>5} → {} (mtu={m})", output::indent(1), t!("mtu.frag")),
+                    None => format!("{}payload={mid:>5} → {}", output::indent(1), t!("mtu.fail")),
                 }
             };
             if fits {
@@ -143,10 +143,7 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
         notes,
     };
     if stats::json() {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let ts = crate::util::unix_ts();
         let mut line = format!(
             "{{\"type\":\"mtu\",\"target\":\"{}\",\"ts\":{ts},\"summary\":true,\"payload_max\":{},\"mtu\":{}",
             cfg.host.replace('"', "\\\""),
@@ -169,10 +166,10 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
             )
         );
         if let Some(m) = report.frag_needed_mtu {
-            println!("  {}", t!("mtu.frag_needed_mtu", mtu = m));
+            println!("{}{}", output::indent(1), t!("mtu.frag_needed_mtu", mtu = m));
         }
         for n in &report.notes {
-            output::print_dim(&mut w, format!("  {n}"))?;
+            output::print_dim(&mut w, format!("{}{n}", output::indent(1)))?;
             writeln!(w)?;
         }
     }
@@ -255,27 +252,10 @@ fn classify(buf: &[u8], ident: u16, seq: u16) -> Option<ProbeOutcome> {
 }
 
 /// 构建 ICMP echo 报文（type 8，id/seq，载荷填充 0..255 循环）。
+///
+/// 委托给 `icmp::build_v4`，避免重复实现。
 fn build_echo(ident: u16, seq: u16, payload: usize) -> Vec<u8> {
-    let mut b = vec![0u8; 8 + payload];
-    b[0] = 8;
-    b[1] = 0;
-    b[4] = (ident >> 8) as u8;
-    b[5] = ident as u8;
-    b[6] = (seq >> 8) as u8;
-    b[7] = seq as u8;
-    for i in 0..payload {
-        b[8 + i] = (i % 256) as u8;
-    }
-    let c = crate::ping::icmp::icmp_cksum(&b);
-    b[2] = (c >> 8) as u8;
-    b[3] = c as u8;
-    b
-}
-
-fn rand_id() -> u16 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    RandomState::new().build_hasher().finish() as u16
+    crate::ping::icmp::build_v4(ident, seq, payload)
 }
 
 /// 设置 DF（不分片）位。

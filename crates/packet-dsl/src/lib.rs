@@ -37,8 +37,8 @@ pub mod stack;
 mod tpl;
 pub use ast::{SnifferSpec, SnifferValue};
 pub use proto::{
-    CtxCond, ProtoHit, ProtoVal, ResolvedProto, Rule, RuleCond, parse_cond, parse_header,
-    parse_proto, proto_registry, set_proto_registry,
+    CtxCond, MatchFn, MatchTarget, MatchVal, ProtoHit, ProtoVal, ResolvedProto, Rule, RuleCond,
+    parse_cond, parse_header, parse_proto, proto_registry, set_proto_registry,
 };
 pub use registry::{Params, builtin_doc, builtin_docs, is_builtin, parse_param_value};
 

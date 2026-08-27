@@ -130,6 +130,7 @@ fn top_help_lists_subcommands() {
         "trace",
         "engine",
         "packet",
+        "document",
     ] {
         assert!(s.contains(cmd), "help missing {cmd}: {s}");
     }

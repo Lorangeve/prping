@@ -33,8 +33,8 @@
 25. [Comparison with psping](#25-comparison-with-psping)
 26. [Packet-Building Engine (engine / packet / packet-dsl)](#26-packet-building-engine-engine--packet--packet-dsl)
 
-> Tip: `prping --help-pkg <chapter-title>` jumps straight to a chapter for learning;
-> both `prping --help-pkg 1` (by number) and `prping --help-pkg installation` (by title prefix) work.
+> Tip: `prping document <chapter-title>` jumps straight to a chapter for learning;
+> both `prping document 1` (by number) and `prping document installation` (by title prefix) work.
 
 ---
 
@@ -162,7 +162,7 @@ prping organizes everything into **subcommands**; any **unique prefix** abbrevia
 | `engine` | Packet engine: analyze .pkt/.pktl, LSP, `--ls/--hex/--pcap`, pcap→.pkt/.pktl convert (`--to-pkt`) | `prping --eng ...` |
 | `packet` | Build a .pkt/.pktl and send (`--raw/--wait/--fuzz/--out`) | `prping --pkt ...` |
 
-Top-level `--version`, `--help-pkg [SECTION]` and `--lang` do not occupy the subcommand
+Top-level `--version` and `--lang` do not occupy the subcommand
 position and may appear anywhere (e.g. `prping --lang zh-CN ping 8.8.8.8`).
 
 ---
@@ -213,7 +213,7 @@ prping trace 8.8.8.8               # see Chapter 17: traceroute
 
 ### Notes
 
-- Raw ICMP socket: Linux/macOS need root or `cap_net_raw`; **on Windows ICMP ping uses ICMP.DLL (`IcmpSendEcho2`, same as the system ping.exe)** — no administrator privileges required, and immune to the Windows 7 RTM (SP0) raw socket defect (on that version `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)` returns WSAEINVAL 10022 even as administrator; fixed in SP1); on Win7 SP0 the v4 `-s` source binding is not supported (ICMP.DLL has no source parameter — warned and ignored; v6 supports it)
+- Raw ICMP socket: Linux/macOS need root or `cap_net_raw`; **on Windows ICMP ping uses Iphlpapi.dll (`IcmpSendEcho2`, same as the system ping.exe)** — linked via windows-sys 0.59's `Win32_NetworkManagement_IpHelper` feature (Iphlpapi.dll is a system component, always present); no administrator privileges required, and immune to the Windows 7 RTM (SP0) raw socket defect (on that version `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)` returns WSAEINVAL 10022 even as administrator; fixed in SP1); on Win7 SP0 the v4 `-s` source binding is not supported (IcmpSendEcho2 has no source parameter — warned and ignored; v6 supports it)
 - `-l` controls the ICMP payload size in bytes (excluding the ICMP/IP headers)
 - Distinguishes three kinds of replies: echo reply (normal), unreachable (type 3), TTL exceeded (type 11)
 
@@ -703,11 +703,11 @@ LANG=zh_CN.UTF-8 prping ping 8.8.8.8
 
 ### Manual language
 
-The `--help-pkg` manual switches with the language:
+The `document` manual switches with the language:
 
 ```bash
-prping --lang zh-CN --help-pkg 16     # Chinese manual, Chapter 16 (MTU)
-prping ping --lang en-US --help-pkg MTU    # English manual
+prping --lang zh-CN document 16     # Chinese manual, Chapter 16 (MTU)
+prping --lang en-US document MTU    # English manual
 ```
 
 ---

@@ -76,6 +76,42 @@ pub fn print_magenta<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<
     w.reset()
 }
 
+/// 获取指定层级的缩进字符串。
+///
+/// # 缩进层级
+/// - 0: 无缩进
+/// - 1: 2空格（一级列表、子标题）
+/// - 2: 4空格（二级内容、文档字符串）
+/// - 3: 8空格（hexdump等特殊用途）
+/// - 4+: 12空格或更多（深度嵌套）
+pub fn indent(level: usize) -> &'static str {
+    match level {
+        0 => "",
+        1 => "  ",
+        2 => "    ",
+        3 => "        ",
+        _ => "            ", // 4+ 层级使用12空格
+    }
+}
+
+/// 将文本填充到指定宽度，用于对齐。
+///
+/// # 示例
+/// ```
+/// use prping_core::output::pad_to;
+/// assert_eq!(pad_to("hello", 10), "hello     ");
+/// ```
+pub fn pad_to(text: &str, width: usize) -> String {
+    format!("{:<width$}", text, width = width)
+}
+
+/// 创建指定长度的空格字符串。
+///
+/// 用于动态计算缩进，比硬编码空格更灵活。
+pub fn spaces(count: usize) -> String {
+    " ".repeat(count)
+}
+
 /// 打印暗淡文本（次要信息）。
 pub fn print_dim<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> {
     w.set_color(
@@ -100,7 +136,7 @@ pub fn print_server_log<W: WriteColor>(
     if sent_total > 0 && elapsed > 0.0 {
         // 服务端发送方向（-r 触发模式）：打印发送的数据量
         let mbits = (sent_total as f64 * 8.0) / (elapsed * 1_000_000.0);
-        let size_str = crate::format_bytes(sent_total);
+        let size_str = crate::util::format_bytes(sent_total);
         print_green(w, t!("server.sent_tag"))?;
         print_cyan(w, format!("{ip}:{port} "))?;
         print_yellow(
@@ -110,7 +146,7 @@ pub fn print_server_log<W: WriteColor>(
         writeln!(w)
     } else if total > 0 && elapsed > 0.0 {
         let mbits = (total as f64 * 8.0) / (elapsed * 1_000_000.0);
-        let size_str = crate::format_bytes(total);
+        let size_str = crate::util::format_bytes(total);
         print_green(w, t!("server.recv_tag"))?;
         print_cyan(w, format!("{ip}:{port} "))?;
         print_yellow(

@@ -11,13 +11,11 @@ use std::time::Duration;
 use termcolor::StandardStream;
 
 #[cfg(windows)]
-use crate::ping::icmpwin::IcmpSession;
+use crate::ping::icmpwin::ws::IcmpSession;
 #[cfg(not(windows))]
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use socket2::{SockAddr, Socket};
 #[cfg(not(windows))]
 use std::mem::MaybeUninit;
-#[cfg(not(windows))]
-use std::net::SocketAddr;
 #[cfg(not(windows))]
 use std::time::Instant;
 
@@ -98,9 +96,9 @@ impl IcmpSender {
         }
         #[cfg(not(windows))]
         {
-            let (sock, target) = create_socket(addr, source)?;
+            let (sock, target) = util::create_icmp_socket(addr, source)?;
             let async_sock = smol::Async::new(sock)?;
-            Ok(IcmpSender::Raw(async_sock, target, rand_id()))
+            Ok(IcmpSender::Raw(async_sock, target, util::rand_u16()))
         }
     }
 }
@@ -170,7 +168,7 @@ async fn send_recv_win(
     source: Option<IpAddr>,
 ) -> Result<(Duration, u8, usize), IcmpErr> {
     let payload = echo_payload(payload_size);
-    // *mut c_void 非 Send：unblock 闭包须 Send，句柄按 usize 传值
+    // HANDLE（isize）非 Send：unblock 闭包须 Send，句柄按 usize 传值
     let handle = session.handle() as usize;
     // v6 源绑定经 SourceAddress 参数；v4 不支持（IcmpSendEcho2 无源地址参数）
     let src6 = match source {
@@ -178,8 +176,8 @@ async fn send_recv_win(
         _ => None,
     };
     smol::unblock(move || {
-        crate::ping::icmpwin::probe_once(
-            handle as *mut std::ffi::c_void,
+        crate::ping::icmpwin::ws::probe_once(
+            handle as isize,
             dest,
             &payload,
             src6,
@@ -189,42 +187,14 @@ async fn send_recv_win(
     .await
 }
 
-/// raw socket 创建失败的统一报错：Windows 文案与 Unix 不同（raw socket 在
-/// Windows 需管理员 + Win7 RTM（SP0）有缺陷——ICMP ping 已不走 raw socket，
-/// 但 MTU 探测 / ICMP 路由跟踪仍需要）。
-pub(crate) fn raw_socket_error(e: std::io::Error) -> anyhow::Error {
-    if cfg!(windows) {
-        anyhow::anyhow!(t!("errors.raw_socket_windows", error = e.to_string()))
-    } else {
-        anyhow::anyhow!(t!("errors.raw_socket", error = e.to_string()))
-    }
-}
-
 /// echo 载荷字节（`i % 256` 循环，各平台一致）。
+///
+/// Windows ICMP.DLL 路径需要 `Vec<u8>` 载荷；非 Windows 路径已改用 `util::echo_fill`。
+#[cfg(any(windows, test))]
 fn echo_payload(payload_size: usize) -> Vec<u8> {
-    (0..payload_size).map(|i| (i % 256) as u8).collect()
-}
-
-#[cfg(not(windows))]
-fn create_socket(addr: IpAddr, source: Option<IpAddr>) -> anyhow::Result<(Socket, SockAddr)> {
-    match addr {
-        IpAddr::V4(v4) => {
-            let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
-                .map_err(|e| anyhow::anyhow!(t!("errors.raw_socket", error = e.to_string())))?;
-            if let Some(src) = source.filter(IpAddr::is_ipv4) {
-                sock.bind(&SockAddr::from(SocketAddr::new(src, 0)))?;
-            }
-            Ok((sock, SockAddr::from(SocketAddr::new(IpAddr::V4(v4), 0))))
-        }
-        IpAddr::V6(v6) => {
-            let sock = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
-                .map_err(|e| anyhow::anyhow!(t!("errors.raw_socket", error = e.to_string())))?;
-            if let Some(src) = source.filter(IpAddr::is_ipv6) {
-                sock.bind(&SockAddr::from(SocketAddr::new(src, 0)))?;
-            }
-            Ok((sock, SockAddr::from(SocketAddr::new(IpAddr::V6(v6), 0))))
-        }
-    }
+    let mut buf = vec![0u8; payload_size];
+    util::echo_fill(&mut buf);
+    buf
 }
 
 fn print_reply(
@@ -353,8 +323,9 @@ fn build_icmp_echo(addr: IpAddr, ident: u16, seq: u16, payload_size: usize) -> V
         IpAddr::V6(_) => build_v6(ident, seq, payload_size),
     }
 }
-#[cfg(not(windows))]
-fn build_v4(ident: u16, seq: u16, payload_size: usize) -> Vec<u8> {
+
+/// 构建 ICMPv4 echo request（type 8），载荷 `0..255` 循环填充 + checksum。
+pub(crate) fn build_v4(ident: u16, seq: u16, payload_size: usize) -> Vec<u8> {
     let total = 8 + payload_size;
     let mut b = vec![0u8; total];
     b[0] = 8;
@@ -363,14 +334,15 @@ fn build_v4(ident: u16, seq: u16, payload_size: usize) -> Vec<u8> {
     b[5] = ident as u8;
     b[6] = (seq >> 8) as u8;
     b[7] = seq as u8;
-    b[8..].copy_from_slice(&echo_payload(payload_size));
+    util::echo_fill(&mut b[8..]);
     let c = icmp_cksum(&b);
     b[2] = (c >> 8) as u8;
     b[3] = c as u8;
     b
 }
-#[cfg(not(windows))]
-fn build_v6(ident: u16, seq: u16, payload_size: usize) -> Vec<u8> {
+
+/// 构建 ICMPv6 echo request（type 128），载荷 `0..255` 循环填充（无 checksum，内核算）。
+pub(crate) fn build_v6(ident: u16, seq: u16, payload_size: usize) -> Vec<u8> {
     let total = 8 + payload_size;
     let mut b = vec![0u8; total];
     b[0] = 128;
@@ -379,7 +351,7 @@ fn build_v6(ident: u16, seq: u16, payload_size: usize) -> Vec<u8> {
     b[5] = ident as u8;
     b[6] = (seq >> 8) as u8;
     b[7] = seq as u8;
-    b[8..].copy_from_slice(&echo_payload(payload_size));
+    util::echo_fill(&mut b[8..]);
     b
 }
 pub(crate) fn icmp_cksum(data: &[u8]) -> u16 {
@@ -395,12 +367,6 @@ pub(crate) fn icmp_cksum(data: &[u8]) -> u16 {
         s = (s & 0xFFFF) + (s >> 16)
     }
     !(s as u16)
-}
-#[cfg(not(windows))]
-fn rand_id() -> u16 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    RandomState::new().build_hasher().finish() as u16
 }
 
 #[cfg(test)]

@@ -1,16 +1,17 @@
-//! 原始套接字发送：Linux AF_PACKET / IPPROTO_RAW / raw ICMP 收包；Windows 走 rawwin 兼容层。
+//! 原始套接字发送：Linux AF_PACKET / IPPROTO_RAW / raw ICMP 收包；Windows / macOS 走 pcap 兼容层（rawpcap.rs）。
 //!
 //! 忠实拆分自原 `engine/pkg.rs` 的 raw 段：`send_raw_bytes` 分发、
 //! `wait_icmp_reply` 应答等待、AF_PACKET / IPPROTO_RAW 平台实现。
 
 use std::io;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use packet_dsl::ir::{Layer, PacketSpec};
-use rust_i18n::t;
 
 use super::SendOutcome;
 use super::sniffer::SnifferMatcher;
+use super::{Reply, icmp_echo_ids, match_reply};
 
 pub(crate) fn send_raw_bytes(
     bytes: &[u8],
@@ -21,18 +22,18 @@ pub(crate) fn send_raw_bytes(
     sniffer: Option<&SnifferMatcher>,
     sent_report: Option<&packet_dsl::DissectReport>,
 ) -> anyhow::Result<SendOutcome> {
-    // Windows：Npcap 兼容层一次完成设备选择 + 以太网封装 + 抓包等待（rawwin.rs）
-    #[cfg(windows)]
+    // Windows：Npcap；macOS：系统 libpcap；Linux feature=pcap：系统 libpcap（rawpcap.rs）
+    #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
     {
-        crate::engine::rawwin::send_raw_full(bytes, pkt, target, iface, wait, sniffer, sent_report)
+        crate::engine::rawpcap::send_raw_full(bytes, pkt, target, iface, wait, sniffer, sent_report)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
     {
         // --wait：先开回包 socket 再发送。回环/近零延迟网络下内核在 send() 内就
         // 同步完成回包往返（loopback xmit 触发 NET_RX softirq，softirq 在
         // local_bh_enable 的进程上下文同步执行：icmp 回显 → 回包生成 → 再次投递），
         // 回包先于 socket 存在即被内核丢弃——发送后才开 socket 永远等不到
-        // （与 rawwin/Npcap 侧「先开抓包句柄再发送」同理）。
+        // （与 rawpcap/Npcap 侧「先开抓包句柄再发送」同理）。
         #[cfg(target_os = "linux")]
         let reply_fd = if wait.is_some() && (sniffer.is_some() || icmp_echo_ids(pkt).is_some()) {
             Some(open_raw_icmp4()?)
@@ -108,7 +109,7 @@ fn open_raw_icmp4() -> anyhow::Result<libc::c_int> {
 /// 调用方必须**先打开 socket 再发送**：回环/近零延迟网络下内核在 send() 内就同步
 /// 完成回包往返——loopback xmit 触发 NET_RX softirq，softirq 在 local_bh_enable 的
 /// 进程上下文同步执行（icmp 回显 → 回包生成 → 再次投递），回包先于 socket 存在即被
-/// 内核丢弃，发送后才开 socket 永远等不到（与 rawwin/Npcap「先开抓包句柄再发送」同理）。
+/// 内核丢弃，发送后才开 socket 永远等不到（与 rawpcap/Npcap「先开抓包句柄再发送」同理）。
 #[cfg(target_os = "linux")]
 fn wait_icmp_reply(
     fd: libc::c_int,
@@ -212,23 +213,18 @@ fn send_af_packet(
     Ok(n as usize)
 }
 
-#[cfg(all(not(target_os = "linux"), not(windows)))]
+// macOS 以太网帧现在走 pcap 路径（rawpcap.rs::send_raw_full），
+// 不会再走到这个函数——保留兜底报错。
+#[cfg(all(not(target_os = "linux"), not(windows), not(target_os = "macos")))]
 fn send_af_packet(
     _bytes: &[u8],
     _target: Option<&SocketAddr>,
     _iface: Option<&str>,
 ) -> anyhow::Result<usize> {
-    #[cfg(target_os = "macos")]
-    {
-        anyhow::bail!(t!("errors.raw_eth_macos"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        anyhow::bail!("AF_PACKET（以太网原始帧）仅支持 Linux")
-    }
+    anyhow::bail!("AF_PACKET（以太网原始帧）仅支持 Linux")
 }
 
-/// IPPROTO_RAW + IP_HDRINCL 发送完整 IPv4 包（Unix；Windows 走 rawwin::send_raw_full）。
+/// IPPROTO_RAW + IP_HDRINCL 发送完整 IPv4 包（Unix；Windows/macOS 走 rawpcap）。
 #[cfg(not(windows))]
 fn send_raw_ip4(bytes: &[u8], target: &SocketAddr) -> anyhow::Result<usize> {
     if bytes.len() < 20 || (bytes[0] >> 4) != 4 {
@@ -293,7 +289,7 @@ fn send_raw_ip4(bytes: &[u8], target: &SocketAddr) -> anyhow::Result<usize> {
     }
 }
 
-/// 原始 IPv6 发送（Linux：AF_INET6 + IPPROTO_RAW + IPV6_HDRINCL；Windows 走 rawwin）。
+/// 原始 IPv6 发送（Linux：AF_INET6 + IPPROTO_RAW + IPV6_HDRINCL；Windows/macOS 走 rawpcap）。
 #[cfg(not(windows))]
 fn send_raw_ip6(bytes: &[u8], target: &SocketAddr) -> anyhow::Result<usize> {
     if bytes.len() < 40 || (bytes[0] >> 4) != 6 {

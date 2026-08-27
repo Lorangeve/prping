@@ -18,6 +18,7 @@ const SUBCOMMANDS: &[&str] = &[
     "trace",
     "engine",
     "packet",
+    "document",
 ];
 
 /// Parse "host:port" string.
@@ -204,12 +205,13 @@ struct TraceArgs {
     target: String,
 }
 
-/// engine 子命令（packet-dsl 宿主：分析/LSP/--ls/--hex/--pcap/转码）
+/// engine 子命令（packet-dsl 宿主：分析/LSP/--ls/--ls-page/--hex/--pcap/转码）
 #[derive(Clone)]
 struct EngineArgs {
     file: Option<String>,
     lsp: bool,
     ls: bool,
+    ls_page: bool,
     hex: Option<String>,
     pcap: Option<String>,
     /// pcap → .pkt/.pktl 转码输出目录（配合 --pcap；缺省无损字节级，--structured 语义化）。
@@ -244,6 +246,12 @@ struct PacketArgs {
     target: Option<String>,
 }
 
+/// document 子命令（使用手册：全文 / 章节跳转）
+struct DocumentArgs {
+    lang: Option<String>,
+    section: Option<String>,
+}
+
 /// 顶层命令枚举（子命令分发）。
 enum Command {
     Ping(PingArgs),
@@ -253,6 +261,7 @@ enum Command {
     Trace(TraceArgs),
     Engine(EngineArgs),
     Packet(PacketArgs),
+    Document(DocumentArgs),
 }
 
 fn ping_cmd() -> impl Parser<Command> {
@@ -415,6 +424,9 @@ fn engine_cmd() -> impl Parser<Command> {
             .switch()
             .help(t!("help.options.lsp").as_ref())),
         ls(long("ls").switch().help(t!("help.options.ls").as_ref())),
+        ls_page(long("ls-page")
+            .switch()
+            .help(t!("help.options.ls_page").as_ref())),
         hex(long("hex")
             .argument::<String>("0102...")
             .help(t!("help.options.hex").as_ref())
@@ -510,7 +522,21 @@ fn packet_cmd() -> impl Parser<Command> {
     .map(Command::Packet)
 }
 
-/// 顶层解析器：7 个子命令平行组合（bpaf 要求子命令是首个 token）。
+/// document 子命令（使用手册：全文 / 章节跳转）
+fn document_cmd() -> impl Parser<Command> {
+    construct!(DocumentArgs {
+        lang(opt_lang()),
+        section(positional::<String>("SECTION").optional()),
+    })
+    .to_options()
+    .usage(t!("help.usage_document").as_ref())
+    .descr(t!("cmd.document").as_ref())
+    .footer(t!("help.footer_document").as_ref())
+    .command("document")
+    .map(Command::Document)
+}
+
+/// 顶层解析器：8 个子命令平行组合（bpaf 要求子命令是首个 token）。
 fn cmd() -> impl Parser<Command> {
     construct!([
         ping_cmd(),
@@ -520,6 +546,7 @@ fn cmd() -> impl Parser<Command> {
         trace_cmd(),
         engine_cmd(),
         packet_cmd(),
+        document_cmd(),
     ])
 }
 
@@ -915,8 +942,8 @@ fn run_trace(a: TraceArgs) -> anyhow::Result<()> {
 /// engine 子命令校验：--ls/--hex/--pcap 互斥、不能与 --lsp 组合、子动作不带文件；
 /// 转码选项（--to-pkt/--structured/--skip/--limit）须配合 --pcap。
 fn validate_engine(a: &EngineArgs) -> anyhow::Result<()> {
-    let sub = a.ls || a.hex.is_some() || a.pcap.is_some();
-    if (a.ls as u8 + a.hex.is_some() as u8 + a.pcap.is_some() as u8) > 1 {
+    let sub = a.ls || a.ls_page || a.hex.is_some() || a.pcap.is_some();
+    if (a.ls as u8 + a.ls_page as u8 + a.hex.is_some() as u8 + a.pcap.is_some() as u8) > 1 {
         anyhow::bail!(t!("errors.eng_sub_conflict"));
     }
     if sub && a.lsp {
@@ -960,8 +987,8 @@ fn run_engine(a: EngineArgs) -> anyhow::Result<()> {
     if a.lsp {
         return prping_core::run_lsp(&libs);
     }
-    if a.ls {
-        return prping_core::ls_builtins(&libs);
+    if a.ls || a.ls_page {
+        return prping_core::ls_builtins(&libs, a.ls_page);
     }
     if let Some(hex) = &a.hex {
         return prping_core::decode_hex(hex);
@@ -1037,6 +1064,13 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
         return prping_core::send_recipe(&path, &opts);
     }
     prping_core::send_packets(&path, &opts)
+}
+
+/// document 子命令分发（使用手册：全文 / 章节跳转）。
+fn run_document(a: DocumentArgs) -> anyhow::Result<()> {
+    apply_lang(&a.lang);
+    let section = a.section.unwrap_or_default();
+    handle_help_pkg(&section)
 }
 
 // ── 唯一前缀展开 ──────────────────────────────────────────────────────────
@@ -1140,27 +1174,6 @@ fn detect_locale() {
     }
 }
 /// 预处理裸 `--help-pkg`（不带值）→ `--help-pkg=`（空标题 = 全文）；
-/// 带值（`--help-pkg 安装` 或 `--help-pkg=安装`）原样保留。
-/// 返回的列表不含 argv[0]（与 bpaf `Args::current_args` 一致）。
-fn normalize_help_pkg_args() -> Vec<String> {
-    let raw: Vec<String> = std::env::args().skip(1).collect();
-    let mut out = Vec::with_capacity(raw.len());
-    let mut it = raw.iter().peekable();
-    while let Some(a) = it.next() {
-        if a == "--help-pkg" {
-            let next_is_value = it.peek().map(|n| !n.starts_with('-')).unwrap_or(false);
-            if next_is_value {
-                out.push(a.clone());
-            } else {
-                out.push("--help-pkg=".to_string());
-            }
-        } else {
-            out.push(a.clone());
-        }
-    }
-    out
-}
-
 /// 顶层 `--help-pkg` 处理（全文分页 / 章节跳转），与子命令解析互斥。
 fn handle_help_pkg(section: &str) -> anyhow::Result<()> {
     let manual = manual_for(&rust_i18n::locale());
@@ -1202,7 +1215,7 @@ fn main() -> anyhow::Result<()> {
     detect_locale();
     install_interrupt_handler()?;
 
-    let mut args = normalize_help_pkg_args();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
 
     // 全局 --lang：任意位置提取并移除（子命令必须是首个 token，--lang 在子命令前
     // 时 bpaf 无法消费；detect_locale 已用它设置过一次 locale，这里对显式值再设置）。
@@ -1226,19 +1239,7 @@ fn main() -> anyhow::Result<()> {
         rust_i18n::set_locale(&normalize_locale(loc));
     }
 
-    // 顶层 --help-pkg / --version（不属任何子命令，pre-scan 处理）
-    if let Some(pos) = args.iter().position(|a| a.starts_with("--help-pkg")) {
-        let a = &args[pos];
-        let section = if let Some(v) = a.strip_prefix("--help-pkg=") {
-            v.to_string()
-        } else if a == "--help-pkg" {
-            // 空格分隔值（normalize 后仅带值场景保留原样）
-            args.get(pos + 1).cloned().unwrap_or_default()
-        } else {
-            String::new()
-        };
-        return handle_help_pkg(&section);
-    }
+    // 顶层 --version（不属任何子命令，pre-scan 处理）
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("prping {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -1279,6 +1280,7 @@ fn main() -> anyhow::Result<()> {
         Command::Trace(a) => run_trace(a),
         Command::Engine(a) => run_engine(a),
         Command::Packet(a) => run_packet(a),
+        Command::Document(a) => run_document(a),
     }
 }
 

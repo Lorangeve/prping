@@ -30,7 +30,7 @@ pub(crate) fn trace_tcp(
     w: &mut StandardStream,
 ) -> anyhow::Result<(Vec<Hop>, bool)> {
     let local = local_ip_for(target_ip).ok_or_else(|| anyhow::anyhow!("无法获取本机路由地址"))?;
-    let (sock, target_sa) = super::create_tcp_socket(target_ip, local)?;
+    let (sock, target_sa) = crate::util::create_tcp_socket(target_ip, local)?;
     let dport = cfg.port;
 
     let mut hops: Vec<Hop> = Vec::new();
@@ -41,7 +41,7 @@ pub(crate) fn trace_tcp(
         if util::interrupted() {
             break;
         }
-        super::set_ttl(&sock, hop_no, target_ip.is_ipv6())?;
+        crate::util::set_ttl(&sock, hop_no, target_ip.is_ipv6())?;
 
         // 发送本跳全部探测（背靠背，不逐包等待）
         let mut probes: Vec<(u16, Instant)> = Vec::with_capacity(PROBES_PER_HOP);
@@ -155,7 +155,8 @@ pub(crate) fn trace_tcp(
     _max_hops: u32,
     _w: &mut StandardStream,
 ) -> anyhow::Result<(Vec<Hop>, bool)> {
-    anyhow::bail!(crate::t!("errors.tcp_trace_windows"))
+    use rust_i18n::t;
+    anyhow::bail!(t!("errors.tcp_trace_windows"))
 }
 
 /// 构建 TCP SYN 段（无 IP 头，raw socket 由内核加 IP 头）。
@@ -166,7 +167,7 @@ fn build_tcp_syn(dst: IpAddr, src: IpAddr, sport: u16, dport: u16) -> Vec<u8> {
     b[2] = (dport >> 8) as u8;
     b[3] = dport as u8;
     // seq = random
-    let seq = super::rand_u32();
+    let seq = crate::util::rand_u32();
     b[4..8].copy_from_slice(&seq.to_be_bytes());
     // ack = 0
     b[8..12].copy_from_slice(&[0; 4]);

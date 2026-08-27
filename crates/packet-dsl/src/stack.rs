@@ -169,7 +169,7 @@ mod tests {
         ArpFields, DnsFields, EthernetFields, HttpFields, IcmpFields, Ipv4Fields, Ipv6Fields,
         RawData, TcpFields, UdpFields,
     };
-    use crate::proto::{CtxCond, Rule, RuleCond};
+    use crate::proto::{CtxCond, MatchFn, Rule, RuleCond};
 
     fn raw() -> Layer {
         Layer::Raw(RawData {
@@ -231,7 +231,7 @@ mod tests {
             layer: None,
             rule: Some(Rule {
                 ctxs: conds.into_iter().map(CtxCond::Atom).collect(),
-                masks: Vec::new(),
+                matches: Vec::new(),
             }),
             params: Vec::new(),
             fields: Vec::new(),
@@ -245,7 +245,7 @@ mod tests {
             layer: None,
             rule: Some(Rule {
                 ctxs: Vec::new(),
-                masks: vec![0xc0],
+                matches: vec![MatchFn::Mask(0xc0)],
             }),
             params: Vec::new(),
             fields: Vec::new(),

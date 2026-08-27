@@ -4,7 +4,7 @@
 //!   并读取回显（超时）。本地监听的服务能直接收到应用数据。
 //! - `--raw`：原始发送完整序列化字节——Linux（需要 root/cap_net_raw）：
 //!   eth → AF_PACKET；ipv4 → IPPROTO_RAW + IP_HDRINCL；ipv6 → 原始 IPv6。
-//!   Windows：Npcap 链路层注入（`rawwin.rs` 兼容层，设备选择 + 以太网封装 + 抓包等待）。
+//!   Windows/macOS：pcap 链路层注入（`rawpcap.rs` 兼容层，设备选择 + 以太网封装 + 抓包等待）。
 //! - `--wait N`（对标 scapy `sr1`）：发送后等待匹配应答并打印 RTT + 反解展示。
 //! - `--fuzz`（对标 scapy `fuzz()`）：未填字段全部随机化。
 //! - `--out FILE.pcap`（对标 scapy `wrpcap`）：构建的包另存为 pcap。
@@ -118,7 +118,7 @@ pub fn extract_payload(pkt: &PacketSpec) -> Option<(Transport, Vec<u8>)> {
     send::extract_payload(pkt)
 }
 
-// ── 子模块 re-export（供 lib / 兄弟模块 / rawwin 使用）──────────
+// ── 子模块 re-export（供 lib / 兄弟模块 / rawpcap 使用）──────────
 
 pub use recipe::step_send_mode;
 pub use send::{derive_target, patch_zero_src};
@@ -172,7 +172,7 @@ pub(crate) type ReplyMatch = Option<(Vec<u8>, Option<Vec<(String, String)>>)>;
 /// 用 sniffer（存在）或 ICMP echo id+seq 匹配收到的回包数据。
 ///
 /// 返回 `(应答字节, sniffer 命中字段)`；RTT 由调用方测量后填入 `Reply`。
-/// Linux raw ICMP socket（`wait_icmp_reply`）与 Windows Npcap 捕获（`rawwin`）共用。
+/// Linux raw ICMP socket（`wait_icmp_reply`）与 pcap 捕获（`rawpcap`）共用。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn match_reply(
     data: &[u8],

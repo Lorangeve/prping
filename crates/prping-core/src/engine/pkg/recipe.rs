@@ -15,7 +15,7 @@ use super::send::{SendCtx, fmt_target, send_module};
 use super::sniffer::{FVal, field_bytes, layer_kind, sniffer_extract};
 use super::{PkgOptions, SendMode};
 use crate::engine::recipe::{ExtractAs, OnError};
-use crate::output::{print_cyan, print_dim, print_green, print_magenta};
+use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta};
 
 pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     crate::engine::eng::ensure_dns_resolver();
@@ -106,7 +106,8 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                 print_dim(
                     &mut w,
                     format!(
-                        "  delay {secs}s before step {}/{} ...",
+                        "{}delay {secs}s before step {}/{} ...",
+                        indent(1),
                         i + 1,
                         recipe.steps.len()
                     ),
@@ -116,7 +117,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
             if !sleep_interruptible(secs) {
                 crate::output::print_yellow(
                     &mut w,
-                    "  interrupted during delay — stopping recipe",
+                    format!("{}interrupted during delay — stopping recipe", indent(1)),
                 )?;
                 writeln!(&mut w)?;
                 return Ok(());
@@ -124,7 +125,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         }
         // 步骤失败处理：stop（默认）→ 中止返回 Err；continue → 记录继续
         let fail_step = |w: &mut StandardStream, msg: &str| -> anyhow::Result<()> {
-            let _ = crate::output::writeln_red(w, format!("  ✗ {msg}"));
+            let _ = crate::output::writeln_red(w, format!("{}✗ {msg}", indent(1)));
             if step.on_error == OnError::Stop {
                 anyhow::bail!(
                     "配方 {}：第 {}/{} 步失败（on_error: stop）",

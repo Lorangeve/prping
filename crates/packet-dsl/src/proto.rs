@@ -74,28 +74,85 @@ fn cond_matches(rule: &RuleCond, kind: &RuleCond) -> bool {
     }
 }
 
-/// 一个 proto 的分派规则：**AND 组合**（多个 `#[rule]` 注解之间、`and(...)` 组内
-/// 都是 AND；`or(...)` 是显式选一）。
+/// 一个 proto 的分派规则：上下文条件（端口/协议号）+ 匹配函数列表（AND 组合）。
 ///
-/// - `ctxs`：上下文条件表达式列表（每个 `#[rule(udp(dport=443))]` / `or(...)` /
-///   `and(...)` 注解一个；**各条件可挂不同层**（如 DNS 的 `udp(dport=53)` +
-///   `tcp(dport=53)`——dissect 按层分派时逐条件匹配，任一命中即候选）；
-///   条件内部所有原子同层（and/or 树内不得跨层，掩码不能进 or 分支）。
-///   空列表 = 无上下文条件（不可顶层分派，仅作 `rest(子proto)` 解析目标）。
-/// - `masks`：首字节掩码子条件（`bytes(0xc0)`，命中条件 `(b & mask) == mask`），
-///   解析期先验，只允许 AND 组合（不能出现在 `or` 分支——掩码无层可挂，不是
-///   分派条件）。
+/// - `ctxs`：上下文条件表达式（`#[rule(udp(dport=443))]` 等，按层分派候选）
+/// - `matches`：匹配函数列表（`#[rule(startswith("HTTP/"))]` 等，解析期校验）
 ///
-/// 多个 `#[rule]` 注解与 `#[rule(and(...))]` 显式分组等价（全部并进同一规则）。
+/// 匹配函数通过 [`MatchTarget`] 定位到报文/字段的字节内容，或通过字段名提取
+/// 解析值做比较（`ne`/`eq`）。全部 AND 组合；`or(...)` 内只允许上下文条件。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rule {
     pub ctxs: Vec<CtxCond>,
-    pub masks: Vec<u8>,
+    pub matches: Vec<MatchFn>,
+}
+
+/// rule 匹配函数，隐式返回 bool（proto 上下文里使用）。
+///
+/// 分两类：
+/// - **字节模式**（`StartsWith`/`EndsWith`/`Contains`）：从 [`MatchTarget`] 取
+///   字节切片，做前缀/后缀/子串匹配。
+/// - **值约束**（`Eq`/`Ne`）：从 proto 解析结果提取字段值，与字面量比较。
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchFn {
+    /// 首字节位掩码（`#[rule(bytes(0xc0))]`）：`(首字节 & mask) == mask`。
+    /// 保留兼容，后续由 `mask` 原语替代。
+    Mask(u8),
+    /// 前缀匹配：`#[rule(startswith("HTTP/"))]`。
+    StartsWith {
+        pattern: Vec<u8>,
+        target: MatchTarget,
+    },
+    /// 后缀匹配：`#[rule(endswith("\r\n\r\n"))]`。
+    EndsWith {
+        pattern: Vec<u8>,
+        target: MatchTarget,
+    },
+    /// 子串包含：`#[rule(contains("HTTP/"))]`。
+    Contains {
+        pattern: Vec<u8>,
+        target: MatchTarget,
+    },
+    /// 字段值相等：`#[rule(eq(qdcount, 0))]`。
+    Eq { field: String, value: MatchVal },
+    /// 字段值不等：`#[rule(ne(qdcount, 0))]`。
+    Ne { field: String, value: MatchVal },
+    /// 任一子条件满足（`#[rule(or(...))]` 内的字段值约束）。
+    Or(Vec<MatchFn>),
+    /// 全部子条件满足（`#[rule(and(...))]` 内的字段值约束，通常隐式 AND）。
+    And(Vec<MatchFn>),
+}
+
+/// 匹配目标：匹配函数作用的字节范围。
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchTarget {
+    /// 整个报文（默认，无 `at`/`in` 时）。
+    Whole,
+    /// 从报文偏移开始（`#[rule(startswith("HTTP/", at=6))]`）。
+    Offset(usize),
+    /// 字段的字节范围（`#[rule(startswith("HTTP/", in=start_line))]`，
+    /// 字段名 = `#[meta(name=...)]` 或参数名）。
+    Field(String),
+}
+
+/// 匹配值：`eq`/`ne` 的字面量比较值。
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchVal {
+    Int(i64),
+    Bytes(Vec<u8>),
+    Str(String),
+}
+
+/// rule 校验上下文：proto 解析的完整结果，供匹配函数提取数据。
+pub struct RuleContext<'a> {
+    pub bytes: &'a [u8],
+    pub hit: &'a ProtoHit,
+    pub field_ranges: &'a [(String, usize, usize)],
 }
 
 impl Rule {
     pub fn is_empty(&self) -> bool {
-        self.ctxs.is_empty() && self.masks.is_empty()
+        self.ctxs.is_empty() && self.matches.is_empty()
     }
 
     /// 在分派点 `kind`（某层实际观测值）是否命中：任一上下文条件表达式求值为真
@@ -104,9 +161,111 @@ impl Rule {
         self.ctxs.iter().any(|c| c.matches(kind))
     }
 
-    /// 首字节是否通过全部掩码子条件。
-    pub fn matches_first_byte(&self, b: u8) -> bool {
-        self.masks.iter().all(|m| b & m == *m)
+    /// 全部匹配函数是否通过（AND 组合）。从 `RuleContext` 提取数据，逐条校验。
+    pub fn matches_proto(&self, ctx: &RuleContext) -> bool {
+        self.matches.iter().all(|m| m.eval(ctx))
+    }
+
+    /// 便捷方法：对单字节做 Whole 模式匹配（测试用）。
+    pub fn matches_bytes(&self, bytes: &[u8]) -> bool {
+        let empty = ProtoHit {
+            name: String::new(),
+            fields: Vec::new(),
+            subs: Vec::new(),
+        };
+        let ctx = RuleContext {
+            bytes,
+            hit: &empty,
+            field_ranges: &[],
+        };
+        self.matches_proto(&ctx)
+    }
+}
+
+impl MatchFn {
+    /// 在 rule 上下文里求值，隐式返回 bool。
+    fn eval(&self, ctx: &RuleContext) -> bool {
+        match self {
+            MatchFn::Mask(m) => ctx.bytes.first().is_some_and(|b| b & m == *m),
+            MatchFn::StartsWith { pattern, target } => {
+                target_bytes(ctx, target).is_some_and(|b| b.starts_with(pattern))
+            }
+            MatchFn::EndsWith { pattern, target } => {
+                target_bytes(ctx, target).is_some_and(|b| b.ends_with(pattern))
+            }
+            MatchFn::Contains { pattern, target } => target_bytes(ctx, target)
+                .is_some_and(|b| b.windows(pattern.len()).any(|w| w == pattern.as_slice())),
+            MatchFn::Eq { field, value } => {
+                field_val(ctx, field).is_some_and(|v| match_val_eq(v, value))
+            }
+            MatchFn::Ne { field, value } => {
+                field_val(ctx, field).is_some_and(|v| !match_val_eq(v, value))
+            }
+            MatchFn::Or(fns) => fns.iter().any(|f| f.eval(ctx)),
+            MatchFn::And(fns) => fns.iter().all(|f| f.eval(ctx)),
+        }
+    }
+
+    /// 匹配目标是否需要解析后校验（需要字段范围或非 Whole）。
+    pub fn needs_parse_result(&self) -> bool {
+        match self {
+            MatchFn::Mask(_) => false, // 掩码检查首字节，不依赖 parse 结果
+            MatchFn::Eq { .. } | MatchFn::Ne { .. } => true,
+            MatchFn::Or(fns) | MatchFn::And(fns) => fns.iter().any(|f| f.needs_parse_result()),
+            MatchFn::StartsWith { target, .. }
+            | MatchFn::EndsWith { target, .. }
+            | MatchFn::Contains { target, .. } => !matches!(target, MatchTarget::Whole),
+        }
+    }
+
+    /// 是否为字节内容匹配（掩码/前缀/后缀/子串），区别于字段值约束（eq/ne/or/and）。
+    /// `or(...)` 分支只禁止字节内容匹配（无层可挂），允许字段值约束。
+    pub fn is_byte_pattern(&self) -> bool {
+        matches!(
+            self,
+            MatchFn::Mask(_)
+                | MatchFn::StartsWith { .. }
+                | MatchFn::EndsWith { .. }
+                | MatchFn::Contains { .. }
+        )
+    }
+}
+
+/// 从上下文提取字节切片。
+fn target_bytes<'a>(ctx: &'a RuleContext, target: &MatchTarget) -> Option<&'a [u8]> {
+    match target {
+        MatchTarget::Whole => Some(ctx.bytes),
+        MatchTarget::Offset(n) => ctx.bytes.get(*n..),
+        MatchTarget::Field(name) => {
+            let (_, start, end) = ctx.field_ranges.iter().find(|(n, _, _)| n == name)?;
+            ctx.bytes.get(*start..*end)
+        }
+    }
+}
+
+/// 从上下文提取字段解析值。
+fn field_val<'a>(ctx: &'a RuleContext, field: &str) -> Option<&'a ProtoVal> {
+    ctx.hit
+        .fields
+        .iter()
+        .find(|(n, _)| n == field)
+        .map(|(_, v)| v)
+}
+
+/// MatchVal 与 ProtoVal 的等值比较。
+fn match_val_eq(proto_val: &ProtoVal, match_val: &MatchVal) -> bool {
+    match match_val {
+        MatchVal::Int(i) => proto_val.as_int() == Some(*i),
+        MatchVal::Bytes(b) => match proto_val {
+            ProtoVal::Bytes(pb) => pb == b,
+            ProtoVal::Str(s) => s.as_bytes() == b.as_slice(),
+            ProtoVal::Int(_) => false,
+        },
+        MatchVal::Str(s) => match proto_val {
+            ProtoVal::Str(ps) => ps == s,
+            ProtoVal::Bytes(pb) => pb == s.as_bytes(),
+            ProtoVal::Int(_) => false,
+        },
     }
 }
 
@@ -307,6 +466,26 @@ pub(crate) fn find_by_kind<'a>(
     registry.iter().find(|p| p.layer.as_deref() == Some(kind))
 }
 
+/// 内容识别候选：端口/协议规则未命中时，回退按内容反解的 proto。
+///
+/// 协议识别应以内容为准（格式/魔数/结构），端口只是可选提示。候选集合：
+/// - 应用层 IR 协议（`kind="http"` / `kind="dns"`）：靠声明结构 + 匹配函数
+///   （`startswith`/`contains` 等魔数、`ne` 区计数）识别，不依赖端口；
+/// - 带匹配函数的裸 proto（如 QUIC `startswith(...)` ）：靠魔数先验。
+///
+/// 排除层头（eth/arp/ipv4/ipv6/icmp/tcp/udp）与无内容判别力的裸 proto
+/// （如 dns_question/dns_answer 子 proto，无匹配函数会误报任意字节）。
+pub(crate) fn find_content_candidates(registry: &[ResolvedProto]) -> Vec<&ResolvedProto> {
+    registry
+        .iter()
+        .filter(|p| match p.layer.as_deref() {
+            Some("http") | Some("dns") => true,
+            None => p.rule.as_ref().is_some_and(|r| !r.matches.is_empty()),
+            _ => false,
+        })
+        .collect()
+}
+
 /// 解析结果字段值（展示/转码用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtoVal {
@@ -385,38 +564,63 @@ fn parse_until(
     base: usize,
     stop_at_rest: Option<bool>,
 ) -> Option<(ProtoHit, usize)> {
-    if let Some(rule) = &resolved.rule
-        && !rule.masks.is_empty()
-        && bytes.first().is_none_or(|b| !rule.matches_first_byte(*b))
-    {
-        return None;
+    // 匹配函数先验：Whole 模式的字节匹配（不依赖 parse 结果，可提前快速失败）
+    if let Some(rule) = &resolved.rule {
+        for m in &rule.matches {
+            if !m.needs_parse_result()
+                && !m.eval(&RuleContext {
+                    bytes,
+                    hit: &ProtoHit {
+                        name: String::new(),
+                        fields: Vec::new(),
+                        subs: Vec::new(),
+                    },
+                    field_ranges: &[],
+                })
+            {
+                return None;
+            }
+        }
     }
     let mut pos = 0usize; // 字节游标（普通字段按字节推进）
     let mut bitpos = 0usize; // 当前字节内位偏移（bits 字段；普通字段处须为 0）
     let mut fields: Vec<(String, ProtoVal)> = Vec::with_capacity(resolved.fields.len());
     let mut vals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut subs: Vec<ProtoHit> = Vec::new();
+    let mut field_ranges: Vec<(String, usize, usize)> = Vec::new();
     for f in &resolved.fields {
         if stop_at_rest == Some(true) && f.ty == crate::ast::FieldType::Rest {
             break; // 层头边界：rest 字段 = 载荷区，不消费
         }
+        let pos_before = pos + bitpos / 8;
         // decode_field 返回消费**位数**（bits 字段 < 8，普通字段为 8 的倍数）
         let (v, n) = decode_field(f, bytes, full, base, pos, bitpos, &vals, &mut subs)?;
         pos += (bitpos + n) / 8;
         bitpos = (bitpos + n) % 8;
+        let pos_after = pos + bitpos / 8;
         if let Some(i) = v.as_int() {
             vals.insert(f.name.clone(), i);
         }
         fields.push((f.name.clone(), v));
+        field_ranges.push((f.name.clone(), pos_before, pos_after));
     }
-    Some((
-        ProtoHit {
-            name: resolved.name.clone(),
-            fields,
-            subs,
-        },
-        pos,
-    ))
+    let hit = ProtoHit {
+        name: resolved.name.clone(),
+        fields,
+        subs,
+    };
+    // 匹配函数解析后校验：需要 parse 结果的 MatchFn（offset/字段目标、值约束）
+    if let Some(rule) = &resolved.rule {
+        let ctx = RuleContext {
+            bytes,
+            hit: &hit,
+            field_ranges: &field_ranges,
+        };
+        if !rule.matches_proto(&ctx) {
+            return None;
+        }
+    }
+    Some((hit, pos))
 }
 
 /// 重复解析子协议直到字节耗尽或失败（`rest(子proto)` 字段 = 原哨兵 list 语义）。
@@ -801,7 +1005,7 @@ mod tests {
                     dport: Some(443),
                     sport: None,
                 })],
-                masks: vec![0xc0],
+                matches: vec![MatchFn::Mask(0xc0)],
             },
         );
         let reg = vec![p];
@@ -855,7 +1059,7 @@ mod tests {
                         sport: None,
                     }),
                 ])],
-                masks: vec![0xc0],
+                matches: vec![MatchFn::Mask(0xc0)],
             },
         );
         let reg = vec![p];
@@ -913,7 +1117,7 @@ mod tests {
                         sport: None,
                     }),
                 ])],
-                masks: Vec::new(),
+                matches: Vec::new(),
             },
         );
         let reg = vec![p];
@@ -947,5 +1151,30 @@ mod tests {
             sport: Some(9),
         };
         assert!(find_rule(&reg, &d).is_empty(), "两分支都不满足不命中");
+    }
+
+    /// `contains("HTTP/")` 内容子串判别：报文字节包含子串才解析，不含则失败
+    /// （协议识别以内容为准——HTTP 的魔数 `HTTP/`，端口无关）。
+    #[test]
+    fn rule_contains_substring_dispatch() {
+        let p = min_proto(
+            "http_like",
+            Rule {
+                ctxs: Vec::new(),
+                matches: vec![MatchFn::Contains {
+                    pattern: b"HTTP/".to_vec(),
+                    target: MatchTarget::Whole,
+                }],
+            },
+        );
+        let reg = [p];
+        // 含子串 → 解析成功
+        let hit = parse_proto(&reg[0], b"GET / HTTP/1.1\r\n").expect("含 HTTP/ 应解析成功");
+        assert_eq!(hit.name, "http_like");
+        // 不含子串 → 解析失败（内容魔数不符）
+        assert!(
+            parse_proto(&reg[0], b"hello world\r\n").is_none(),
+            "不含 HTTP/ 应解析失败"
+        );
     }
 }

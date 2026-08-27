@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use packet_dsl::ir::{ArpOp, Field, Layer, TcpFlags};
 
 use crate::engine::eng::layer_name;
-use crate::output::{print_cyan, print_dim, print_magenta};
+use crate::output::{indent, print_cyan, print_dim, print_magenta};
 use termcolor::{ColorChoice, StandardStream};
 
 /// 转码选项。
@@ -607,7 +607,7 @@ fn render_recipe(
             if gap > 0.0
                 && let Some(d) = fmt_delay(gap)
             {
-                src.push_str(&format!("  delay: {d}\n"));
+                src.push_str(&format!("{}delay: {d}\n", indent(1)));
             }
         }
     }
@@ -702,11 +702,11 @@ fn render_summary(path: &Path, opts: &ConvertOptions, report: &ConvertReport, ou
     for ro in out {
         let _ = print_dim(
             &mut w,
-            format!("  {}  ({} {} B)", ro.file.display(), ro.mode, ro.len),
+            format!("{}{}  ({} {} B)", indent(1), ro.file.display(), ro.mode, ro.len),
         );
         let _ = writeln!(&mut w);
     }
-    let _ = print_dim(&mut w, format!("  recipe: {}", report.recipe.display()));
+    let _ = print_dim(&mut w, format!("{}recipe: {}", indent(1), report.recipe.display()));
     let _ = writeln!(&mut w);
 }
 

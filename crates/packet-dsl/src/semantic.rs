@@ -1008,7 +1008,7 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                 // 注解校验：`#[proto(kind="eth")]`（层身份，闭集）/ `#[rule(...)]`（分派）。
                 let mut layer: Option<String> = None;
                 let mut ctxs: Vec<crate::proto::CtxCond> = Vec::new();
-                let mut masks: Vec<u8> = Vec::new();
+                let mut matches: Vec<crate::proto::MatchFn> = Vec::new();
                 for a in &f.attrs {
                     match a.name.as_str() {
                         "proto" => {
@@ -1061,11 +1061,11 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                             for g in &a.args {
                                 match g {
                                     crate::ast::AttrArg::Call { name, args, span } => {
-                                        let (c, m) = rule_expr(name, args, *span, &file, false)?;
-                                        if let Some(c) = c {
+                                        let acc = rule_expr(name, args, *span, &file, false)?;
+                                        if let Some(c) = acc.ctx {
                                             ctxs.push(c);
                                         }
-                                        masks.extend(m);
+                                        matches.extend(acc.matches);
                                     }
                                     crate::ast::AttrArg::Kv { key, span, .. } => {
                                         // 旧键值对形式 `#[rule(layer="udp", dport=443)]`
@@ -1129,7 +1129,7 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                 // - **跨层**的条件各自独立（如 DNS 的 `#[rule(udp(dport=53))]` +
                 //   `#[rule(tcp(dport=53))]`——dissect 按层单点分派，任一命中即候选）。
                 // 校验每个条件表达式内全部原子同层（and/or 树内不得跨层）。
-                let rule = if ctxs.is_empty() && masks.is_empty() {
+                let rule = if ctxs.is_empty() && matches.is_empty() {
                     None
                 } else {
                     // 按条件所在层分组：同层 and 合并，跨层独立
@@ -1164,7 +1164,7 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                         .collect();
                     Some(crate::proto::Rule {
                         ctxs: final_ctxs,
-                        masks,
+                        matches,
                     })
                 };
                 // 无 layer 无 rule 的 proto 合法：纯构造规格（可被 use() 作 Raw 层，
@@ -1529,21 +1529,30 @@ fn attr_num_str(v: &ast::Value, span: ast::Span, file: &str) -> PktResult<String
     }
 }
 
-/// 解析一个 `#[rule]` 调用形式的子条件 → 上下文表达式 + 掩码：
-/// - `bytes(掩码)` → 首字节掩码（`(b & 掩码) == 掩码`；只允许 AND 组合）
-/// - `udp(...)`/`tcp(...)`/`ipv4(...)`/`ipv6(...)`/`eth(...)` → 原子条件
-/// - `and(子条件, ...)` → `CtxCond::And`（掩码可在此累积，仍是 AND）
+/// `rule_expr` 解析一个子条件后的累积：上下文条件 + 匹配函数。
+#[derive(Default)]
+struct RuleAccum {
+    ctx: Option<crate::proto::CtxCond>,
+    matches: Vec<crate::proto::MatchFn>,
+}
+
+/// 解析一个 `#[rule]` 调用形式的子条件 → 上下文表达式 + 匹配函数：
+/// - `mask(掩码)` → 首字节位掩码（`(b & 掩码) == 掩码`；只允许 AND 组合）
+/// - `startswith(...)` / `endswith(...)` / `contains(...)` → 字节模式匹配
+/// - `ne(字段, 值)` / `eq(字段, 值)` → 字段值约束
+/// - `udp(...)`/`tcp(...)`/`ipv4(...)`/`ipv6(...)`/`eth(...)` → 上下文原子条件
+/// - `and(子条件, ...)` → `CtxCond::And`（匹配函数可在此累积，仍是 AND）
 /// - `or(子条件, ...)` → `CtxCond::Or`（选一；分支只允许上下文条件）
 /// - `not` → 报错（分派是正向匹配，无否定用例，见 GRAMMAR.md）
 ///
-/// `in_or`：当前是否位于 or 分支内（or 分支禁止掩码子条件）。
+/// `in_or`：当前是否位于 or 分支内（or 分支禁止掩码/子串内容判别）。
 fn rule_expr(
     name: &str,
     args: &[crate::ast::AttrArg],
     span: crate::ast::Span,
     file: &str,
     in_or: bool,
-) -> PktResult<(Option<crate::proto::CtxCond>, Vec<u8>)> {
+) -> PktResult<RuleAccum> {
     if name == "and" {
         if args.is_empty() {
             return Err(
@@ -1551,21 +1560,21 @@ fn rule_expr(
                     .with_file(file.to_string()),
             );
         }
+        let mut acc = RuleAccum::default();
         let mut ctxs = Vec::new();
-        let mut masks = Vec::new();
         for sub in args {
-            let (c, m) = rule_sub_call(sub, file, in_or)?;
-            if let Some(c) = c {
+            let sub = rule_sub_call(sub, file, in_or)?;
+            if let Some(c) = sub.ctx {
                 ctxs.push(c);
             }
-            masks.extend(m);
+            acc.matches.extend(sub.matches);
         }
-        let ctx = if ctxs.is_empty() {
+        acc.ctx = if ctxs.is_empty() {
             None
         } else {
             Some(crate::proto::CtxCond::and(ctxs))
         };
-        return Ok((ctx, masks));
+        return Ok(acc);
     }
     if name == "or" {
         if args.is_empty() {
@@ -1575,28 +1584,43 @@ fn rule_expr(
             );
         }
         let mut ctxs = Vec::new();
+        let mut field_matches = Vec::new();
         for sub in args {
-            let (c, m) = rule_sub_call(sub, file, true)?;
-            if !m.is_empty() {
+            let sub = rule_sub_call(sub, file, true)?;
+            // or 分支只禁止字节内容匹配（掩码/前缀/后缀/子串，无层可挂），允许字段值约束（ne/eq）
+            if sub.matches.iter().any(|m| m.is_byte_pattern()) {
                 return Err(Diagnostic::at(
-                    "`#[rule(or(...))]` 分支不能含 `bytes(掩码)`：掩码是解析期 AND 先验（无层可挂），不能作选一分派条件——写成 `#[rule(or(udp(dport=443), udp(dport=4433)))]` + 独立 `#[rule(bytes(...))]`"
+                    "`#[rule(or(...))]` 分支不能含字节内容匹配（`mask`/`startswith`/`endswith`/`contains`）：无层可挂，不能作选一分派条件——写成独立 `#[rule(...)]`"
                         .to_string(),
                     span,
                 )
                 .with_file(file.to_string()));
             }
-            if let Some(c) = c {
+            field_matches.extend(sub.matches);
+            if let Some(c) = sub.ctx {
                 ctxs.push(c);
             }
         }
-        if ctxs.is_empty() {
-            return Err(Diagnostic::at(
-                "`#[rule(or(...))]` 需要至少一个上下文子条件".to_string(),
-                span,
-            )
-            .with_file(file.to_string()));
+        // or 需要至少一个上下文子条件或字段值约束
+        if ctxs.is_empty() && field_matches.is_empty() {
+            return Err(
+                Diagnostic::at("`#[rule(or(...))]` 需要至少一个子条件".to_string(), span)
+                    .with_file(file.to_string()),
+            );
         }
-        return Ok((Some(crate::proto::CtxCond::or(ctxs)), Vec::new()));
+        // 字段值约束合并成 MatchFn::Or（OR 语义），AND 组合留在 Rule.matches
+        let mut matches = Vec::new();
+        if !field_matches.is_empty() {
+            matches.push(crate::proto::MatchFn::Or(field_matches));
+        }
+        return Ok(RuleAccum {
+            ctx: if ctxs.is_empty() {
+                None
+            } else {
+                Some(crate::proto::CtxCond::or(ctxs))
+            },
+            matches,
+        });
     }
     if name == "not" {
         return Err(Diagnostic::at(
@@ -1606,19 +1630,19 @@ fn rule_expr(
         )
         .with_file(file.to_string()));
     }
-    if name == "bytes" {
+    if name == "mask" {
         if in_or {
             return Err(Diagnostic::at(
-                "`#[rule(or(...))]` 分支不能含 `bytes(掩码)`：掩码是解析期 AND 先验（无层可挂），不能作选一分派条件"
+                "`#[rule(or(...))]` 分支不能含 `mask(掩码)`：掩码是解析期 AND 先验（无层可挂），不能作选一分派条件"
                     .to_string(),
                 span,
             )
             .with_file(file.to_string()));
         }
-        // 掩码：一个位置参数（数字）
+        // 首字节位掩码：一个位置参数（数字）
         let Some(arg0) = args.first() else {
             return Err(Diagnostic::at(
-                "`#[rule(bytes(...))]` 需要掩码参数：`#[rule(bytes(0xc0))]`".to_string(),
+                "`#[rule(mask(...))]` 需要掩码参数：`#[rule(mask(0xc0))]`".to_string(),
                 span,
             )
             .with_file(file.to_string()));
@@ -1627,20 +1651,46 @@ fn rule_expr(
             crate::ast::AttrArg::Bare { value, span } => attr_num(value, *span, file)?,
             _ => {
                 return Err(Diagnostic::at(
-                    "`#[rule(bytes(...))]` 掩码须为数字：`#[rule(bytes(0xc0))]`".to_string(),
+                    "`#[rule(mask(...))]` 掩码须为数字：`#[rule(mask(0xc0))]`".to_string(),
                     span,
                 )
                 .with_file(file.to_string()));
             }
         };
         if n > 255 {
-            return Err(Diagnostic::at(
-                format!("`#[rule(bytes(0x{n:X}))]` 掩码需要 0..=255"),
-                span,
-            )
-            .with_file(file.to_string()));
+            return Err(
+                Diagnostic::at(format!("`#[rule(mask(0x{n:X}))]` 掩码需要 0..=255"), span)
+                    .with_file(file.to_string()),
+            );
         }
-        return Ok((None, vec![n as u8]));
+        return Ok(RuleAccum {
+            ctx: None,
+            matches: vec![crate::proto::MatchFn::Mask(n as u8)],
+        });
+    }
+    if name == "contains" {
+        let (pattern, target) = parse_pattern_match(args, span, file, "contains")?;
+        return Ok(RuleAccum {
+            ctx: None,
+            matches: vec![crate::proto::MatchFn::Contains { pattern, target }],
+        });
+    }
+    if name == "startswith" {
+        let (pattern, target) = parse_pattern_match(args, span, file, "startswith")?;
+        return Ok(RuleAccum {
+            ctx: None,
+            matches: vec![crate::proto::MatchFn::StartsWith { pattern, target }],
+        });
+    }
+    if name == "endswith" {
+        let (pattern, target) = parse_pattern_match(args, span, file, "endswith")?;
+        return Ok(RuleAccum {
+            ctx: None,
+            matches: vec![crate::proto::MatchFn::EndsWith { pattern, target }],
+        });
+    }
+    if name == "ne" || name == "eq" {
+        return parse_field_val_match(name, args, span, file);
     }
     // 上下文原子：`udp(dport=443)` → layer=udp + dport=443（build_cond 校验层名/键）
     let mut kvs: Vec<(String, String)> = Vec::new();
@@ -1662,15 +1712,280 @@ fn rule_expr(
     }
     let cond = crate::proto::build_cond(name, &kvs)
         .map_err(|e| Diagnostic::at(e.to_string(), span).with_file(file.to_string()))?;
-    Ok((Some(crate::proto::CtxCond::Atom(cond)), Vec::new()))
+    Ok(RuleAccum {
+        ctx: Some(crate::proto::CtxCond::Atom(cond)),
+        ..Default::default()
+    })
+}
+
+/// 解析字节模式匹配参数（`startswith`/`endswith`/`contains`）：
+/// 位置参数 = 字节来源（字符串字面量 / `hex("...")` / `raw("...")` 等 eng_lib 生成函数），
+/// 可选 `at=N`（偏移）/ `in=字段名`（字段字节内容）。
+fn parse_pattern_match(
+    args: &[crate::ast::AttrArg],
+    span: crate::ast::Span,
+    file: &str,
+    func: &str,
+) -> PktResult<(Vec<u8>, crate::proto::MatchTarget)> {
+    let mut pattern: Option<Vec<u8>> = None;
+    let mut target = crate::proto::MatchTarget::Whole;
+    for arg in args {
+        match arg {
+            crate::ast::AttrArg::Bare {
+                value: ast::Value::Str(s),
+                ..
+            } if pattern.is_none() => {
+                pattern = Some(s.as_bytes().to_vec());
+            }
+            crate::ast::AttrArg::Bare {
+                value: ast::Value::Hex(h),
+                ..
+            } if pattern.is_none() => {
+                pattern = Some(vec![*h as u8]);
+            }
+            crate::ast::AttrArg::Bare {
+                value: ast::Value::Int(i),
+                ..
+            } if pattern.is_none() => {
+                pattern = Some(i.to_be_bytes().to_vec());
+            }
+            crate::ast::AttrArg::Call {
+                name,
+                args: call_args,
+                span: call_span,
+            } if pattern.is_none() => {
+                // eng_lib 生成函数调用（hex / raw 等）→ 求值为字节
+                pattern = Some(eval_simple_call(name, call_args, *call_span, file)?);
+            }
+            crate::ast::AttrArg::Kv { key, value, span } => match key.as_str() {
+                "at" => {
+                    let n = attr_num(value, *span, file)?;
+                    target = crate::proto::MatchTarget::Offset(n as usize);
+                }
+                "in" => {
+                    let name = match value {
+                        ast::Value::Ident { name, .. } => name.clone(),
+                        ast::Value::Str(s) => s.clone(),
+                        _ => {
+                            return Err(Diagnostic::at(
+                                format!(
+                                    "`#[rule({func}(...))]` 的 `in` 参数须为字段名标识符或字符串"
+                                ),
+                                *span,
+                            )
+                            .with_file(file.to_string()));
+                        }
+                    };
+                    target = crate::proto::MatchTarget::Field(name);
+                }
+                _ => {
+                    return Err(Diagnostic::at(
+                        format!("`#[rule({func}(...))]` 未知参数 `{key}`（支持 at / in）"),
+                        *span,
+                    )
+                    .with_file(file.to_string()));
+                }
+            },
+            _ => {
+                return Err(Diagnostic::at(
+                    format!(
+                        "`#[rule({func}(...))]` 第一个参数须为字节来源（字符串 / hex(\"...\") / raw(\"...\") 等）"
+                    ),
+                    span,
+                )
+                .with_file(file.to_string()));
+            }
+        }
+    }
+    let bytes = pattern.ok_or_else(|| {
+        Diagnostic::at(
+            format!("`#[rule({func}(...))]` 需要字节参数：`#[rule({func}(\"...\"))]`"),
+            span,
+        )
+        .with_file(file.to_string())
+    })?;
+    if bytes.is_empty() {
+        return Err(
+            Diagnostic::at(format!("`#[rule({func}(...))]` 子串不能为空"), span)
+                .with_file(file.to_string()),
+        );
+    }
+    Ok((bytes, target))
+}
+
+/// 解析字段值约束参数（`ne`/`eq`）：
+/// 两个位置参数 = 字段名（标识符）+ 值（整数/字符串）。
+fn parse_field_val_match(
+    func: &str,
+    args: &[crate::ast::AttrArg],
+    span: crate::ast::Span,
+    file: &str,
+) -> PktResult<RuleAccum> {
+    let mut field: Option<String> = None;
+    let mut value: Option<crate::proto::MatchVal> = None;
+    for arg in args {
+        match arg {
+            crate::ast::AttrArg::Bare {
+                value: ast::Value::Ident { name, .. },
+                ..
+            } if field.is_none() => {
+                field = Some(name.clone());
+            }
+            crate::ast::AttrArg::Bare { value: v, span: vs }
+                if field.is_some() && value.is_none() =>
+            {
+                value = Some(attr_match_val(v, *vs, file)?);
+            }
+            _ => {
+                return Err(Diagnostic::at(
+                    format!("`#[rule({func}(字段, 值))]` 需要两个位置参数"),
+                    span,
+                )
+                .with_file(file.to_string()));
+            }
+        }
+    }
+    let field = field.ok_or_else(|| {
+        Diagnostic::at(format!("`#[rule({func}(...))]` 缺少字段名参数"), span)
+            .with_file(file.to_string())
+    })?;
+    let value = value.ok_or_else(|| {
+        Diagnostic::at(format!("`#[rule({func}(字段, 值))]` 缺少比较值参数"), span)
+            .with_file(file.to_string())
+    })?;
+    let mf = match func {
+        "ne" => crate::proto::MatchFn::Ne { field, value },
+        "eq" => crate::proto::MatchFn::Eq { field, value },
+        _ => unreachable!(),
+    };
+    Ok(RuleAccum {
+        ctx: None,
+        matches: vec![mf],
+    })
+}
+
+/// 值字面量 → MatchVal（支持字面量 + eng_lib 生成函数调用）。
+fn attr_match_val(
+    v: &ast::Value,
+    span: ast::Span,
+    file: &str,
+) -> PktResult<crate::proto::MatchVal> {
+    match v {
+        ast::Value::Int(i) => Ok(crate::proto::MatchVal::Int(*i)),
+        ast::Value::Hex(h) => Ok(crate::proto::MatchVal::Int(*h as i64)),
+        ast::Value::Str(s) => Ok(crate::proto::MatchVal::Str(s.clone())),
+        ast::Value::Call {
+            name,
+            args,
+            span: call_span,
+            ..
+        } => {
+            // eng_lib 生成函数调用 → 求值为字节序列
+            let bytes = eval_value_call(name, args, *call_span, file)?;
+            Ok(crate::proto::MatchVal::Bytes(bytes))
+        }
+        _ => Err(Diagnostic::at(
+            "`#[rule(ne/eq(字段, 值))]` 的值须为字面量或 eng_lib 生成函数调用".to_string(),
+            span,
+        )
+        .with_file(file.to_string())),
+    }
+}
+
+/// 语义阶段简单 eng_lib 生成函数求值（attr 参数版）：`hex("...")` / `raw("...")` → 字节。
+///
+/// 只支持不依赖运行时参数的内置函数；复杂函数（引用 params/globals）需延迟到
+/// eval 阶段（后续扩展）。
+fn eval_simple_call(
+    name: &str,
+    args: &[crate::ast::AttrArg],
+    span: crate::ast::Span,
+    file: &str,
+) -> PktResult<Vec<u8>> {
+    match name {
+        "hex" => {
+            let s = first_str_attr_arg(args, span, file, "hex")?;
+            crate::registry::hex_string_bytes(&s).map_err(|msg| {
+                Diagnostic::at(format!("`hex` {msg}"), span).with_file(file.to_string())
+            })
+        }
+        "raw" => {
+            let s = first_str_attr_arg(args, span, file, "raw")?;
+            Ok(s.into_bytes())
+        }
+        _ => Err(Diagnostic::at(
+            format!("`#[rule(...)]` 参数暂不支持 `{name}(...)` 调用（支持 hex / raw 生成函数）"),
+            span,
+        )
+        .with_file(file.to_string())),
+    }
+}
+
+/// 语义阶段简单 eng_lib 生成函数求值（值位置版）：`hex("...")` / `raw("...")` → 字节。
+fn eval_value_call(
+    name: &str,
+    args: &[ast::Value],
+    span: ast::Span,
+    file: &str,
+) -> PktResult<Vec<u8>> {
+    match name {
+        "hex" => {
+            let s = first_str_value_arg(args, span, file, "hex")?;
+            crate::registry::hex_string_bytes(&s).map_err(|msg| {
+                Diagnostic::at(format!("`hex` {msg}"), span).with_file(file.to_string())
+            })
+        }
+        "raw" => {
+            let s = first_str_value_arg(args, span, file, "raw")?;
+            Ok(s.into_bytes())
+        }
+        _ => Err(Diagnostic::at(
+            format!("`#[rule(...)]` 参数暂不支持 `{name}(...)` 调用（支持 hex / raw 生成函数）"),
+            span,
+        )
+        .with_file(file.to_string())),
+    }
+}
+
+/// 提取 attr 参数列表的第一个裸字符串参数。
+fn first_str_attr_arg(
+    args: &[crate::ast::AttrArg],
+    span: crate::ast::Span,
+    file: &str,
+    func: &str,
+) -> PktResult<String> {
+    match args.first() {
+        Some(crate::ast::AttrArg::Bare {
+            value: ast::Value::Str(s),
+            ..
+        }) => Ok(s.clone()),
+        _ => Err(Diagnostic::at(
+            format!("`{func}(...)` 需要字符串参数：`{func}(\"...\")`"),
+            span,
+        )
+        .with_file(file.to_string())),
+    }
+}
+
+/// 提取值位置参数列表的第一个字符串参数。
+fn first_str_value_arg(
+    args: &[ast::Value],
+    span: ast::Span,
+    file: &str,
+    func: &str,
+) -> PktResult<String> {
+    match args.first() {
+        Some(ast::Value::Str(s)) => Ok(s.clone()),
+        _ => Err(Diagnostic::at(
+            format!("`{func}(...)` 需要字符串参数：`{func}(\"...\")`"),
+            span,
+        )
+        .with_file(file.to_string())),
+    }
 }
 
 /// `and`/`or` 的一个子实参：必须是调用形式（递归 `rule_expr`）。
-fn rule_sub_call(
-    sub: &crate::ast::AttrArg,
-    file: &str,
-    in_or: bool,
-) -> PktResult<(Option<crate::proto::CtxCond>, Vec<u8>)> {
+fn rule_sub_call(sub: &crate::ast::AttrArg, file: &str, in_or: bool) -> PktResult<RuleAccum> {
     match sub {
         crate::ast::AttrArg::Call { name, args, span } => {
             rule_expr(name, args, *span, file, in_or)

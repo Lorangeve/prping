@@ -140,7 +140,7 @@ errors:
   tcp_trace_requires_port: "TCP 路由跟踪需要端口: prping trace --tcp HOST:PORT"
   trace_udp_tcp_conflict: "--tcp 与 --udp 不能同时使用"
   tcp_trace_windows: "TCP 路由跟踪暂不支持 Windows（raw TCP socket 受限）——请用 ICMP 路由跟踪（prping trace HOST）或 Npcap 工具"
-  raw_eth_macos: "--raw 发送以太网帧（eth）在 macOS 上不支持（AF_PACKET 仅 Linux 可用；Windows 需安装 Npcap）；请在 Linux 上运行，或改用不带 eth 层的包（ipv4/ipv6 外层可正常发送）"
+  raw_eth_macos: "macOS --raw 发送以太网帧（eth）需要 libpcap 权限（root 或 ChmodBPF 授权）——请用 sudo 运行，或改用不带 eth 层的包（ipv4/ipv6 外层可正常发送）"
   trace_no_local_addr: 无法确定本地源地址（UDP 路由探测失败）
   max_hops_requires_trace: "-m 只能与 -t（路由跟踪）一起使用"
   no_dns_requires_trace: "-d 只能与 -t（路由跟踪）一起使用"

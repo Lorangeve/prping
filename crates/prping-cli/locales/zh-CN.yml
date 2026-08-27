@@ -135,9 +135,9 @@ errors:
   engine_mode_required: 未指定模式：请用 --eng / --pkt / --ls / --hex / --pcap
   help_pkg_not_found: |-
     未找到匹配的章节：「%{section}」
-    用 `prping --help-pkg` 查看目录：
+    用 `prping document` 查看目录：
   help_pkg_ambiguous: 命中 %{count} 个章节，请用编号或更精确的标题：
-  help_pkg_toc_hint: 目录（用 `prping --help-pkg <编号或标题>` 跳转）：
+  help_pkg_toc_hint: 目录（用 `prping document <编号或标题>` 跳转）：
   conflict_v4_v6: "-4 与 -6 不能同时使用"
   conflict_server_target: "-s（服务端模式）不能与目标 HOST[:PORT] 同时使用"
   conflict_server_mode: "-s（服务端模式）不能与客户端测试参数同时使用: %{opts}"
@@ -147,7 +147,7 @@ errors:
   receive_requires_latency_bandwidth: "-r 需要配合 -b（带宽测试）或 -l + HOST:PORT（延迟测试）使用"
   lib_requires_eng_pkg: "--lib 需要 --eng 或 --pkt"
   ambiguous_prefix: "子命令前缀 '%{token}' 有歧义：可匹配 %{candidates}"
-  legacy_host_hint: "无法识别的子命令 '%{host}' — prping 现在使用子命令；试试: prping ping %{host}（迁移指南: prping --help-pkg）"
+  legacy_host_hint: "无法识别的子命令 '%{host}' — prping 现在使用子命令；试试: prping ping %{host}（迁移指南: prping document）"
   latency_requires_port: latency 需要 HOST:PORT
 cmd:
   ping: 主机 ping（ICMP；带端口为 TCP，-u 为 UDP，-m 为 MTU 探测）
@@ -157,6 +157,7 @@ cmd:
   trace: 路由跟踪（ICMP echo + 递增 TTL 逐跳）
   engine: 包引擎：分析 .pkt/.pktl、LSP、--ls/--hex/--pcap
   packet: 从 .pkt/.pktl 文件构建并发送网络包
+  document: 显示完整使用手册或跳转到指定章节
 help:
   group:
     mode: 模式（自动识别）
@@ -194,6 +195,7 @@ help:
     out: 把构建的包存成 pcap 文件（对标 scapy wrpcap，配合 --pkt）
     summary: 摘要模式：只打印一行结果（包数、目标、发送/失败数），隐藏逐包详情
     ls: 列出全部内置层函数的字段表与自动行为（配合 --eng）
+    ls_page: 列出全部内置层函数的字段表与自动行为，分页显示（配合 --eng）
     hex: 反解并展示十六进制字符串对应的包（配合 --eng）
     pcap: 读取 pcap 文件并逐条反解展示（配合 --eng）
     to_pkt: 把 pcap 逐条转码为 .pkt/.pktl（配合 --pcap；缺省无损字节级）
@@ -223,6 +225,7 @@ help:
   usage_trace: 'prping trace [选项] <HOST[:PORT]>'
   usage_engine: 'prping engine [选项] [<FILE.pkt>]'
   usage_packet: 'prping packet [选项] <FILE.pkt> [<HOST[:PORT]>]'
+  usage_document: 'prping document [章节]'
   footer_ping: |-
     示例:
       prping ping 8.8.8.8                  ICMP ping（无限）
@@ -257,15 +260,20 @@ help:
       prping packet --raw --wait 2 file.pkt 8.8.8.8
       prping packet --summary file.pkt 192.168.1.1:9000
       prping packet arp_request.pkt --raw   # 链路层帧（ARP 等）：目标可省略
+  footer_document: |-
+    示例:
+      prping document                  完整手册（分页）
+      prping document 17               跳转第 17 章（路由跟踪）
+      prping document mtu              跳转 MTU 相关章节
   overview: |-
     prping — ping, 延迟, 带宽测量工具
 
     子命令: ping（ICMP/TCP/UDP/MTU 探测）、latency（延迟）、bandwidth（带宽）、
     server（服务端）、trace（路由跟踪）、engine（包分析）与 packet（发包）。
-  usage: 'prping 子命令 [选项] ...   （完整手册: prping --help-pkg）'
+  usage: 'prping 子命令 [选项] ...   （完整手册: prping document）'
   mode_guide: |-
     子命令可用任意唯一前缀缩写（如 `prping e FILE.pkt` → engine）。
-    详细用法: `prping 子命令 --help` — 完整手册: `prping --help-pkg`。
+    详细用法: `prping 子命令 --help` — 完整手册: `prping document`。
   usage_line: |-
     帮助: prping 子命令 --help   （prping --help 列出全部子命令）
        ping        ICMP ping / TCP ping（带端口）/ UDP ping（-u）/ MTU 探测（-M）

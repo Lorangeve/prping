@@ -199,8 +199,8 @@ fn dissect_bare_ip(bytes: &[u8], protos: &mut Vec<crate::proto::ProtoHit>) -> Di
 
 /// 裸应用层回退：既不是以太网也不是裸 IP。无端口上下文无法用 `#[rule]`
 /// 分派，但按 kind 尝试注册表声明（dns/http）——结构识别由 pkt 声明本身承担
-/// （http 的空行 `hex("0d0a")` 常量校验即 `\r\n\r\n` 约束）；DNS 要求至少一个
-/// 区计数非零（空报文不认作 DNS，防任意字节误报）。供 `--wait` 应答匹配
+/// （http 的空行 `hex("0d0a")` 常量校验即 `\r\n\r\n` 约束 + start_line 格式校验；
+/// DNS 要求至少一个区计数非零，防任意字节误报）。供 `--wait` 应答匹配
 /// （UDP 数据报内容无链路层头）与 `engine --hex` 裸字节识别。
 fn dissect_bare_app(bytes: &[u8], protos: &mut Vec<crate::proto::ProtoHit>) -> DissectReport {
     let mut layers = Vec::new();
@@ -209,32 +209,18 @@ fn dissect_bare_app(bytes: &[u8], protos: &mut Vec<crate::proto::ProtoHit>) -> D
         let Some(p) = crate::proto::find_by_kind(registry, kind) else {
             continue;
         };
-        if let Some(hit) = crate::proto::parse_proto(p, bytes) {
-            // DNS 全零区（qd/an/ns/ar 全 0 的空报文）不认作 DNS
-            if kind == "dns"
-                && ["qdcount", "ancount", "nscount", "arcount"]
-                    .iter()
-                    .all(|n| {
-                        hit.fields
-                            .iter()
-                            .find(|(f, _)| f == n)
-                            .and_then(|(_, v)| v.as_int())
-                            == Some(0)
-                    })
-            {
-                continue;
-            }
-            if let Some(mut layer) = proto_hit_to_layer(&hit).map(|(l, _)| l) {
-                set_layer_raw(&mut layer, bytes.to_vec());
-                layers.push(layer);
-                protos.push(hit);
-                return DissectReport {
-                    layers,
-                    remaining: Vec::new(),
-                    notes: Vec::new(),
-                    proto: std::mem::take(protos),
-                };
-            }
+        if let Some(hit) = crate::proto::parse_proto(p, bytes)
+            && let Some(mut layer) = proto_hit_to_layer(&hit).map(|(l, _)| l)
+        {
+            set_layer_raw(&mut layer, bytes.to_vec());
+            layers.push(layer);
+            protos.push(hit);
+            return DissectReport {
+                layers,
+                remaining: Vec::new(),
+                notes: Vec::new(),
+                proto: std::mem::take(protos),
+            };
         }
     }
     DissectReport {
@@ -530,8 +516,9 @@ fn parse_udp(
     }
 }
 
-/// 查 proto 注册表并按规则匹配解析；命中返回 true 并 push 到 `protos`。
-/// 多个候选按注册顺序尝试，首个解析成功者胜出；全部失败 → false（调用方回退 raw）。
+/// 查 proto 注册表解析：先按规则分派（端口/协议号/ethertype），规则未命中或
+/// 全部解析失败时**回退内容识别**（协议识别以内容为准，端口只是可选提示）。
+/// 命中返回 true 并 push 到 `protos`；全部失败 → false（调用方回退 raw）。
 fn try_proto(
     payload: Vec<u8>,
     cond: &crate::proto::RuleCond,
@@ -542,6 +529,7 @@ fn try_proto(
     if registry.is_empty() {
         return false;
     }
+    // 1. 规则分派：端口/协议号/ethertype 命中 → 候选（快速路径）
     for candidate in crate::proto::find_rule(registry, cond) {
         if let Some(hit) = crate::proto::parse_proto(candidate, &payload) {
             protos.push(hit);
@@ -551,6 +539,22 @@ fn try_proto(
             "proto `{}` 匹配规则但解析失败（截断或字段不符），尝试下一个",
             candidate.name
         ));
+    }
+    // 2. 回退内容识别：规则未命中（或已命中但解析失败）时，按内容/魔数反解
+    //    应用层候选（http/dns 靠格式 + 语义校验，裸 proto 靠首字节掩码）
+    for candidate in crate::proto::find_content_candidates(registry) {
+        // 规则已命中的候选在上面尝试过（parse 失败），跳过避免重复
+        if candidate
+            .rule
+            .as_ref()
+            .is_some_and(|r| r.matches_cond(cond))
+        {
+            continue;
+        }
+        if let Some(hit) = crate::proto::parse_proto(candidate, &payload) {
+            protos.push(hit);
+            return true;
+        }
     }
     false
 }

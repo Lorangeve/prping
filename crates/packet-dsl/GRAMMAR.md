@@ -161,8 +161,9 @@ attr_item      = ident "=" value | value ;
                        按注解名解释）——
                        `#[proto(kind="eth")]`（层身份，省略 = Raw 层）/
                        `#[rule(udp(dport=443))]`（上下文分派）/
-                       `#[rule(bytes(0xc0))]`（首字节掩码）/
-                       `#[rule(and(udp(dport=443), bytes(0xc0)))]`（AND 分组）/ `#[rule(or(udp(dport=443), udp(dport=4433)))]`（选一）/
+                       `#[rule(mask(0xc0))]`（首字节掩码）/
+                       `#[rule(startswith("HTTP/"))]` / `#[rule(contains("HTTP/", in=start_line))]`（字节模式匹配）/
+                       `#[rule(or(ne(qdcount, 0), ne(ancount, 0)))]`（字段值约束 OR）/
                        `#[meta(name="x", bytes=4)]`（字段标注）*)
 proto_field    = ident ":" proto_type [ "=" value ] [ "@" "auto" | "@" "len" "(" ident ")" ] ;
                     (* 降糖产物（`#[meta]` 标注翻译而来）：`name: type [= 默认值]
@@ -195,14 +196,22 @@ proto_type     = "u8" | "be16" | "be32" | "be64" | "le16" | "le32" | "le64"
                        @auto/@len 字段（QUIC `#[meta(auto, codec="prefix", ...)] length`） *)
 rule_call      = "and" "(" rule_call { "," rule_call } ")"
                | "or" "(" rule_call { "," rule_call } ")"
-               | layer_ident "(" [ rule_kv { "," rule_kv } ] ")" | "bytes" "(" num ")" ;
-                    (* `#[rule(...)]` 调用形式：`#[rule(udp(dport=443))]` 上下文条件 /
-                       `#[rule(bytes(0xc0))]` 首字节掩码（`(b & 掩码) == 掩码`）/
-                       `#[rule(and(...))]` AND 分组 / `#[rule(or(...))]` 选一（如多端口），
-                       子条件递归展开。多个 `#[rule]` 注解与 and(...) 等价：全部子条件
-                       AND 合并（上下文子条件须同一层）；掩码只允许 AND 组合——不能出现在
-                       or 分支（掩码无层可挂，不是分派条件）；`not` 不支持（正向匹配，
-                       否定无用例且违背 DSL 无 Bool 原则） *)
+               | layer_ident "(" [ rule_kv { "," rule_kv } ] ")"
+               | "mask" "(" num ")"
+               | "startswith" "(" STRING [ "," match_loc ] ")"
+               | "endswith" "(" STRING [ "," match_loc ] ")"
+               | "contains" "(" STRING [ "," match_loc ] ")"
+               | ( "ne" | "eq" ) "(" ident "," value ")" ;
+                    (* `#[rule(...)]` 调用形式——上下文条件 + 匹配函数（隐式 bool，AND 组合）：
+                       上下文条件：`#[rule(udp(dport=443))]` 按层分派候选；
+                       字节模式匹配：`mask(0xc0)` 首字节位掩码、`startswith`/`endswith`/
+                       `contains` 子串匹配（可选 `at=N` 偏移定位 / `in=字段名` 字段字节内容
+                       定位，字段名 = `#[meta(name=...)]` 或参数名）；
+                       字段值约束：`ne(字段, 值)` / `eq(字段, 值)`（解析后校验，`or(...)` 内
+                       合并为 OR 语义）；
+                       组合：`and(...)` AND / `or(...)` OR（`or` 内禁止字节模式匹配，
+                       允许字段值约束）；`not` 不支持。多个 `#[rule]` 注解与 and(...) 等价。 *)
+match_loc      = "at" "=" num | "in" "=" ident ;
 rule_kv        = ( "dport" | "sport" | "proto" | "next_header" | "ethertype" ) "=" num ;
 sniffer_stmt   = "sniffer" ":" nl { "-" nl sniffer_match } ;  (* ≥1 项 *)
 sniffer_match  = "match" ident "(" [ sniffer_field { "," sniffer_field } [ "," ] ] ")" ;

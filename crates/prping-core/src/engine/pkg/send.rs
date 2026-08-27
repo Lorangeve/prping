@@ -19,7 +19,7 @@ use super::raw::send_raw_bytes;
 use super::sniffer::{SnifferMatcher, sniffer_extract};
 use super::{PkgOptions, Reply, SendMode, SendOutcome, Transport, is_fake_ip, local_ip_for};
 use crate::engine::eng::render_hexdump;
-use crate::output::{print_cyan, print_dim, print_green, print_magenta, writeln_red};
+use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta, writeln_red};
 
 pub fn send_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     crate::engine::eng::ensure_dns_resolver();
@@ -238,7 +238,7 @@ pub(crate) fn send_module(
                         .iter()
                         .map(crate::engine::eng::layer_name)
                         .collect();
-                    print_dim(w, format!("  stack: {}", stack.join(" -> ")))?;
+                    print_dim(w, format!("{}stack: {}", indent(1), stack.join(" -> ")))?;
                     writeln!(w)?;
                 }
                 // 层序咨询性警告（只提示不阻断）：如 tcp 是 udp 的载荷、缺网络层等
@@ -253,7 +253,7 @@ pub(crate) fn send_module(
             if extracted.is_none() && !raw_sendable_outer {
                 skipped += 1;
                 if !opts.summary {
-                    crate::output::print_yellow(w, format!("  {}", t!("engine.note_bare_export")))?;
+                    crate::output::print_yellow(w, format!("{}{}", indent(1), t!("engine.note_bare_export")))?;
                     writeln!(w)?;
                     writeln!(w)?;
                 }
@@ -261,7 +261,7 @@ pub(crate) fn send_module(
             }
             let is_raw = matches!(opts.mode, SendMode::Raw { .. }) || extracted.is_none();
             if !opts.summary && extracted.is_none() && !matches!(opts.mode, SendMode::Raw { .. }) {
-                crate::output::print_yellow(w, format!("  {}", t!("engine.note_raw_fallback")))?;
+                crate::output::print_yellow(w, format!("{}{}", indent(1), t!("engine.note_raw_fallback")))?;
                 writeln!(w)?;
             }
             // 目标：显式指定 > 包内 IP 层 dst 推导；raw 链路层帧（eth 外层、无 IP 层可
@@ -271,7 +271,7 @@ pub(crate) fn send_module(
             let target: Option<SocketAddr> = match resolve_send_target(pkt, is_raw, opts.target) {
                 Ok((t, Some(note))) => {
                     if !opts.summary {
-                        print_dim(w, format!("  target: {note}"))?;
+                        print_dim(w, format!("{}target: {note}", indent(1)))?;
                         writeln!(w)?;
                     }
                     t
@@ -279,7 +279,7 @@ pub(crate) fn send_module(
                 Ok((t, None)) => t,
                 Err(e) => {
                     failed += 1;
-                    crate::output::writeln_red(w, format!("  ✗ {e}"))?;
+                    crate::output::writeln_red(w, format!("{}✗ {e}", indent(1)))?;
                     continue;
                 }
             };
@@ -331,7 +331,7 @@ pub(crate) fn send_module(
                 } else {
                     ser.serialize(pkt).unwrap_or_default()
                 };
-                print_cyan(w, format!("  {}", stack_summary(pkt, &full)))?;
+                print_cyan(w, format!("{}{}", indent(1), stack_summary(pkt, &full)))?;
                 writeln!(w)?;
             }
             let result = if is_raw {
@@ -368,17 +368,17 @@ pub(crate) fn send_module(
                         // 真实网关 ingress 过滤会丢弃该源地址
                         crate::output::print_yellow(
                             w,
-                            format!("  {}", t!("engine.note_fakeip_src", ip = ip)),
+                            format!("{}{}", indent(1), t!("engine.note_fakeip_src", ip = ip)),
                         )?;
                         writeln!(w)?;
                     } else {
-                        print_dim(w, format!("  {}", t!("engine.note_src_filled", ip = ip)))?;
+                        print_dim(w, format!("{}{}", indent(1), t!("engine.note_src_filled", ip = ip)))?;
                         writeln!(w)?;
                     }
                 } else if src_warn {
                     crate::output::print_yellow(
                         w,
-                        format!("  {}", t!("engine.note_src_unfillable")),
+                        format!("{}{}", indent(1), t!("engine.note_src_unfillable")),
                     )?;
                     writeln!(w)?;
                 }
@@ -389,7 +389,8 @@ pub(crate) fn send_module(
                     print_green(
                         w,
                         format!(
-                            "  {} → {} sent {} B{}",
+                            "{}{} → {} sent {} B{}",
+                            indent(1),
                             outcome.proto,
                             fmt_target(target),
                             outcome.sent,
@@ -402,7 +403,7 @@ pub(crate) fn send_module(
                     )?;
                     writeln!(w)?;
                     if !opts.summary && !shown.is_empty() {
-                        print_cyan(w, "  sent:")?;
+                        print_cyan(w, format!("{}sent:", indent(1)))?;
                         writeln!(w)?;
                         render_hexdump(w, &shown)?;
                     }
@@ -418,9 +419,9 @@ pub(crate) fn send_module(
                             if opts.summary {
                                 // 摘要模式：只显示 RTT，跳过字段匹配详情与回包反解
                                 if matched.is_some() {
-                                    print_green(w, format!("  ✓ reply ({rtt:.3} ms)"))?;
+                                    print_green(w, format!("{}✓ reply ({rtt:.3} ms)", indent(1)))?;
                                 } else {
-                                    print_cyan(w, format!("  reply ({rtt:.3} ms)"))?;
+                                    print_cyan(w, format!("{}reply ({rtt:.3} ms)", indent(1)))?;
                                 }
                                 writeln!(w)?;
                             } else {
@@ -436,7 +437,7 @@ pub(crate) fn send_module(
                                     )?;
                                     writeln!(w)?;
                                 } else {
-                                    print_cyan(w, format!("  reply after {rtt:.3} ms"))?;
+                                    print_cyan(w, format!("{}reply after {rtt:.3} ms", indent(1)))?;
                                     writeln!(w)?;
                                 }
                                 if !bytes.is_empty() {
@@ -454,14 +455,14 @@ pub(crate) fn send_module(
                                 } else {
                                     "reply"
                                 };
-                                writeln_red(w, format!("  ✗ no {what} within {secs}s"))?;
+                                writeln_red(w, format!("{}✗ no {what} within {secs}s", indent(1)))?;
                             }
                         }
                     }
                 }
                 Err(e) => {
                     failed += 1;
-                    crate::output::writeln_red(w, format!("  ✗ {e}"))?;
+                    crate::output::writeln_red(w, format!("{}✗ {e}", indent(1)))?;
                 }
             }
             if !opts.summary {

@@ -339,7 +339,7 @@ export:
     let proto = r#"
 #[proto]
 #[rule(udp(dport=443))]
-#[rule(bytes(0xc0))]
+#[rule(mask(0xc0))]
 func quic_initial(pnl=0, pn=u8(0), payload="") -> bytes {
     concat(
         #[meta(name="first")] u8(bor(0xc0, pnl)),
@@ -375,12 +375,12 @@ fn rule_and_form_equals_two_attrs() {
     let two = r#"
 #[proto]
 #[rule(udp(dport=443))]
-#[rule(bytes(0xc0))]
+#[rule(mask(0xc0))]
 func x(a=1) -> bytes { concat(u8(a)) }
 "#;
     let and = r#"
 #[proto]
-#[rule(and(udp(dport=443), bytes(0xc0)))]
+#[rule(and(udp(dport=443), mask(0xc0)))]
 func x(a=1) -> bytes { concat(u8(a)) }
 "#;
     let m2 = semantic::parse_str("t", two).unwrap();
@@ -408,13 +408,13 @@ func x(a=1) -> bytes { concat(u8(a)) }
         sport: Some(12345),
     };
     assert!(!ra.matches_cond(&tcp), "tcp 层不命中 udp 规则");
-    assert!(ra.matches_first_byte(0xc1), "首字节 0xc1 过掩码");
-    assert!(!ra.matches_first_byte(0x40), "首字节 0x40 不过掩码");
+    assert!(ra.matches_bytes(&[0xc1]), "首字节 0xc1 过掩码");
+    assert!(!ra.matches_bytes(&[0x40]), "首字节 0x40 不过掩码");
 
     // 嵌套 and 递归展开等价
     let nested = r#"
 #[proto]
-#[rule(and(and(udp(dport=443), bytes(0xc0))))]
+#[rule(and(and(udp(dport=443), mask(0xc0))))]
 func x(a=1) -> bytes { concat(u8(a)) }
 "#;
     let mn = semantic::parse_str("t", nested).unwrap();
@@ -445,13 +445,13 @@ func x(a=1) -> bytes { concat(u8(a)) }
     // 多掩码 AND：0xc0 与 0x01 都过才通过
     let m2m = r#"
 #[proto]
-#[rule(and(bytes(0xc0), bytes(0x01)))]
+#[rule(and(mask(0xc0), mask(0x01)))]
 func x(a=1) -> bytes { concat(u8(a)) }
 "#;
     let m2m = semantic::parse_str("t", m2m).unwrap();
     let r2m = m2m.protos[0].rule.clone().unwrap();
-    assert!(r2m.matches_first_byte(0xc1), "0xc1 同时过 0xc0 与 0x01");
-    assert!(!r2m.matches_first_byte(0xc0), "0xc0 不过 0x01 掩码");
+    assert!(r2m.matches_bytes(&[0xc1]), "0xc1 同时过 0xc0 与 0x01");
+    assert!(!r2m.matches_bytes(&[0xc0]), "0xc0 不过 0x01 掩码");
 }
 
 /// `#[rule(or(...))]` 选一分派：多端口/多条件任一命中；与独立 `#[rule(bytes(...))]`
@@ -488,13 +488,13 @@ func x(a=1) -> bytes { concat(u8(a)) }
     let or_mask = r#"
 #[proto]
 #[rule(or(udp(dport=443), udp(dport=4433)))]
-#[rule(bytes(0xc0))]
+#[rule(mask(0xc0))]
 func x(a=1) -> bytes { concat(u8(a)) }
 "#;
     let m = semantic::parse_str("t", or_mask).unwrap();
     let r = m.protos[0].rule.clone().unwrap();
-    assert!(r.matches_first_byte(0xc1), "掩码应生效");
-    assert!(!r.matches_first_byte(0x40), "掩码不符不通过");
+    assert!(r.matches_bytes(&[0xc1]), "掩码应生效");
+    assert!(!r.matches_bytes(&[0x40]), "掩码不符不通过");
 
     // or 内嵌 and：or(and(udp(dport=443), udp(sport=53)), udp(dport=4433))
     let mix = r#"
@@ -587,7 +587,7 @@ func eth(dst_mac="ff:ff:ff:ff:ff:ff", src_mac="00:00:00:00:00:00", ethertype=0x0
 const QUIC_FUNC_SRC: &str = r#"
 #[proto]
 #[rule(udp(dport=443))]
-#[rule(bytes(0xc0))]
+#[rule(mask(0xc0))]
 func quic_initial(pnl=0, pn=u8(0), payload="") -> bytes {
     concat(
         #[meta(name="first")] u8(bor(0xc0, pnl)),
@@ -819,7 +819,7 @@ fn proto_func_error_paths() {
     // or 分支含掩码 → 报错（掩码不能作选一分派条件）
     let err = semantic::parse_str(
         "t",
-        "#[proto]\n#[rule(or(udp(dport=443), bytes(0xc0)))]\nfunc x() -> bytes { concat(u8(1)) }\n",
+        "#[proto]\n#[rule(or(udp(dport=443), mask(0xc0)))]\nfunc x() -> bytes { concat(u8(1)) }\n",
     )
     .unwrap_err();
     assert!(err.to_string().contains("掩码"), "{err}");
@@ -853,7 +853,7 @@ fn proto_func_error_paths() {
     // 掩码越界
     let err = semantic::parse_str(
         "t",
-        "#[proto]\n#[rule(bytes(0x100))]\nfunc x() -> bytes { concat(u8(1)) }\n",
+        "#[proto]\n#[rule(mask(0x100))]\nfunc x() -> bytes { concat(u8(1)) }\n",
     )
     .unwrap_err();
     assert!(err.to_string().contains("0..=255"), "{err}");
@@ -989,6 +989,60 @@ fn dissect_parses_dns_questions_list() {
         packet_dsl::ProtoVal::Str("www.baidu.com".to_string()),
         "DnsName 标签序列还原为点分名字（压缩指针追跳同此）"
     );
+}
+
+/// 内容识别回退：HTTP 在非标准端口（非 80/8080）也应被识别——协议识别以内容为准，
+/// 端口只是可选提示（`#[rule]` 未命中时回退按 start_line 格式反解）。
+#[test]
+fn dissect_parses_http_on_nonstandard_port() {
+    register_quic("");
+    let src = r#"
+get = http(start_line="GET / HTTP/1.1")
+full = use(get) |> tcp(sport=40000, dport=1234) |> ipv4(src="127.0.0.1", dst="127.0.0.1", proto=6) |> eth()
+export:
+- full
+"#;
+    let m = semantic::parse_str("t", src).unwrap();
+    let pkt = packet_dsl::resolve(&m)
+        .unwrap()
+        .packets
+        .into_iter()
+        .next()
+        .unwrap();
+    let bytes = DefaultSerializer::with_seed(1).serialize(&pkt).unwrap();
+    let r = packet_dsl::dissect(&bytes);
+    let has_http = r
+        .layers
+        .iter()
+        .any(|l| matches!(l, packet_dsl::ir::Layer::Http(_)));
+    assert!(has_http, "非标准端口 1234 应靠内容识别出 http：{r:?}");
+}
+
+/// 内容校验反例：非 HTTP 文本（无合法 start_line，如 `hello world\r\n\r\n`）
+/// 结构上能通过 http 声明解析，但 start_line 校验失败，不应被误判为 HTTP。
+#[test]
+fn dissect_rejects_non_http_text() {
+    register_quic("");
+    let src = r#"
+q = raw(bytes=hex("68656c6c6f20776f726c640d0a0d0a"))
+full = use(q) |> tcp(sport=40000, dport=1234) |> ipv4(src="127.0.0.1", dst="127.0.0.1", proto=6) |> eth()
+export:
+- full
+"#;
+    let m = semantic::parse_str("t", src).unwrap();
+    let pkt = packet_dsl::resolve(&m)
+        .unwrap()
+        .packets
+        .into_iter()
+        .next()
+        .unwrap();
+    let bytes = DefaultSerializer::with_seed(1).serialize(&pkt).unwrap();
+    let r = packet_dsl::dissect(&bytes);
+    let has_http = r
+        .layers
+        .iter()
+        .any(|l| matches!(l, packet_dsl::ir::Layer::Http(_)));
+    assert!(!has_http, "非 HTTP 文本不应被误判为 http：{r:?}");
 }
 
 /// len 计算字段的 expr 变换：TCP data_offset 联动（data offset = 5 + options/4，<<4 编码）。

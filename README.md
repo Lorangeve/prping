@@ -23,42 +23,33 @@
 ## 安装
 
 ```bash
+# 基本构建（Linux/macOS/Windows）
 cargo build --release
 sudo setcap cap_net_raw+ep target/release/prping  # ICMP 需要（Linux）
+
+# Linux 可选：启用 pcap（需 libpcap-dev）
+cargo build --release --features pcap
 ```
+
+### 编译参数
+
+| 参数 | 说明 |
+|------|------|
+| `--release` | Release 构建（推荐） |
+| `--features pcap` | Linux 启用 pcap（macOS/Windows 默认启用） |
+
+> **pcap 说明**：`packet --raw` 在 Windows/macOS 始终走 pcap 链路层注入；Linux 默认走原生 raw socket（AF_PACKET/IPPROTO_RAW），无需 pcap。启用 `--features pcap` 后 Linux 也走 pcap，与 Windows/macOS 行为一致。
 
 ## Windows 7
 
-Rust 1.78 起官方将 `*-pc-windows-*` 目标最低支持提升到 **Windows 10**；Win7 需用官方的
-Win7 基线目标（Tier 3）构建，**MSVC 版为首选**：
+Rust 1.78 起官方将 `*-pc-windows-*` 目标最低支持提升到 **Windows 10**；Win7 需用官方的 Win7 基线目标（Tier 3）构建，**MSVC 版为首选**。详细构建说明 → `docs/claude-rules/windows-build.md`。
 
 ```bash
 rustup toolchain install nightly --profile minimal
 rustup component add rust-src --toolchain nightly
-cargo install cargo-xwin                        # 自动下载 Windows SDK
+cargo install cargo-xwin
 XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
-# → target/x86_64-win7-windows-msvc/release/prping.exe   （x64 版）
-XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target i686-win7-windows-msvc --release
-# → target/i686-win7-windows-msvc/release/prping.exe     （x86/32 位版）
 ```
-
-> `XWIN_ARCH=x86,x86_64` 必须统一指定：cargo-xwin 默认只下载 x86_64+aarch64 库，
-> 且其 DONE 标记只记录最近一次架构，不统一会导致换架构构建时反复重下载 SDK。
-
-> MSVC 构建**静态链接 CRT 与 C++ 运行库**（`.cargo/config.toml` 的 `crt-static`）：
-> 产物不依赖 `vcruntime140.dll`/`msvcp140.dll`/`ucrtbase.dll`，目标机器无需安装
-> VC++ Redistributable。实测 Win7 目标产物仅依赖 `ADVAPI32`/`KERNEL32`/`ntdll`
-> 三个 Win7 自带系统库。`x86_64-pc-windows-msvc`（普通 MSVC 目标）同样静态链接。
-> 链接器已加 `/ignore:4099` 抑制 xwin 静态库缺 PDB 的无害噪音警告。
-
-> MSVC 是唯一支持路径：`packet --raw` 的 Npcap 绑定（pcap crate + wpcap.lib/windows.lib）
-> 只对接 MSVC 导入库，mingw-w64 没有 wpcap 导入库，GNU 备选配方（`build-windows-gnu`/
-> `build-win7-gnu` 等）已从 justfile 移除。
->
-> wpcap.dll 已延迟加载（`/DELAYLOAD`）：未安装 Npcap 的机器上其它功能照常运行，
-> 只有 `packet --raw` 会提示需要 Npcap（https://npcap.com）。
-
-> 说明：Win7 基线目标为 Tier 3（官方不自动构建测试）；MSVC 版由 CI `win7-build` job 产出。
 
 ## 用法
 
@@ -77,8 +68,8 @@ prping trace --tcp HOST:PORT    # TCP SYN 路由跟踪（ICMP 被过滤时可用
 prping trace --udp HOST         # UDP 路由跟踪（经典 traceroute，33434 起递增端口）
 prping ping -s 192.168.1.10 HOST  # 指定源地址/网卡（Linux 网卡名 → IPv4）
 prping --version                # 版本号
-prping --help-pkg               # 完整使用手册（tty 自动分页）
-prping --help-pkg 17            # 跳转手册第 17 章（路由跟踪）
+prping document                 # 完整使用手册（tty 自动分页）
+prping document 17              # 跳转手册第 17 章（路由跟踪）
 # 包构造引擎（子命令，与测量模式互斥）：
 prping engine FILE.pkt          # .pkt 分析（层栈 + hexdump）
 prping engine --lsp             # .pkt 语言服务器（JSON-RPC over stdio）
@@ -86,7 +77,19 @@ prping packet FILE.pkt [HOST:PORT]  # 构建并发送（目标可省略）
 prping engine --pcap x.pcap --to-pkt dir/  # pcap → 每记录一个 .pkt + .pktl 配方（--structured 语义化）
 ```
 
-### 常用选项
+### 选项（按子命令分组）
+
+**通用（任意位置）**
+
+| 选项 | 说明 |
+|------|------|
+| `-s ADDR\|IFACE` | 指定源地址/网卡 |
+| `-4` / `-6` | 强制 IPv4/IPv6 |
+| `--json` | 输出 JSON 统计 |
+| `--lang en\|zh-CN` | 语言（任意位置） |
+| `document [章节]` | 完整使用手册（`document 17` 跳转第 17 章） |
+
+**ping**
 
 | 选项 | 说明 |
 |------|------|
@@ -96,21 +99,37 @@ prping engine --pcap x.pcap --to-pkt dir/  # pcap → 每记录一个 .pkt + .pk
 | `-H N` 或 `-H t1,t2,...` | 直方图桶数，或逗号分隔的毫秒阈值（如 `1,5,10,50`） |
 | `-w N` | 预热次数（默认 4） |
 | `-q` | 静默模式 |
-| `-r` | 接收模式（测下载） |
 | `-u` | UDP 模式 |
-| `--parallel N` | 并发连接数 |
 | `-p` | Unicode 渲染（直方图/时间线用 ploot） |
 | `-g` | 显示时间线图（配合 `-p` 用 ploot 渲染） |
-| `-4` / `-6` | 强制 IPv4/IPv6 |
-| `--json` | 输出 JSON 统计 |
-| `-V` / `--version` | 版本号（顶层） |
-| `--lang en\|zh-CN` | 语言（任意位置） |
-| `-s ADDR\|IFACE` | 指定源地址/网卡（Linux 网卡名取 IPv4；多网卡/策略路由场景） |
-| `-m, --mtu` | 路径 MTU 探测：ICMP DF + 变长载荷二分（仅 IPv4，raw socket） |
-| `-t, --traceroute` | 路由跟踪：ICMP echo + 递增 TTL（每跳 3 次，反向 DNS，`-m` 限跳数/`-d` 免解析；raw socket） |
-| `trace --tcp` | TCP SYN 路由跟踪：`trace --tcp HOST:PORT`（需端口；目标回 SYN-ACK/RST 即到达；Windows 不支持） |
-| `trace --udp` | UDP 路由跟踪：`trace --udp HOST`（经典 traceroute，33434 起递增端口；目标回端口不可达即到达；跨平台） |
-| `--help-pkg [章节]` | 完整使用手册（tty 自动分页，`## N. 标题` 章节）；`--help-pkg 编号\|标题` 跳转章节（双语随 `--lang`） |
+| `-m` / `--mtu` | 路径 MTU 探测（ICMP DF + 变长载荷二分） |
+
+**latency**
+
+| 选项 | 说明 |
+|------|------|
+| `-l SIZE` | 请求大小（缺省 64） |
+| `-u` | UDP 模式 |
+| `-r` | 接收模式（测下载） |
+| `-p` | Unicode 渲染 |
+
+**bandwidth**
+
+| 选项 | 说明 |
+|------|------|
+| `-l SIZE` | 请求大小（缺省 8k） |
+| `-u` | UDP 模式 |
+| `-r` | 接收模式（测下载） |
+| `--parallel N` | 并发连接数 |
+
+**trace**
+
+| 选项 | 说明 |
+|------|------|
+| `-m N` | 最大跳数 |
+| `-d` | 免 DNS 解析 |
+| `--tcp` | TCP SYN 逐跳（需端口；Windows 不支持） |
+| `--udp` | 经典 UDP 逐跳（33434 起递增端口） |
 
 ### hex/raw 为基 + 层 bytes 直喂
 
@@ -312,6 +331,7 @@ TCP Bandwidth test:
 - [socket2](https://github.com/rust-lang/socket2) — raw socket
 - libc — Unix Ctrl+C 信号处理
 - [ploot](https://github.com/ploot-rs/ploot) — `-p` Unicode 终端绘图
+- [pcap](https://github.com/rust-pcap/rust-pcap) — 包抓取（Npcap/libpcap，`packet --raw` 和 `--wait`）
 
 ## 开发
 

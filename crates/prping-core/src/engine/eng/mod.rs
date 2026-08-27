@@ -11,9 +11,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use packet_dsl::PacketSource;
-use termcolor::{ColorChoice, StandardStream};
+use termcolor::{Ansi, ColorChoice, StandardStream};
 
-use crate::output::{print_cyan, print_dim, print_green, print_magenta};
+use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta, print_yellow};
 
 use display::render_module_header;
 
@@ -335,23 +335,94 @@ pub fn run_lsp_on<R: io::Read, W: io::Write>(
 }
 
 /// 列出全部内置原语与库层头函数的字段表（对标 scapy `ls()`）。
-pub fn ls_builtins(libs: &[PathBuf]) -> anyhow::Result<()> {
+pub fn ls_builtins(libs: &[PathBuf], paged: bool) -> anyhow::Result<()> {
     let libs = effective_libs(libs);
-    let mut w = StandardStream::stdout(ColorChoice::Auto);
-    print_magenta(&mut w, "packet-dsl builtins")?;
-    writeln!(&mut w)?;
-    print_dim(&mut w, format!("libs: {}", libs_display(&libs)))?;
-    writeln!(&mut w)?;
-    writeln!(&mut w)?;
-    for doc in packet_dsl::builtin_docs() {
-        let name = &doc.name;
-        let summary = &doc.summary;
-        print_green(&mut w, format!("  {name}"))?;
+    let mut buf = Vec::new();
+    {
+        let mut w = Ansi::new(&mut buf);
+        print_magenta(&mut w, "packet-dsl builtins")?;
         writeln!(&mut w)?;
-        if !summary.is_empty() {
-            print_dim(&mut w, format!("    {summary}"))?;
+        print_dim(&mut w, format!("libs: {}", libs_display(&libs)))?;
+        writeln!(&mut w)?;
+        writeln!(&mut w)?;
+        for doc in packet_dsl::builtin_docs() {
+            // 签名只列参数名（与库函数一致；类型/说明在参数行）
+            let params: Vec<String> = doc.params.iter().map(|(n, _)| n.to_string()).collect();
+            print_cyan(&mut w, format!("{}({})", doc.name, params.join(", ")))?;
+            writeln!(&mut w)?;
+            // 摘要：签名下第一行，"""...""" 文档字符串（与库函数同构）
+            if !doc.summary.is_empty() {
+                print_green(&mut w, format!("{}\"\"\"", indent(2)))?;
+                writeln!(&mut w)?;
+                for line in doc.summary.lines() {
+                    print_green(&mut w, format!("{}{line}", indent(2)))?;
+                    writeln!(&mut w)?;
+                }
+                print_green(&mut w, format!("{}\"\"\"", indent(2)))?;
+                writeln!(&mut w)?;
+            }
+            for (n, t) in &doc.params {
+                print_dim(&mut w, format!("{}{}: {t}", indent(2), n))?;
+                writeln!(&mut w)?;
+            }
+            print_yellow(&mut w, format!("{}auto: {}", indent(2), doc.auto))?;
             writeln!(&mut w)?;
         }
+        // 库层头函数（eng_lib，隐式可见）：列签名
+        let funcs = packet_dsl::lib_exports(&libs)
+            .into_iter()
+            .filter(|e| e.params.is_some())
+            .collect::<Vec<_>>();
+        if !funcs.is_empty() {
+            print_magenta(&mut w, "\neng_lib layer functions")?;
+            writeln!(&mut w)?;
+            for e in funcs {
+                let ps: Vec<String> = e
+                    .params
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|p| match &p.default {
+                        Some(d) => format!("{}={}", p.name, value_display(d)),
+                        None => p.name.clone(),
+                    })
+                    .collect();
+                print_cyan(&mut w, format!("{}({})", e.name, ps.join(", ")))?;
+                writeln!(&mut w)?;
+                if let Some(doc) = &e.doc {
+                    // doc 摘要：签名下第一行，"""...""" 文档字符串（多行摘要整体包裹，绿色）
+                    if !doc.summary.is_empty() {
+                        print_green(&mut w, format!("{}\"\"\"", indent(2)))?;
+                        writeln!(&mut w)?;
+                        for line in doc.summary.lines() {
+                            print_green(&mut w, format!("{}{line}", indent(2)))?;
+                            writeln!(&mut w)?;
+                        }
+                        print_green(&mut w, format!("{}\"\"\"", indent(2)))?;
+                        writeln!(&mut w)?;
+                    }
+                    // 逐参数说明：按声明顺序，只列有 @param 说明的参数
+                    for p in e.params.as_ref().unwrap() {
+                        if let Some((_, desc)) = doc.params.iter().find(|(n, _)| n == &p.name) {
+                            print_dim(&mut w, format!("{}{}: {desc}", indent(2), p.name))?;
+                            writeln!(&mut w)?;
+                        }
+                    }
+                    if let Some(auto) = &doc.auto {
+                        print_yellow(&mut w, format!("{}auto: {auto}", indent(2)))?;
+                        writeln!(&mut w)?;
+                    }
+                }
+                print_dim(&mut w, format!("{}[{}] 库函数（隐式可见）", indent(2), e.module))?;
+                writeln!(&mut w)?;
+            }
+        }
+    }
+    let output = String::from_utf8_lossy(&buf);
+    if paged {
+        crate::manual::print_paged(&output)?;
+    } else {
+        print!("{}", output);
     }
     Ok(())
 }
@@ -540,7 +611,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                         .join(", ")
                 )
             };
-            print_dim(&mut w, format!("  - {name} ({def}; {step_desc})"))?;
+            print_dim(&mut w, format!("{}- {name} ({def}; {step_desc})", indent(1)))?;
             writeln!(&mut w)?;
         }
         writeln!(&mut w)?;
@@ -549,11 +620,11 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
         print_green(&mut w, format!("step {}: {}", i + 1, step.pkg.display()))?;
         writeln!(&mut w)?;
         if let Some(secs) = step.wait {
-            print_dim(&mut w, format!("  wait: {secs}s"))?;
+            print_dim(&mut w, format!("{}wait: {secs}s", indent(1)))?;
             writeln!(&mut w)?;
         }
         if let Some(secs) = step.delay {
-            print_dim(&mut w, format!("  delay: {secs}s"))?;
+            print_dim(&mut w, format!("{}delay: {secs}s", indent(1)))?;
             writeln!(&mut w)?;
         }
         if let Some(raw) = &step.raw {
@@ -564,7 +635,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                 },
                 crate::engine::recipe::StepRaw::Off => "raw: false".to_string(),
             };
-            print_dim(&mut w, format!("  {desc}"))?;
+            print_dim(&mut w, format!("{}{desc}", indent(1)))?;
             writeln!(&mut w)?;
         }
         if !step.params.is_empty() {
@@ -573,7 +644,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                 .iter()
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect();
-            print_dim(&mut w, format!("  params: {}", ps.join(", ")))?;
+            print_dim(&mut w, format!("{}params: {}", indent(1), ps.join(", ")))?;
             writeln!(&mut w)?;
         }
         for e in &step.extract {
@@ -594,7 +665,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
             };
             print_dim(
                 &mut w,
-                format!("  extract: {} ← {from_desc}{as_desc}", e.name),
+                format!("{}extract: {} ← {from_desc}{as_desc}", indent(1), e.name),
             )?;
             writeln!(&mut w)?;
         }
@@ -602,7 +673,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
             OnError::Stop => "stop",
             OnError::Continue => "continue",
         };
-        print_dim(&mut w, format!("  on_error: {on_error}"))?;
+        print_dim(&mut w, format!("{}on_error: {on_error}", indent(1)))?;
         writeln!(&mut w)?;
     }
     Ok(())

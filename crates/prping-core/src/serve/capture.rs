@@ -6,7 +6,7 @@
 //!   按 `sll_pkttype == PACKET_HOST` 只收本机入向——回环上服务端回包也会以 HOST
 //!   回环，完整会话可见且无重复；真实网卡上服务端出向（PACKET_OUTGOING）不显示
 //!   （v1 入向聚焦）。
-//! - **Windows**：Npcap（复用 `rawwin.rs` 的设备选择与抓包句柄，`direction(In)`
+//! - **Windows**：Npcap（复用 `rawpcap.rs` 的设备选择与抓包句柄，`direction(In)`
 //!   只收入向）。
 //! - **其他平台**（macOS 等）：暂无 raw 抓包实现 → 不可用，`serve` 回退载荷级解析。
 //!
@@ -35,7 +35,7 @@ pub(crate) enum CaptureStatus {
 pub(crate) fn spawn(addr: SocketAddr) -> CaptureStatus {
     #[cfg(target_os = "linux")]
     {
-        return spawn_linux(addr);
+        spawn_linux(addr)
     }
     #[cfg(target_os = "windows")]
     {
@@ -55,7 +55,7 @@ pub(crate) fn spawn(addr: SocketAddr) -> CaptureStatus {
 /// 帧头部摘要（供 `[frame]` 行显示）。
 ///
 /// 仅 Linux/Windows/macOS 抓包路径使用；其他平台不编译抓包循环，共享辅助只在
-/// `test` 下保留（与 rawwin 的 `#[cfg(any(windows, test))]` 模式一致）。
+/// `test` 下保留（与 rawpcap 的 `#[cfg(any(windows, test))]` 模式一致）。
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 struct FrameMeta {
     src: IpAddr,
@@ -280,7 +280,7 @@ fn linux_loop(fd: libc::c_int, port: u16) {
             continue;
         }
         // 只收本机入向（PACKET_HOST）：回环上服务端回包也以 HOST 回环，完整会话可见
-        if sll.sll_pkttype != libc::PACKET_HOST as u8 {
+        if sll.sll_pkttype != libc::PACKET_HOST {
             continue;
         }
         let frame = &buf[..n as usize];
@@ -296,12 +296,12 @@ fn linux_loop(fd: libc::c_int, port: u16) {
 
 #[cfg(target_os = "windows")]
 fn spawn_windows(addr: SocketAddr) -> CaptureStatus {
-    use crate::engine::rawwin;
-    let dev = match rawwin::select_device_name(Some(&addr), None) {
+    use crate::engine::rawpcap;
+    let dev = match rawpcap::select_device_name(Some(&addr), None) {
         Ok(d) => d,
         Err(e) => return CaptureStatus::Unavailable(e.to_string()),
     };
-    let mut cap = match rawwin::open_capture(&dev) {
+    let mut cap = match rawpcap::open_capture(&dev) {
         Ok(c) => c,
         Err(e) => return CaptureStatus::Unavailable(e.to_string()),
     };
@@ -346,14 +346,14 @@ fn windows_loop(cap: &mut pcap::Capture<pcap::Active>, port: u16) {
 /// 打开 macOS 抓包句柄：libpcap 设备（系统自带，底层走 BPF）。
 ///
 /// 与 Windows 的 Npcap 路径共用 `pcap::Capture` API；差异在设备枚举/选择
-/// （复用 `rawwin::list_devices` / `pick_device`）与链路类型：
+/// （复用 `rawpcap::list_devices` / `pick_device`）与链路类型：
 /// - 普通网卡：Ethernet（EN10MB），帧带 14B eth 头（`show_frame` 全栈解析）
 /// - lo0 回环：**DLT_NULL**（4 字节族头 + 裸 IP），抓包侧剥掉族头走裸 IP 路径
 ///
 /// 权限：/dev/bpf* 默认 root:wheel 600——需 `sudo` 或 Wireshark 的 ChmodBPF 授权。
 #[cfg(target_os = "macos")]
 fn spawn_macos(addr: SocketAddr) -> CaptureStatus {
-    let devs = match crate::engine::rawwin::list_devices() {
+    let devs = match crate::engine::rawpcap::list_devices() {
         Ok(d) => d,
         Err(e) => return CaptureStatus::Unavailable(e.to_string()),
     };
@@ -595,6 +595,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn strip_null_header() {
         // DLT_NULL：4 字节族头 AF_INET=2（主机字节序）+ 裸 IPv4
         let mut data = vec![2u8, 0, 0, 0];
