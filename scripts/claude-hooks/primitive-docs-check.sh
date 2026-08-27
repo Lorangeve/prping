@@ -63,13 +63,13 @@ check() {
 report() {
   local m="原语文档同步"
   if [ -z "$MISSING_DOCS" ] && [ -z "$STALE_DOCS" ] && [ -z "$MISSING_GRAMMAR" ]; then
-    m="$m：✓ 全部一致（builtin_docs ↔ 分派 ↔ GRAMMAR.md §4.6）"
+    m="${m}：✓ 全部一致（builtin_docs ↔ 分派 ↔ GRAMMAR.md §4.6）"
   else
-    m="$m：✗ 有缺口"
-    [ -n "$MISSING_DOCS" ] && m="$m\n- 分派但缺 BuiltinDoc（--eng --ls / LSP 不显示）：$MISSING_DOCS"
-    [ -n "$MISSING_GRAMMAR" ] && m="$m\n- 有 BuiltinDoc 但 GRAMMAR.md §4.6 未列出：$MISSING_GRAMMAR"
-    [ -n "$STALE_DOCS" ] && m="$m\n- BuiltinDoc 已无分派（可能已移除原语）：$STALE_DOCS"
-    m="$m\n改动原语必同步：registry.rs builtin_docs()（--eng --ls/LSP 源）、@packet-dsl/GRAMMAR.md §4.6、@packet-dsl/DESIGN.md §5/§6、docs/claude-rules/engine.md 原语清单"
+    m="${m}：✗ 有缺口"
+    [ -n "$MISSING_DOCS" ] && m="${m}\n- 分派但缺 BuiltinDoc（--eng --ls / LSP 不显示）：$MISSING_DOCS"
+    [ -n "$MISSING_GRAMMAR" ] && m="${m}\n- 有 BuiltinDoc 但 GRAMMAR.md §4.6 未列出：$MISSING_GRAMMAR"
+    [ -n "$STALE_DOCS" ] && m="${m}\n- BuiltinDoc 已无分派（可能已移除原语）：$STALE_DOCS"
+    m="${m}\n改动原语必同步：registry.rs builtin_docs()（--eng --ls/LSP 源）、@packet-dsl/GRAMMAR.md §4.6、@packet-dsl/DESIGN.md §5/§6、docs/claude-rules/engine.md 原语清单"
   fi
   printf '%b' "$m"
 }

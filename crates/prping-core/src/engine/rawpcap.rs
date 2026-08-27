@@ -27,7 +27,7 @@ use crate::engine::pkg::{Reply, SendOutcome};
 use crate::output::indent;
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 use packet_dsl::ir::{Layer, PacketSpec};
-#[cfg(any(windows, target_os = "macos", feature = "pcap"))]
+#[cfg(windows)]
 use rust_i18n::t;
 #[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -666,8 +666,8 @@ fn macos_iface_mac(iface_name: &str) -> anyhow::Result<[u8; 6]> {
                     let nlen = (*sdl).sdl_nlen as usize;
                     let data = (*sdl).sdl_data.as_ptr();
                     let mut mac = [0u8; 6];
-                    for i in 0..6 {
-                        mac[i] = *data.add(nlen + i) as u8;
+                    for (i, m) in mac.iter_mut().enumerate() {
+                        *m = *data.add(nlen + i) as u8;
                     }
                     return Ok(mac);
                 }

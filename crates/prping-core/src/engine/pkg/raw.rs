@@ -17,7 +17,7 @@ use super::icmp_echo_ids;
 use super::{Reply, match_reply};
 #[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
 use packet_dsl::ir::Layer;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
 use std::io;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
@@ -233,8 +233,9 @@ fn send_af_packet(
     anyhow::bail!("AF_PACKET（以太网原始帧）仅支持 Linux")
 }
 
-/// IPPROTO_RAW + IP_HDRINCL 发送完整 IPv4 包（Unix；Windows/macOS 走 rawpcap）。
-#[cfg(not(windows))]
+/// IPPROTO_RAW + IP_HDRINCL 发送完整 IPv4 包（仅 Linux 非 pcap 路径经 send_raw_bytes
+/// 调用；Windows/macOS/Linux+feature=pcap 走 rawpcap）。
+#[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
 fn send_raw_ip4(bytes: &[u8], target: &SocketAddr) -> anyhow::Result<usize> {
     if bytes.len() < 20 || (bytes[0] >> 4) != 4 {
         anyhow::bail!("包不是合法 IPv4 报文");
@@ -298,8 +299,9 @@ fn send_raw_ip4(bytes: &[u8], target: &SocketAddr) -> anyhow::Result<usize> {
     }
 }
 
-/// 原始 IPv6 发送（Linux：AF_INET6 + IPPROTO_RAW + IPV6_HDRINCL；Windows/macOS 走 rawpcap）。
-#[cfg(not(windows))]
+/// 原始 IPv6 发送（仅 Linux 非 pcap 路径经 send_raw_bytes 调用；
+/// Windows/macOS/Linux+feature=pcap 走 rawpcap）。
+#[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
 fn send_raw_ip6(bytes: &[u8], target: &SocketAddr) -> anyhow::Result<usize> {
     if bytes.len() < 40 || (bytes[0] >> 4) != 6 {
         anyhow::bail!("包不是合法 IPv6 报文");
