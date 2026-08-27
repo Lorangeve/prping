@@ -150,7 +150,9 @@ dist DIR:
 fetch-npcap-sdk:
     mkdir -p target/npcap-sdk
     curl -L -o target/npcap-sdk.zip https://npcap.com/dist/npcap-sdk-1.15.zip
-    unzip -o target/npcap-sdk.zip -d target/npcap-sdk
+    # Windows Git Bash 若缺 unzip（Linux/macOS 均有），降级用 PowerShell 解压
+    unzip -o target/npcap-sdk.zip -d target/npcap-sdk \
+        || powershell -NoProfile -Command "Expand-Archive -Path target/npcap-sdk.zip -DestinationPath target/npcap-sdk -Force"
     curl -sL -o target/windows_x86_64_msvc.crate https://static.crates.io/crates/windows_x86_64_msvc/windows_x86_64_msvc-0.36.1.crate
     curl -sL -o target/windows_i686_msvc.crate https://static.crates.io/crates/windows_i686_msvc/windows_i686_msvc-0.36.1.crate
     mkdir -p target/.wlibs
@@ -226,7 +228,14 @@ lint: doc-sync-check
     cargo clippy --all-targets --workspace -- -D warnings
 
 # 全部测试（prping 万用表 + packet-dsl 引擎）
+# Windows 原生 MSVC：pcap crate 静态链接 wpcap.lib（--pkg --raw 的 Npcap 绑定），
+# 先经 windows-deps 确保 Npcap SDK 四件套就位并设 LIBPCAP_LIBDIR（Linux/macOS 不需要）。
+[script]
 test:
+    if [ "${OS:-}" = "Windows_NT" ]; then
+        just windows-deps
+        export LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64
+    fi
     cargo test --all-targets --workspace
 
 # rustdoc 生成检查

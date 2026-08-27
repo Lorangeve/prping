@@ -64,7 +64,10 @@ XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target i686-win7-w
 
 - 绑定：pcap crate 2.x 仅 `[target.'cfg(windows)'.dependencies]`；链接需 Npcap SDK 的
   wpcap.lib + windows-sys 0.36 的 windows.lib（`just fetch-npcap-sdk` 一并拉取 + 配方
-  内置 LIBPCAP_LIBDIR，见「windows.lib 缺口」条）。
+  内置 LIBPCAP_LIBDIR，见「windows.lib 缺口」条）。**Windows 本机也适用**：`just test`
+  配方在 Windows（`OS=Windows_NT`）下自动经 `windows-deps` 就位 SDK 四件套并设
+  `LIBPCAP_LIBDIR`（pcap build.rs 有 `rerun-if-env-changed=LIBPCAP_LIBDIR`，链接直接
+  命中 wpcap.lib；`fetch-npcap-sdk` 的 unzip 缺失时降级用 PowerShell 解压）。
 - **wpcap.dll 延迟加载**（`.cargo/config.toml` 三 MSVC 目标统一 `/DELAYLOAD:wpcap.dll` +
   `delayimp.lib`——delay-load helper `__delayLoadHelper2` 由 MSVC 工具链的
   delayimp.lib 提供，lld-link 不像 link.exe 会自动拉取，须显式链接）——Windows 加载器
