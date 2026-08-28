@@ -621,6 +621,10 @@ fn dns_rdata_disp(t: Option<u16>, rdata: &[u8]) -> String {
     }
 }
 
+/// 从反解层字段生成展示字符串（`key=value` 格式）。
+///
+/// **同步修改点**：新增协议字段时需同步修改 `sniffer::sniffer_field_names`（字段名列表）
+/// 和 `sniffer::sniffer_extract`（按名提取）。
 fn describe_layer(l: &Layer) -> String {
     // bytes= 直喂 / 反解层：从头部字节解析字段（scapy 风格）
     if let Some(raw) = layer_raw(l) {

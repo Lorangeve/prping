@@ -30,13 +30,19 @@ use packet_dsl::ir::{Layer, PacketSpec};
 #[cfg(windows)]
 use rust_i18n::t;
 #[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
+#[cfg(any(windows, target_os = "macos", feature = "pcap"))]
+use std::net::SocketAddr;
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 use std::time::{Duration, Instant};
 
 // ── 设备抽象 ────────────────────────────────────────────────────
 mod device;
-pub(crate) use device::{DeviceInfo, capture_devices, ethertype_of, format_device_list, pick_device, wrap_eth};
+#[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
+pub(crate) use device::{DeviceInfo, capture_devices, format_device_list, pick_device, wrap_eth};
+// ethertype_of 仅 wrap_ip4/wrap_ip6 内部使用（不对外导出）
+#[cfg(any(windows, target_os = "macos", feature = "pcap"))]
+use device::ethertype_of;
 
 // ── Windows 专属：iphlpapi FFI + MAC 解析 ─────────────────────
 

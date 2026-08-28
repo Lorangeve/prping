@@ -32,6 +32,12 @@ impl FVal {
 
 /// 每层支持的匹配字段名（与 `--eng` 展示名一致；`sport`/`dport`/`type` 为 IR 字段别名）。
 /// 配方 `extract` 的 `from: reply.<层>.<字段>` 与 `--eng` 概览校验共用。
+///
+/// **同步修改点**：新增协议字段时需同步修改以下位置：
+/// 1. 本函数 `sniffer_field_names` — 字段名列表
+/// 2. `sniffer_extract` — 按名提取 FVal 的 match arm
+/// 3. `engine/eng/display.rs::describe_layer` — 格式化渲染的 format 分支
+/// 4. `reply_field_names` — 如有扩展字节字段（如 `payload`/`body`）
 pub(crate) fn sniffer_field_names(layer: &str) -> Option<&'static [&'static str]> {
     Some(match layer {
         "eth" => &["dst", "src", "ethertype"][..],
@@ -64,6 +70,9 @@ pub(crate) fn reply_field_names(layer: &str) -> Option<Vec<&'static str>> {
 }
 
 /// 从反解层提取字段（别名映射到 IR 字段名）。
+///
+/// **同步修改点**：新增协议字段时需同步修改 `sniffer_field_names`（字段名列表）
+/// 和 `engine/eng/display.rs::describe_layer`（格式化渲染）。
 pub(crate) fn sniffer_extract(l: &Layer, name: &str) -> Option<FVal> {
     match l {
         Layer::Ethernet(f) => match name {
