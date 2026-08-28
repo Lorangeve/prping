@@ -235,6 +235,14 @@ pub fn run_client(cfg: &PingConfig) -> anyhow::Result<crate::BandwidthReport> {
     smol::block_on(run_client_async(addr, &cfg))
 }
 
+/// 循环终止条件检查：interrupted / deadline 到期 / count 用完。
+/// 返回 true 时调用方应 break。
+fn should_stop(deadline: Option<Instant>, count: u64, sent: u64) -> bool {
+    util::interrupted()
+        || deadline.is_some_and(|dl| Instant::now() >= dl)
+        || (deadline.is_none() && sent >= count)
+}
+
 async fn run_client_async(
     addr: SocketAddr,
     cfg: &PingConfig,
@@ -334,13 +342,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let mut prog = make_progress(duration, count, size as u64, false, cfg.quiet);
         let mut sampler = ThroughputSampler::new();
         loop {
-            if util::interrupted() {
-                break;
-            }
-            if deadline.is_some_and(|dl| Instant::now() >= dl) {
-                break;
-            }
-            if deadline.is_none() && sent >= count {
+            if should_stop(deadline, count, sent) {
                 break;
             }
             let t0 = Instant::now();
@@ -574,13 +576,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
     let start = Instant::now();
     let mut prog = make_progress(duration, count, size as u64, false, cfg.quiet);
     loop {
-        if util::interrupted() {
-            break;
-        }
-        if deadline.is_some_and(|dl| Instant::now() >= dl) {
-            break;
-        }
-        if deadline.is_none() && sent >= count {
+        if should_stop(deadline, count, sent) {
             break;
         }
         let t0 = Instant::now();
