@@ -128,9 +128,9 @@ fn opt_size() -> impl Parser<Option<String>> {
 // ── 各子命令参数与解析器 ──────────────────────────────────────────────────
 
 /// ping 子命令（ICMP / TCP / UDP(-u) / MTU(-m)）
-struct PingArgs {
+/// 三条测量子命令（ping/latency/bandwidth）共享的 CLI 选项。
+struct MeasureArgs {
     udp: bool,
-    mtu: bool,
     size: Option<String>,
     graph: bool,
     pretty: bool,
@@ -145,47 +145,52 @@ struct PingArgs {
     source: Option<String>,
     lang: Option<String>,
     target: String,
+}
+
+/// 共享测量选项 parser（ping/latency/bandwidth 组合使用）。
+fn measure_parser() -> impl Parser<MeasureArgs> {
+    construct!(MeasureArgs {
+        udp(opt_udp()),
+        size(opt_size()),
+        graph(long("graph")
+            .short('g')
+            .switch()
+            .help(t!("help.options.graph").as_ref())),
+        pretty(long("pretty")
+            .short('p')
+            .switch()
+            .help(t!("help.options.pretty").as_ref())),
+        count(opt_count()),
+        interval(opt_interval()),
+        quiet(opt_quiet()),
+        histogram(opt_histogram()),
+        warmup(opt_warmup()),
+        json(opt_json()),
+        v4(opt_v4()),
+        v6(opt_v6()),
+        source(opt_source()),
+        lang(opt_lang()),
+        target(positional::<String>("HOST")),
+    })
+}
+
+/// ping 子命令（ICMP / TCP / UDP(-u) / MTU(-m)）
+struct PingArgs {
+    mtu: bool,
+    measure: MeasureArgs,
 }
 
 /// latency 子命令（TCP/UDP 回显往返延迟）
 struct LatencyArgs {
-    udp: bool,
-    size: Option<String>,
     receive: bool,
-    graph: bool,
-    pretty: bool,
-    count: Option<String>,
-    interval: Option<f64>,
-    quiet: bool,
-    histogram: Option<String>,
-    warmup: Option<u64>,
-    json: bool,
-    v4: bool,
-    v6: bool,
-    source: Option<String>,
-    lang: Option<String>,
-    target: String,
+    measure: MeasureArgs,
 }
 
 /// bandwidth 子命令（TCP/UDP 吞吐）
 struct BandwidthArgs {
-    udp: bool,
-    size: Option<String>,
     receive: bool,
     parallel: Option<u32>,
-    graph: bool,
-    pretty: bool,
-    count: Option<String>,
-    interval: Option<f64>,
-    quiet: bool,
-    histogram: Option<String>,
-    warmup: Option<u64>,
-    json: bool,
-    v4: bool,
-    v6: bool,
-    source: Option<String>,
-    lang: Option<String>,
-    target: String,
+    measure: MeasureArgs,
 }
 
 /// server 子命令（同时服务 latency/bandwidth/接收模式）
@@ -272,31 +277,11 @@ enum Command {
 
 fn ping_cmd() -> impl Parser<Command> {
     construct!(PingArgs {
-        udp(opt_udp()),
         mtu(long("mtu")
             .short('m')
             .switch()
             .help(t!("help.options.mtu").as_ref())),
-        size(opt_size()),
-        graph(long("graph")
-            .short('g')
-            .switch()
-            .help(t!("help.options.graph").as_ref())),
-        pretty(long("pretty")
-            .short('p')
-            .switch()
-            .help(t!("help.options.pretty").as_ref())),
-        count(opt_count()),
-        interval(opt_interval()),
-        quiet(opt_quiet()),
-        histogram(opt_histogram()),
-        warmup(opt_warmup()),
-        json(opt_json()),
-        v4(opt_v4()),
-        v6(opt_v6()),
-        source(opt_source()),
-        lang(opt_lang()),
-        target(positional::<String>("HOST[:PORT]")),
+        measure(measure_parser()),
     })
     .to_options()
     .usage(t!("help.usage_ping").as_ref())
@@ -308,31 +293,11 @@ fn ping_cmd() -> impl Parser<Command> {
 
 fn latency_cmd() -> impl Parser<Command> {
     construct!(LatencyArgs {
-        udp(opt_udp()),
-        size(opt_size()),
         receive(long("receive")
             .short('r')
             .switch()
             .help(t!("help.options.receive").as_ref())),
-        graph(long("graph")
-            .short('g')
-            .switch()
-            .help(t!("help.options.graph").as_ref())),
-        pretty(long("pretty")
-            .short('p')
-            .switch()
-            .help(t!("help.options.pretty").as_ref())),
-        count(opt_count()),
-        interval(opt_interval()),
-        quiet(opt_quiet()),
-        histogram(opt_histogram()),
-        warmup(opt_warmup()),
-        json(opt_json()),
-        v4(opt_v4()),
-        v6(opt_v6()),
-        source(opt_source()),
-        lang(opt_lang()),
-        target(positional::<String>("HOST:PORT")),
+        measure(measure_parser()),
     })
     .to_options()
     .usage(t!("help.usage_latency").as_ref())
@@ -344,8 +309,6 @@ fn latency_cmd() -> impl Parser<Command> {
 
 fn bandwidth_cmd() -> impl Parser<Command> {
     construct!(BandwidthArgs {
-        udp(opt_udp()),
-        size(opt_size()),
         receive(long("receive")
             .short('r')
             .switch()
@@ -354,25 +317,7 @@ fn bandwidth_cmd() -> impl Parser<Command> {
             .argument::<u32>("N")
             .help(t!("help.options.parallel").as_ref())
             .optional()),
-        graph(long("graph")
-            .short('g')
-            .switch()
-            .help(t!("help.options.graph").as_ref())),
-        pretty(long("pretty")
-            .short('p')
-            .switch()
-            .help(t!("help.options.pretty").as_ref())),
-        count(opt_count()),
-        interval(opt_interval()),
-        quiet(opt_quiet()),
-        histogram(opt_histogram()),
-        warmup(opt_warmup()),
-        json(opt_json()),
-        v4(opt_v4()),
-        v6(opt_v6()),
-        source(opt_source()),
-        lang(opt_lang()),
-        target(positional::<String>("HOST:PORT")),
+        measure(measure_parser()),
     })
     .to_options()
     .usage(t!("help.usage_bandwidth").as_ref())
@@ -610,47 +555,15 @@ fn json_conflicts(json: bool, pretty: bool, graph: bool, histogram: bool) -> Opt
 }
 
 /// ping：--json 与 -p/-g/-H；-m（MTU）与 -u/-l/-g/-p/-H/-n/-i/-w/-q 互斥。
-fn validate_ping(a: &PingArgs) -> Option<String> {
+fn validate_ping(a: &MeasureArgs) -> Option<String> {
     if let Some(msg) = json_conflicts(a.json, a.pretty, a.graph, a.histogram.is_some()) {
         return Some(msg);
     }
-    if a.mtu {
-        let mut bad: Vec<&str> = Vec::new();
-        if a.udp {
-            bad.push("-u");
-        }
-        if a.size.is_some() {
-            bad.push("-l");
-        }
-        if a.graph {
-            bad.push("-g");
-        }
-        if a.pretty {
-            bad.push("-p");
-        }
-        if a.histogram.is_some() {
-            bad.push("-H");
-        }
-        if a.count.is_some() {
-            bad.push("-n");
-        }
-        if a.interval.is_some() {
-            bad.push("-i");
-        }
-        if a.warmup.is_some() {
-            bad.push("-w");
-        }
-        if a.quiet {
-            bad.push("-q");
-        }
-        if !bad.is_empty() {
-            return Some(t!("errors.conflict_mtu_mode", opts = bad.join(" ")).to_string());
-        }
-    }
+    // MTU 冲突校验已移至 run_ping（需要访问 PingArgs.mtu）。
     None
 }
 
-fn validate_latency(a: &LatencyArgs) -> Option<String> {
+fn validate_latency(a: &MeasureArgs) -> Option<String> {
     json_conflicts(a.json, a.pretty, a.graph, a.histogram.is_some())
 }
 
@@ -749,24 +662,60 @@ fn fail(ctrl_echo: Option<CtrlCEchoGuard>, msg: impl AsRef<str>) -> ! {
 }
 
 fn run_ping(a: PingArgs) -> anyhow::Result<()> {
-    apply_lang(&a.lang);
-    if let Some(msg) = validate_ping(&a) {
+    apply_lang(&a.measure.lang);
+    if let Some(msg) = validate_ping(&a.measure) {
         let mut w = stderr();
         let _ = writeln_red(&mut w, format!("Error: {msg}"));
         std::process::exit(1);
     }
-    if let Some(msg) = bad_histogram(&a.histogram) {
+    if let Some(msg) = bad_histogram(&a.measure.histogram) {
         let mut w = stderr();
         let _ = writeln_red(&mut w, format!("Error: {msg}"));
         std::process::exit(1);
     }
+    // MTU 冲突校验（需要访问 PingArgs.mtu）
+    if a.mtu {
+        let mut bad: Vec<&str> = Vec::new();
+        if a.measure.udp {
+            bad.push("-u");
+        }
+        if a.measure.size.is_some() {
+            bad.push("-l");
+        }
+        if a.measure.graph {
+            bad.push("-g");
+        }
+        if a.measure.pretty {
+            bad.push("-p");
+        }
+        if a.measure.histogram.is_some() {
+            bad.push("-H");
+        }
+        if a.measure.count.is_some() {
+            bad.push("-n");
+        }
+        if a.measure.interval.is_some() {
+            bad.push("-i");
+        }
+        if a.measure.warmup.is_some() {
+            bad.push("-w");
+        }
+        if a.measure.quiet {
+            bad.push("-q");
+        }
+        if !bad.is_empty() {
+            let mut w = stderr();
+            let _ = writeln_red(&mut w, format!("Error: {}", t!("errors.conflict_mtu_mode", opts = bad.join(" "))));
+            std::process::exit(1);
+        }
+    }
 
-    let _ctrl_echo = suppress_ctrl_c_echo(a.json);
-    set_pretty(a.pretty);
-    set_json(a.json);
+    let _ctrl_echo = suppress_ctrl_c_echo(a.measure.json);
+    set_pretty(a.measure.pretty);
+    set_json(a.measure.json);
 
-    let (host, port) = parse_target(&a.target)?;
-    let (cnt, dur) = match a.count.as_deref() {
+    let (host, port) = parse_target(&a.measure.target)?;
+    let (cnt, dur) = match a.measure.count.as_deref() {
         Some(s) => parse_count(s)?,
         None => (0, None),
     };
@@ -775,42 +724,42 @@ fn run_ping(a: PingArgs) -> anyhow::Result<()> {
         port: port.unwrap_or(0),
         count: cnt,
         duration: dur,
-        size: a.size.as_deref().map(parse_size).transpose()?,
-        quiet: a.quiet,
-        histogram: a.histogram.as_deref().and_then(parse_histogram),
-        v4: a.v4,
-        v6: a.v6,
-        source: a.source.as_deref().map(resolve_source).transpose()?,
-        udp: a.udp,
+        size: a.measure.size.as_deref().map(parse_size).transpose()?,
+        quiet: a.measure.quiet,
+        histogram: a.measure.histogram.as_deref().and_then(parse_histogram),
+        v4: a.measure.v4,
+        v6: a.measure.v6,
+        source: a.measure.source.as_deref().map(resolve_source).transpose()?,
+        udp: a.measure.udp,
         mtu: a.mtu,
-        graph: a.graph,
-        interval: a.interval.unwrap_or(PingConfig::default().interval),
-        warmup: a.warmup.unwrap_or(PingConfig::default().warmup),
+        graph: a.measure.graph,
+        interval: a.measure.interval.unwrap_or(PingConfig::default().interval),
+        warmup: a.measure.warmup.unwrap_or(PingConfig::default().warmup),
         ..PingConfig::default()
     };
     dispatch_run(cfg, _ctrl_echo)
 }
 
 fn run_latency(a: LatencyArgs) -> anyhow::Result<()> {
-    apply_lang(&a.lang);
-    if let Some(msg) = validate_latency(&a) {
+    apply_lang(&a.measure.lang);
+    if let Some(msg) = validate_latency(&a.measure) {
         let mut w = stderr();
         let _ = writeln_red(&mut w, format!("Error: {msg}"));
         std::process::exit(1);
     }
-    if let Some(msg) = bad_histogram(&a.histogram) {
+    if let Some(msg) = bad_histogram(&a.measure.histogram) {
         let mut w = stderr();
         let _ = writeln_red(&mut w, format!("Error: {msg}"));
         std::process::exit(1);
     }
 
-    let _ctrl_echo = suppress_ctrl_c_echo(a.json);
-    set_pretty(a.pretty);
-    set_json(a.json);
+    let _ctrl_echo = suppress_ctrl_c_echo(a.measure.json);
+    set_pretty(a.measure.pretty);
+    set_json(a.measure.json);
 
-    let (host, port) = parse_target(&a.target)?;
+    let (host, port) = parse_target(&a.measure.target)?;
     let port = port.ok_or_else(|| anyhow::anyhow!(t!("errors.latency_requires_port")))?;
-    let (cnt, dur) = match a.count.as_deref() {
+    let (cnt, dur) = match a.measure.count.as_deref() {
         Some(s) => parse_count(s)?,
         None => (0, None),
     };
@@ -820,37 +769,37 @@ fn run_latency(a: LatencyArgs) -> anyhow::Result<()> {
         port,
         count: cnt,
         duration: dur,
-        size: Some(parse_size(a.size.as_deref().unwrap_or("64"))?),
-        quiet: a.quiet,
-        histogram: a.histogram.as_deref().and_then(parse_histogram),
-        v4: a.v4,
-        v6: a.v6,
-        source: a.source.as_deref().map(resolve_source).transpose()?,
-        udp: a.udp,
+        size: Some(parse_size(a.measure.size.as_deref().unwrap_or("64"))?),
+        quiet: a.measure.quiet,
+        histogram: a.measure.histogram.as_deref().and_then(parse_histogram),
+        v4: a.measure.v4,
+        v6: a.measure.v6,
+        source: a.measure.source.as_deref().map(resolve_source).transpose()?,
+        udp: a.measure.udp,
         receive: a.receive,
-        graph: a.graph,
-        interval: a.interval.unwrap_or(PingConfig::default().interval),
-        warmup: a.warmup.unwrap_or(PingConfig::default().warmup),
+        graph: a.measure.graph,
+        interval: a.measure.interval.unwrap_or(PingConfig::default().interval),
+        warmup: a.measure.warmup.unwrap_or(PingConfig::default().warmup),
         ..PingConfig::default()
     };
     dispatch_run(cfg, _ctrl_echo)
 }
 
 fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
-    apply_lang(&a.lang);
+    apply_lang(&a.measure.lang);
     if let Some(msg) = validate_bandwidth(&a) {
         let mut w = stderr();
         let _ = writeln_red(&mut w, format!("Error: {msg}"));
         std::process::exit(1);
     }
 
-    let _ctrl_echo = suppress_ctrl_c_echo(a.json);
-    set_json(a.json);
-    set_pretty(a.pretty);
+    let _ctrl_echo = suppress_ctrl_c_echo(a.measure.json);
+    set_json(a.measure.json);
+    set_pretty(a.measure.pretty);
 
-    let (host, port) = parse_target(&a.target)?;
+    let (host, port) = parse_target(&a.measure.target)?;
     let port = port.ok_or_else(|| anyhow::anyhow!(t!("errors.bandwidth_requires_port")))?;
-    let (cnt, dur) = match a.count.as_deref() {
+    let (cnt, dur) = match a.measure.count.as_deref() {
         Some(s) => parse_count(s)?,
         None => (0, None),
     };
@@ -859,19 +808,19 @@ fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
         port,
         count: cnt,
         duration: dur,
-        size: a.size.as_deref().map(parse_size).transpose()?, // None → lib 默认 8192
-        quiet: a.quiet,
-        histogram: a.histogram.as_deref().and_then(parse_histogram),
-        v4: a.v4,
-        v6: a.v6,
-        source: a.source.as_deref().map(resolve_source).transpose()?,
+        size: a.measure.size.as_deref().map(parse_size).transpose()?, // None → lib 默认 8192
+        quiet: a.measure.quiet,
+        histogram: a.measure.histogram.as_deref().and_then(parse_histogram),
+        v4: a.measure.v4,
+        v6: a.measure.v6,
+        source: a.measure.source.as_deref().map(resolve_source).transpose()?,
         parallel: a.parallel.unwrap_or(1),
-        udp: a.udp,
+        udp: a.measure.udp,
         receive: a.receive,
         bandwidth: true,
-        graph: a.graph,
-        interval: a.interval.unwrap_or(PingConfig::default().interval),
-        warmup: a.warmup.unwrap_or(PingConfig::default().warmup),
+        graph: a.measure.graph,
+        interval: a.measure.interval.unwrap_or(PingConfig::default().interval),
+        warmup: a.measure.warmup.unwrap_or(PingConfig::default().warmup),
         ..PingConfig::default()
     };
     dispatch_run(cfg, _ctrl_echo)
