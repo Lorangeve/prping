@@ -158,8 +158,8 @@ prping 是一个跨平台 psping 复刻（Rust，workspace 双 crate：`prping-c
    涉及：`ping/{icmp,tcp,udp,latency}.rs`、`output.rs`。
 - [x] 2. **PingConfig 构造收敛（C-1）**：实现 `PingConfig::builder()` 或 `PingConfig { ..Default }` 覆盖差异字段，
    消除 main.rs 4 处 22 字段字面量（约 80 行）。涉及：`util/config.rs`、`main.rs`。
-- [ ] 3. **CLI 共享选项块（C-2）**：提取 `struct MeasureCommon { udp,size,count,interval,quiet,histogram,warmup,json,v4,v6,source,lang,target }` +
-   `fn measure_common() -> impl Parser<...>`，三个 cmd() 组合它。涉及：`main.rs`。
+- [x] 3. **CLI 共享选项块（C-2）**：提取 `struct MeasureCommon { udp,size,count,interval,quiet,histogram,warmup,json,v4,v6,source,lang,target }` +
+   `fn measure_common() -> impl Parser<...>`，三个 cmd() 组合它。涉及：`main.rs`。（由 P2-26 MeasureArgs + measure_parser 完成）
 - [x] 4. **dispatch_run 错误分支 helper（C-3）**：`fn fail(ctrl_echo, msg)` 收敛 7 个分支。涉及：`main.rs`。
 - [x] 5. **合并 verbose dissect（S-1）**：`serve/mod.rs` 提取 `fn verbose_dissect(tag, addr, header, data, n, verbose, capture_active)`。涉及：`serve/mod.rs`。
 - [x] 6. **TCP 触发魔数常量（M-8）**：`const TCP_RECEIVE_TRIGGER: u8 = 0xFF` 放 `util/format.rs`，客户端/服务端共用；
