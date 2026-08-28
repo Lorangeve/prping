@@ -6,11 +6,71 @@ use std::time::{Duration, Instant};
 
 use termcolor::StandardStream;
 
-use super::{Hop, PROBE_TIMEOUT, PROBES_PER_HOP, PingConfig, finish_hop};
+use super::{Hop, PingConfig, TraceSocket};
 use crate::util;
 
 /// UDP 起始端口（经典 Unix traceroute）。
 const UDP_START_PORT: u16 = 33434;
+
+/// UDP 探测器：实现 `TraceSocket`，供 `trace_loop` 调用。
+struct UdpTraceSocket {
+    udp_sock: socket2::Socket,
+    icmp_sock: socket2::Socket,
+    target_ip: IpAddr,
+    port_counter: u16,
+}
+
+impl TraceSocket for UdpTraceSocket {
+    fn send_probes(&mut self, _hop_no: u32) -> Vec<(u16, Instant)> {
+        let mut probes = Vec::with_capacity(super::PROBES_PER_HOP);
+        for _ in 0..super::PROBES_PER_HOP {
+            let port = self.port_counter;
+            self.port_counter = self.port_counter.wrapping_add(1);
+            let target = std::net::SocketAddr::new(self.target_ip, port);
+            let data = vec![0u8; 32];
+            let sent = Instant::now();
+            if self
+                .udp_sock
+                .send_to(&data, &socket2::SockAddr::from(target))
+                .is_ok()
+            {
+                probes.push((port, sent));
+            }
+        }
+        probes
+    }
+
+    fn parse_reply(&self, data: &[u8], want: &[u16]) -> Option<(u16, bool)> {
+        let port = if self.target_ip.is_ipv6() {
+            parse_udp_icmp_v6(data, self.target_ip, want)?
+        } else {
+            parse_udp_icmp_v4(data, self.target_ip, want)?
+        };
+        let is_dest = is_port_unreachable(data, self.target_ip);
+        Some((port, is_dest))
+    }
+
+    fn set_recv_timeout(&self, timeout: Duration) -> anyhow::Result<()> {
+        self.icmp_sock.set_read_timeout(Some(timeout))?;
+        Ok(())
+    }
+
+    fn recv_from(&self, buf: &mut [MaybeUninit<u8>]) -> std::io::Result<(usize, socket2::SockAddr)> {
+        self.icmp_sock.recv_from(buf)
+    }
+
+    fn dump_label(&self) -> &str {
+        if self.target_ip.is_ipv6() { "udp-v6" } else { "udp-v4" }
+    }
+
+    fn ttl_socket(&self) -> &socket2::Socket {
+        &self.udp_sock
+    }
+
+    fn is_ipv6(&self) -> bool {
+        self.target_ip.is_ipv6()
+    }
+}
 
 /// UDP 逐跳：普通 UDP socket 发送，raw ICMP socket 收取 Time Exceeded / Port Unreachable。
 pub(crate) fn trace_udp(
@@ -21,117 +81,13 @@ pub(crate) fn trace_udp(
 ) -> anyhow::Result<(Vec<Hop>, bool)> {
     let udp_sock = crate::util::create_udp_socket(target_ip, cfg.source, 0)?;
     let (icmp_sock, _) = crate::util::create_icmp_socket(target_ip, cfg.source)?;
-
-    let mut hops: Vec<Hop> = Vec::new();
-    let mut port_counter: u16 = UDP_START_PORT;
-    let mut reached = false;
-
-    for hop_no in 1..=max_hops {
-        if util::interrupted() {
-            break;
-        }
-        crate::util::set_ttl(&udp_sock, hop_no, target_ip.is_ipv6())?;
-
-        // 发送本跳全部探测
-        let mut probes: Vec<(u16, Instant)> = Vec::with_capacity(PROBES_PER_HOP);
-        for _ in 0..PROBES_PER_HOP {
-            let port = port_counter;
-            port_counter = port_counter.wrapping_add(1);
-            let target = std::net::SocketAddr::new(target_ip, port);
-            let data = vec![0u8; 32]; // 32 字节载荷
-            let sent = Instant::now();
-            if udp_sock
-                .send_to(&data, &socket2::SockAddr::from(target))
-                .is_ok()
-            {
-                probes.push((port, sent));
-            }
-        }
-        if probes.is_empty() {
-            break;
-        }
-
-        // 收集回复直到全部匹配或超时
-        let want: Vec<u16> = probes.iter().map(|&(p, _)| p).collect();
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
-        let mut src: Option<IpAddr> = None;
-        let mut dest_hit = false;
-        let mut remaining = probes.len();
-        let mut buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
-        while remaining > 0 {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            icmp_sock.set_read_timeout(Some(deadline - now))?;
-            match icmp_sock.recv_from(&mut buf) {
-                Ok((n, addr)) => {
-                    let data: &[u8] =
-                        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
-                    let peer: IpAddr = addr
-                        .as_socket()
-                        .map(|s| s.ip())
-                        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                    let port = if target_ip.is_ipv6() {
-                        match parse_udp_icmp_v6(data, target_ip, &want) {
-                            Some(p) => p,
-                            None => {
-                                super::trace_dump("udp-v6", data, false);
-                                continue;
-                            }
-                        }
-                    } else {
-                        match parse_udp_icmp_v4(data, target_ip, &want) {
-                            Some(p) => p,
-                            None => {
-                                super::trace_dump("udp-v4", data, false);
-                                continue;
-                            }
-                        }
-                    };
-                    super::trace_dump(
-                        if target_ip.is_ipv6() {
-                            "udp-v6"
-                        } else {
-                            "udp-v4"
-                        },
-                        data,
-                        true,
-                    );
-                    // Port Unreachable 即到达
-                    if is_port_unreachable(data, target_ip) {
-                        dest_hit = true;
-                    }
-                    // 记录 RTT
-                    if let Some(idx) = probes.iter().position(|&(p, _)| p == port)
-                        && rtts[idx].is_none()
-                    {
-                        let rtt = probes[idx].1.elapsed();
-                        rtts[idx] = Some(rtt);
-                        remaining -= 1;
-                    }
-                    src = Some(peer);
-                }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-
-        let hop = finish_hop(hop_no, cfg, src, rtts, w)?;
-        hops.push(hop);
-        if dest_hit {
-            reached = true;
-            break;
-        }
-    }
-
-    Ok((hops, reached))
+    let mut socket = UdpTraceSocket {
+        udp_sock,
+        icmp_sock,
+        target_ip,
+        port_counter: UDP_START_PORT,
+    };
+    super::trace_loop(cfg, max_hops, &mut socket, w)
 }
 
 /// 解析 IPv4 UDP ICMP 回包（Time Exceeded / Port Unreachable）。
@@ -139,7 +95,7 @@ fn parse_udp_icmp_v4(buf: &[u8], target: IpAddr, want: &[u16]) -> Option<u16> {
     if buf.len() < 20 {
         return None;
     }
-    let ihl = (buf[0] & 0x0F) as usize * 4;
+    let ihl = util::ipv4_ihl(buf);
     if buf.len() < ihl + 8 {
         return None;
     }
@@ -153,7 +109,7 @@ fn parse_udp_icmp_v4(buf: &[u8], target: IpAddr, want: &[u16]) -> Option<u16> {
     if body.len() < 20 {
         return None;
     }
-    let inner_ihl = (body[0] & 0x0F) as usize * 4;
+    let inner_ihl = util::ipv4_ihl(body);
     if body.len() < inner_ihl + 8 {
         return None;
     }
@@ -177,11 +133,7 @@ fn parse_udp_icmp_v4(buf: &[u8], target: IpAddr, want: &[u16]) -> Option<u16> {
 /// 解析 IPv6 UDP ICMP 回包。
 fn parse_udp_icmp_v6(buf: &[u8], target: IpAddr, want: &[u16]) -> Option<u16> {
     // 框架探测
-    let icmp = if buf.len() >= 48 && buf[0] >> 4 == 6 {
-        &buf[40..]
-    } else {
-        buf
-    };
+    let icmp = util::ipv6_frame_skip(buf);
     if icmp.len() < 8 {
         return None;
     }
@@ -221,15 +173,11 @@ fn is_port_unreachable(buf: &[u8], target: IpAddr) -> bool {
     }
     if target.is_ipv6() {
         // ICMPv6 type 1 code 4
-        let icmp = if buf[0] >> 4 == 6 && buf.len() >= 48 {
-            &buf[40..]
-        } else {
-            buf
-        };
+        let icmp = util::ipv6_frame_skip(buf);
         icmp.len() >= 2 && icmp[0] == 1 && icmp[1] == 4
     } else {
         // ICMP type 3 code 3
-        let ihl = (buf[0] & 0x0F) as usize * 4;
+        let ihl = util::ipv4_ihl(buf);
         if buf.len() < ihl + 2 {
             return false;
         }

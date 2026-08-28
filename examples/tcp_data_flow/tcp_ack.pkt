@@ -1,0 +1,30 @@
+# TCP 数据传输步骤 2：数据确认（ACK）
+# 学习 TCP 协议的确认机制
+#
+# TCP 确认机制：
+#   - 每个数据包都需要确认（ACK）
+#   - 确认号 = 期望接收的下一个字节序列号
+#   - 累积确认：确认号之前的所有数据都已正确接收
+#   - 选择性确认（SACK）：允许确认不连续的数据块
+#
+# 窗口机制：
+#   - 接收方通告窗口大小（window field）
+#   - 发送方不能发送超过窗口大小的数据
+#   - 窗口缩放选项（Window Scale）支持大窗口
+#
+# 注意：真实场景中，ACK 由接收方自动生成，
+# 这里构造的是模拟 ACK，用于理解协议结构
+
+# 构造 TCP ACK 确认包
+# 确认号 = 发送方序列号 + 数据长度
+# 这里假设数据长度为 50 字节
+ack_pkt = raw(bytes="")
+
+# 封装到 TCP（ACK 标志）
+use(ack_pkt) |> tcp(sport=params("port", 80), dport=40000,
+                    seq=global("sseq", 0x2000), ack=global("cseq", 0x1000),
+                    flags=ack(), window=65535)
+             |> ipv4(src=params("ip", "127.0.0.1"), dst="127.0.0.1")
+
+export:
+- ack_pkt

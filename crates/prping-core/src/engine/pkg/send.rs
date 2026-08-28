@@ -19,7 +19,7 @@ use super::raw::send_raw_bytes;
 use super::sniffer::{SnifferMatcher, sniffer_extract};
 use super::{PkgOptions, Reply, SendMode, SendOutcome, Transport, is_fake_ip, local_ip_for};
 use crate::engine::eng::render_hexdump;
-use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta, writeln_red};
+use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta, print_orange, writeln_red};
 
 pub fn send_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     crate::engine::eng::ensure_dns_resolver();
@@ -31,7 +31,7 @@ pub fn send_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         .map_err(|d| anyhow::anyhow!("{d}"))?;
     let total: usize = sources.iter().map(|(_, p)| p.len()).sum();
     if total == 0 {
-        anyhow::bail!("没有可发送的包：文件既无默认导出，也无命名导出");
+        anyhow::bail!("{}", t!("engine.err_no_packets"));
     }
 
     // --out：先存档（按最外层推断链路类型）。raw 模式下与发送循环一致：
@@ -80,7 +80,7 @@ pub fn send_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     if opts.summary {
         // 摘要模式：不发头部，逐包紧凑层栈 + 发送结果，最后一行总账
     } else {
-        print_magenta(&mut w, "packet-dsl pkg")?;
+        print_magenta(&mut w, "prping packet")?;
         writeln!(&mut w)?;
         print_cyan(
             &mut w,
@@ -91,11 +91,11 @@ pub fn send_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         )?;
         writeln!(&mut w)?;
         if opts.fuzz {
-            crate::output::print_yellow(&mut w, t!("engine.note_fuzz"))?;
+            print_orange(&mut w, t!("engine.note_fuzz"))?;
             writeln!(&mut w)?;
         }
         if let Some(secs) = opts.wait {
-            crate::output::print_yellow(&mut w, t!("engine.note_wait_reply", secs = secs))?;
+            print_orange(&mut w, t!("engine.note_wait_reply", secs = secs))?;
             writeln!(&mut w)?;
         }
         writeln!(&mut w)?;
@@ -135,7 +135,7 @@ pub fn send_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         print_cyan(
             &mut w,
             format!(
-                "packet-dsl pkg: {total} packets from {file}{target} — sent {sent}, failed {failed}{skip}",
+                "prping packet: {total} packets from {file}{target} — sent {sent}, failed {failed}{skip}",
                 file = file.display(),
                 target = target_phrase,
                 sent = sent,
@@ -146,12 +146,15 @@ pub fn send_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         writeln!(&mut w)?;
     }
     if stats.failed > 0 {
-        anyhow::bail!("{} of {} packets failed to send", stats.failed, stats.total);
+        anyhow::bail!(
+            "{}",
+            t!("engine.err_send_failed", failed = stats.failed, total = stats.total)
+        );
     }
     if stats.skipped == stats.total && stats.total > 0 {
         anyhow::bail!(
-            "没有可发送的包：{} 个导出均为纯裸层（无 TCP/UDP 传输、也无 eth/ipv4/ipv6 外层）",
-            stats.total
+            "{}",
+            t!("engine.err_all_bare", total = stats.total)
         );
     }
     Ok(())
@@ -218,6 +221,9 @@ pub(crate) fn send_module(
     let mut idx = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
+    // note 去重计数器：首次完整打印，后续简短（避免 headers.pkt 等多裸层文件刷屏）
+    let mut bare_export_seen = 0usize;
+    let mut raw_fallback_seen = 0usize;
     for (source, pkts) in sources {
         for pkt in pkts {
             idx += 1;
@@ -253,10 +259,18 @@ pub(crate) fn send_module(
             if extracted.is_none() && !raw_sendable_outer {
                 skipped += 1;
                 if !opts.summary {
-                    crate::output::print_yellow(
-                        w,
-                        format!("{}{}", indent(1), t!("engine.note_bare_export")),
-                    )?;
+                    bare_export_seen += 1;
+                    if bare_export_seen == 1 {
+                        print_orange(
+                            w,
+                            format!("{}{}", indent(1), t!("engine.note_bare_export")),
+                        )?;
+                    } else {
+                        print_orange(
+                            w,
+                            format!("{}{}", indent(1), t!("engine.note_bare_export_short")),
+                        )?;
+                    }
                     writeln!(w)?;
                     writeln!(w)?;
                 }
@@ -264,10 +278,25 @@ pub(crate) fn send_module(
             }
             let is_raw = matches!(opts.mode, SendMode::Raw { .. }) || extracted.is_none();
             if !opts.summary && extracted.is_none() && !matches!(opts.mode, SendMode::Raw { .. }) {
-                crate::output::print_yellow(
-                    w,
-                    format!("{}{}", indent(1), t!("engine.note_raw_fallback")),
-                )?;
+                raw_fallback_seen += 1;
+                if raw_fallback_seen == 1 {
+                    print_orange(
+                        w,
+                        format!(
+                            "{}{}",
+                            indent(1),
+                            t!(
+                                "engine.note_raw_fallback",
+                                hint = crate::util::privilege_hint()
+                            )
+                        ),
+                    )?;
+                } else {
+                    print_orange(
+                        w,
+                        format!("{}{}", indent(1), t!("engine.note_raw_fallback_short")),
+                    )?;
+                }
                 writeln!(w)?;
             }
             // 目标：显式指定 > 包内 IP 层 dst 推导；raw 链路层帧（eth 外层、无 IP 层可
@@ -298,7 +327,7 @@ pub(crate) fn send_module(
                 && let Some(t) = target
                 && is_fake_ip(t.ip())
             {
-                crate::output::print_yellow(
+                print_orange(
                     w,
                     format!("  {}", t!("engine.note_fakeip_target", ip = t.ip())),
                 )?;
@@ -372,20 +401,20 @@ pub(crate) fn send_module(
                     if is_eth_frame && is_fake_ip(ip) {
                         // 路由探测拿到的是代理 fake-ip 网关地址：eth 原始帧绕过代理直发，
                         // 真实网关 ingress 过滤会丢弃该源地址
-                        crate::output::print_yellow(
+                        print_orange(
                             w,
                             format!("{}{}", indent(1), t!("engine.note_fakeip_src", ip = ip)),
                         )?;
                         writeln!(w)?;
                     } else {
-                        print_dim(
+                        print_orange(
                             w,
                             format!("{}{}", indent(1), t!("engine.note_src_filled", ip = ip)),
                         )?;
                         writeln!(w)?;
                     }
                 } else if src_warn {
-                    crate::output::print_yellow(
+                    print_orange(
                         w,
                         format!("{}{}", indent(1), t!("engine.note_src_unfillable")),
                     )?;
@@ -633,7 +662,7 @@ fn raw_sendable_outer(pkt: &PacketSpec) -> bool {
 /// [`send_module`] 自动回退 raw 发送完整包），但最外层可 raw 发送（eth/ipv4/ipv6，
 /// 如 ICMP over IP、ARP over eth）。纯裸层导出（无传输也无 raw 外层）不在此列——
 /// payload 与 raw 两种模式都发不了（`engine.note_bare_export` 跳过）。
-pub(crate) fn raw_only(pkt: &PacketSpec) -> bool {
+pub fn raw_only(pkt: &PacketSpec) -> bool {
     !pkt.layers
         .iter()
         .any(|l| matches!(l, Layer::Tcp(_) | Layer::Udp(_)))

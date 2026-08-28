@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use packet_dsl::PacketSource;
 use termcolor::{Ansi, ColorChoice, StandardStream};
 
-use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta, print_yellow};
+use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta, print_orange, print_yellow};
 
 use display::render_module_header;
 
@@ -86,6 +86,9 @@ pub(crate) fn collect_pkt_params(
                 packet_dsl::ast::Expr::Call(c) => walk_call_args(&c.args, &mut out),
                 packet_dsl::ast::Expr::Pipeline(p) => walk_pipeline(p, &mut out),
             },
+            packet_dsl::ast::Stmt::Pipeline(p) => {
+                walk_pipeline(&p.pipeline, &mut out);
+            }
             packet_dsl::ast::Stmt::Func(f) if f.schema.is_some() => {
                 // proto 函数 = 带 schema 的 FuncStmt：字段的 width（bytes 宽度
                 // 表达式）与默认值可能是值表达式
@@ -156,7 +159,7 @@ fn walk_value(v: &packet_dsl::ast::Value, out: &mut Vec<(String, Option<packet_d
 }
 
 /// 聚合配方参数面：按名字排序去重，合并默认值列表与步骤索引。
-pub(crate) fn aggregate_pkt_params(
+pub fn aggregate_pkt_params(
     per_step: &[Vec<(String, Option<packet_dsl::ast::Value>)>],
 ) -> Vec<(String, Vec<packet_dsl::ast::Value>, Vec<usize>)> {
     let mut map: HashMap<String, (Vec<packet_dsl::ast::Value>, Vec<usize>)> = HashMap::new();
@@ -224,14 +227,11 @@ pub(crate) fn validate_expr_reply_leaves(
 /// `dns("host")` 原语与地址字段的域名解析依赖它（packet-dsl 本身不发网络请求）。
 pub fn ensure_dns_resolver() {
     packet_dsl::set_dns_resolver(|host| {
-        use std::net::ToSocketAddrs;
-        let mut addrs: Vec<std::net::SocketAddr> = (host, 0)
-            .to_socket_addrs()
-            .ok()
-            .map(|it| it.collect())
-            .unwrap_or_default();
-        addrs.sort_by_key(|a| u8::from(a.is_ipv6())); // v4 优先
-        addrs.into_iter().map(|a| a.ip()).collect()
+        crate::util::resolve_vec(host, 0, false, false)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| a.ip())
+            .collect()
     });
 }
 
@@ -452,6 +452,7 @@ pub fn ls_builtins(libs: &[PathBuf]) -> anyhow::Result<()> {
 
 /// 解析 hex 字符串并展示反解结果。
 pub fn decode_hex(hex: &str) -> anyhow::Result<()> {
+    ensure_proto_registry();
     let hex = hex.replace([' ', '\n'], "");
     let mut bytes = Vec::new();
     for i in (0..hex.len()).step_by(2) {
@@ -467,6 +468,7 @@ pub fn decode_hex(hex: &str) -> anyhow::Result<()> {
 
 /// 解析 pcap 文件并展示反解结果。
 pub fn decode_pcap(path: &Path) -> anyhow::Result<()> {
+    ensure_proto_registry();
     let (_version, _nano, records) = crate::engine::pcap::read_pcap(path)?;
     let mut w = StandardStream::stdout(ColorChoice::Auto);
     print_magenta(&mut w, "packet-dsl pcap")?;
@@ -504,7 +506,7 @@ pub fn analyze_file(
 
     let mut w = StandardStream::stdout(ColorChoice::Auto);
     let libs = effective_libs(libs);
-    render_module_header(&mut w, &module, total, &libs)?;
+    render_module_header(&mut w, &module, total, &libs, params)?;
     let mut idx = 0usize;
     for (source, pkts) in &sources {
         for pkt in pkts {
@@ -579,7 +581,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
     }
     let params_agg = aggregate_pkt_params(&per_step);
     let mut w = StandardStream::stdout(ColorChoice::Auto);
-    print_magenta(&mut w, "packet-dsl recipe")?;
+    print_magenta(&mut w, "prping engine recipe")?;
     writeln!(&mut w)?;
     print_cyan(
         &mut w,
@@ -607,14 +609,15 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
         writeln!(&mut w)?;
     }
     if !params_agg.is_empty() {
-        print_green(&mut w, "params (from step pkts; inject via -p k=v):")?;
+        print_green(&mut w, "params (inject via -p k=v):")?;
         writeln!(&mut w)?;
-        for (name, defaults, steps) in &params_agg {
+        for (name, defaults, _) in &params_agg {
+            let has_default = !defaults.is_empty();
             let def = match defaults.len() {
-                0 => "no default".to_string(),
-                1 => format!("= {}", value_display(&defaults[0])),
+                0 => "required".to_string(),
+                1 => format!("default: {}", value_display(&defaults[0])),
                 _ => format!(
-                    "= {}",
+                    "default: {}",
                     defaults
                         .iter()
                         .map(value_display)
@@ -622,22 +625,18 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                         .join(", ")
                 ),
             };
-            let step_desc = if steps.len() == 1 {
-                format!("step {}", steps[0])
+            // 无默认值（必需参数）用橙色警告，有默认值用灰色
+            if has_default {
+                print_dim(
+                    &mut w,
+                    format!("{}- {name} ({def})", indent(1)),
+                )?;
             } else {
-                format!(
-                    "steps {}",
-                    steps
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            print_dim(
-                &mut w,
-                format!("{}- {name} ({def}; {step_desc})", indent(1)),
-            )?;
+                print_orange(
+                    &mut w,
+                    format!("{}- {name} ({def})", indent(1)),
+                )?;
+            }
             writeln!(&mut w)?;
         }
         writeln!(&mut w)?;
@@ -726,6 +725,28 @@ mod tests {
         std::fs::write(&bad, "this is not a valid pkt !!").unwrap();
         let err = collect_pkt_params(&bad).unwrap_err();
         assert!(err.to_string().contains("解析失败"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_pkt_params_with_and_without_default() {
+        let dir = temp_dir("params");
+        let pkt = dir.join("test.pkt");
+        std::fs::write(
+            &pkt,
+            r#"req = icmp(type=8, seq=params("seq", 1))
+use(req) |> ipv4(dst=params("ip"), ttl=64)
+"#,
+        )
+        .unwrap();
+        let params = collect_pkt_params(&pkt).unwrap();
+        assert_eq!(params.len(), 2, "应收集到 seq 和 ip 两个参数");
+        // seq 有默认值 1
+        let seq = params.iter().find(|(n, _)| n == "seq").unwrap();
+        assert!(seq.1.is_some(), "seq 应有默认值");
+        // ip 无默认值
+        let ip = params.iter().find(|(n, _)| n == "ip").unwrap();
+        assert!(ip.1.is_none(), "ip 应无默认值");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

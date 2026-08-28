@@ -2,8 +2,9 @@
 #
 # 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
 #   prping engine network_icmp_bare               # 概览
-#   sudo prping packet network_icmp_bare --wait 2
-#     （目标默认 127.0.0.1 本机内核直接回 echo reply；可注入 -p ip=www.baidu.com）
+#   sudo prping packet network_icmp_bare 127.0.0.1 --raw --wait 2
+#     （--raw 发原始 ICMP 包需 root/cap_net_raw；ICMP 无端口，用裸 HOST 即可；
+#       目标默认 127.0.0.1 本机内核直接回 echo reply；可注入 -p ip=www.baidu.com）
 #
 # 演示点：
 #   - 与 icmp_echo_flow 同款 extract 流程，但最外层是 ipv4/ipv6（裸 IP，无 eth 层）

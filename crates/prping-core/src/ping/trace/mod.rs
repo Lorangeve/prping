@@ -6,11 +6,14 @@
 //!   request，TTL 从 1 起逐跳递增；中间路由器 TTL 耗尽回 ICMP Time Exceeded
 //!   （type 11 / ICMPv6 type 3），其源地址即该跳地址；目标本身回 ICMP echo
 //!   reply（type 0 / 129）。回复按内嵌原始报文的 id/seq 匹配归属。
-//! - **TCP SYN**（`trace --tcp HOST:PORT`，对标 `tcptraceroute`/`tracetcp`）：
+//! - **TCP SYN**（`trace HOST:PORT` 带端口自动启用，对标
+//!   `tcptraceroute`/`tracetcp`）：
 //!   发 TCP SYN（递增 TTL），中间路由回 Time Exceeded，目标回 **SYN-ACK**
 //!   （端口开）或 **RST**（端口关）即到达——ICMP 被防火墙过滤时仍可用。
-//!   每个探测用独立源端口，按内嵌 TCP 头的 (sport, dport) 匹配归属，无需 seq；
-//!   收 SYN-ACK/RST 用 raw TCP socket（Windows 禁止 raw TCP，`--tcp` 报错）。
+//!   每个探测用独立源端口，按内嵌 TCP 头的 (sport, dport) 匹配归属，无需 seq。
+//!   Unix：raw TCP socket 发 SYN（内核构 IP 头）、raw TCP 收 SYN-ACK/RST + raw
+//!   ICMP 收 Time Exceeded（双 socket `libc::poll`，见 `tcp.rs`）。Windows：raw
+//!   TCP 被禁止，走 Npcap 注入完整帧 + 抓包收回复（`tcpwin.rs`，需 Npcap，仅 IPv4）。
 //! - **UDP**（`trace --udp HOST`，经典 Unix traceroute）：普通 UDP socket 发
 //!   载荷到递增高段端口（33434 起，每探测 +1），TTL 逐跳递增；中间路由回
 //!   Time Exceeded，目标回 **Port Unreachable**（type 3 code 3 / ICMPv6 type 1
@@ -31,11 +34,15 @@
 mod dns;
 mod icmp;
 mod tcp;
+// Windows pcap 路径；纯函数（帧构造/回复解析）在 test 下任意平台编译可单测
+#[cfg(any(windows, test))]
+mod tcpwin;
 mod udp;
 
 use std::io::Write;
+use std::mem::MaybeUninit;
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rust_i18n::t;
 use termcolor::StandardStream;
@@ -48,6 +55,117 @@ use crate::util::{self, PingConfig};
 const PROBES_PER_HOP: usize = 3;
 /// 单跳收集回复的总超时。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// 逐跳探测 trait：每种探测技术（ICMP/TCP/UDP）实现此 trait，
+/// `trace_loop` 统一管理 hop 循环、interrupted、set_ttl、超时收集。
+pub(crate) trait TraceSocket {
+    /// 发送本跳全部探测，返回 `(identifier, send_time)` 列表。
+    /// `hop_no` 用于 TTL 设置（由 `trace_loop` 已设置，此处可用于端口递增等）。
+    fn send_probes(&mut self, hop_no: u32) -> Vec<(u16, Instant)>;
+
+    /// 解析收到的回复数据：返回 `Some((matched_identifier, is_dest_hit))`。
+    fn parse_reply(&self, data: &[u8], want: &[u16]) -> Option<(u16, bool)>;
+
+    /// 设置接收超时。
+    fn set_recv_timeout(&self, timeout: Duration) -> anyhow::Result<()>;
+
+    /// 接收一个包：返回 `(n_bytes, peer_addr)`。
+    fn recv_from(&self, buf: &mut [MaybeUninit<u8>]) -> std::io::Result<(usize, socket2::SockAddr)>;
+
+    /// trace dump 标签（如 `"icmp-v4"` / `"udp-v6"`）。
+    fn dump_label(&self) -> &str;
+
+    /// TTL 设置的 socket（通常与 recv_from 的 socket 相同）。
+    fn ttl_socket(&self) -> &socket2::Socket;
+
+    /// 目标是否 IPv6（用于 set_ttl 参数）。
+    fn is_ipv6(&self) -> bool;
+}
+
+/// 逐跳探测通用骨架：hop_no 循环 + interrupted + set_ttl + 发送 + 超时收集 + finish_hop。
+///
+/// 各变体只需实现 `TraceSocket` trait，无需重复循环/统计/渲染逻辑。
+fn trace_loop<S: TraceSocket>(
+    cfg: &PingConfig,
+    max_hops: u32,
+    socket: &mut S,
+    w: &mut StandardStream,
+) -> anyhow::Result<(Vec<Hop>, bool)> {
+    let mut hops: Vec<Hop> = Vec::new();
+    let mut reached = false;
+
+    for hop_no in 1..=max_hops {
+        if util::interrupted() {
+            break;
+        }
+        util::set_ttl(socket.ttl_socket(), hop_no, socket.is_ipv6())?;
+
+        let probes = socket.send_probes(hop_no);
+        if probes.is_empty() {
+            break;
+        }
+
+        let want: Vec<u16> = probes.iter().map(|&(id, _)| id).collect();
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
+        let mut src: Option<IpAddr> = None;
+        let mut dest_hit = false;
+        let mut remaining = probes.len();
+        let mut buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
+        while remaining > 0 {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            socket.set_recv_timeout(deadline - now)?;
+            match socket.recv_from(&mut buf) {
+                Ok((n, addr)) => {
+                    let data: &[u8] =
+                        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
+                    let peer: IpAddr = addr
+                        .as_socket()
+                        .map(|s| s.ip())
+                        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                    let (id, is_dest) = match socket.parse_reply(data, &want) {
+                        Some(r) => r,
+                        None => {
+                            trace_dump(socket.dump_label(), data, false);
+                            continue;
+                        }
+                    };
+                    trace_dump(socket.dump_label(), data, true);
+                    if is_dest {
+                        dest_hit = true;
+                    }
+                    if let Some(idx) = probes.iter().position(|&(s, _)| s == id)
+                        && rtts[idx].is_none()
+                    {
+                        let rtt = probes[idx].1.elapsed();
+                        rtts[idx] = Some(rtt);
+                        remaining -= 1;
+                    }
+                    src = Some(peer);
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let hop = finish_hop(hop_no, cfg, src, rtts, w)?;
+        hops.push(hop);
+        if dest_hit {
+            reached = true;
+            break;
+        }
+    }
+
+    Ok((hops, reached))
+}
 /// 反向 DNS 查询超时（超时按无 PTR 处理，不阻塞整条路径）。
 const DNS_TIMEOUT: Duration = Duration::from_secs(2);
 /// 默认最大跳数（`-m`，对标 tracert/traceroute 的 30）。
@@ -80,8 +198,8 @@ pub struct TraceReport {
     pub reached: bool,
 }
 
-/// 路由跟踪入口：按 `cfg.trace_tcp` 选择 ICMP echo / TCP SYN 技术，
-/// 打印逐跳进度 + 汇总（文本 / JSON），返回报告。
+/// 路由跟踪入口：按 `cfg.trace_tcp`/`cfg.trace_udp` 选择 ICMP echo / TCP SYN /
+/// UDP 技术，打印逐跳进度 + 汇总（文本 / JSON），返回报告。
 pub fn traceroute(cfg: &PingConfig) -> anyhow::Result<TraceReport> {
     let addr = util::resolve(&cfg.host, 0, cfg.v4, cfg.v6)?;
     let target_ip = addr.ip();
@@ -149,16 +267,14 @@ pub fn traceroute(cfg: &PingConfig) -> anyhow::Result<TraceReport> {
     Ok(report)
 }
 
-/// Windows 前置守卫（在 banner 之前报错）；其余平台恒通过。
+/// Windows 前置守卫（在 banner 之前报错）：未装 Npcap 时 trace TCP SYN 不可用
+/// （wpcap.dll 延迟加载，探测失败给友好错误而非 delay-load 崩溃）。其余平台恒通过。
 fn ensure_tcp_trace_supported() -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        Ok(())
-    }
     #[cfg(windows)]
     {
-        anyhow::bail!(t!("errors.tcp_trace_windows"));
+        tcpwin::ensure()?;
     }
+    Ok(())
 }
 
 /// 一跳收尾：反向 DNS + 输出（文本/JSON），返回该跳 Hop。
@@ -187,6 +303,37 @@ pub(crate) fn finish_hop(
         print_hop_line(w, &hop)?;
     }
     Ok(hop)
+}
+
+/// 匹配 IPv4 TCP SYN 回包核心逻辑（供 tcp.rs 和 tcpwin.rs 共用）。
+///
+/// `ip` 是纯 IPv4 负载（不含以太网帧头）。检查 src_ip == target、sport == dport、
+/// dst_port in want。返回 `Some((matched_port, is_syn_ack_or_rst))`。
+pub(crate) fn match_tcp_syn_reply_v4(
+    ip: &[u8],
+    target: std::net::IpAddr,
+    dport: u16,
+    want: &[u16],
+) -> Option<(u16, bool)> {
+    let ihl = util::ipv4_ihl(ip);
+    if ip.len() < ihl + 20 {
+        return None;
+    }
+    let src = std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+        ip[12], ip[13], ip[14], ip[15],
+    ));
+    if src != target {
+        return None;
+    }
+    let tcp = &ip[ihl..];
+    let sport = u16::from_be_bytes([tcp[0], tcp[1]]);
+    let dst_port = u16::from_be_bytes([tcp[2], tcp[3]]);
+    if sport != dport || !want.contains(&dst_port) {
+        return None;
+    }
+    let flags = tcp[13];
+    let is_dest = flags & 0x12 == 0x12 || flags & 0x04 == 0x04;
+    Some((dst_port, is_dest))
 }
 
 /// 诊断：`PRPING_TRACE_DUMP=1` 时把收到的原始报文（hex）与匹配结果打到 stderr。

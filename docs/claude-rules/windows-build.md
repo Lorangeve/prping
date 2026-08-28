@@ -127,8 +127,12 @@ XWIN_ARCH=x86,x86_64 cargo +nightly xwin build -Z build-std --target i686-win7-w
   → `util::icmp_offset_v4` version nibble==4 框架，trace 与 ping 的 v4 解析全部适配
   （旧 `buf[40..]`/固定 ihl 假设只在 Linux 成立）；IPv6 raw socket 收包不含 IPv6 头
   （Linux pskb_pull），用首字节 version nibble==6 探测框架兼容带头平台。
-- `trace --tcp` 在 Windows 禁止 raw TCP → 报错（`errors.tcp_trace_windows`，ICMP trace
-  不受影响）；`trace --udp` 全平台可用（Windows 支持普通 UDP + raw ICMP，无 unix gate）。
+- `trace HOST:PORT`（TCP SYN，带端口自动）在 Windows 走 **Npcap 注入路径**（`trace/tcpwin.rs`）：raw TCP socket 被禁止
+  （SOCK_RAW + IPPROTO_TCP 创建失败），改为 pcap 注入完整以太网帧（SYN，TTL 递增写在
+  IP 头里）+ 抓包收 SYN-ACK/RST 与 ICMP Time Exceeded（复用 `rawpcap.rs` 的设备选择 /
+  `resolve_macs_win` MAC 解析 / 抓包句柄；wpcap.dll 延迟加载，未装 Npcap 时 banner 前报
+  `errors.tcp_trace_npcap`）；仅 IPv4（`errors.tcp_trace_ipv6`）。`trace --udp` 全平台可用
+  （Windows 支持普通 UDP + raw ICMP，无 unix gate）。
 
 ## 跨平台编码细节
 

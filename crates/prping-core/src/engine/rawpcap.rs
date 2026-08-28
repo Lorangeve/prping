@@ -384,13 +384,22 @@ pub(crate) fn list_devices() -> anyhow::Result<Vec<DeviceInfo>> {
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 pub(crate) fn open_capture(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Active>> {
     let platform = if cfg!(windows) { "Npcap" } else { "libpcap" };
+    let open_err = |e: pcap::Error| -> anyhow::Error {
+        anyhow::anyhow!(rust_i18n::t!(
+            "errors.pcap_open",
+            platform = platform,
+            dev = dev,
+            error = e.to_string(),
+            hint = crate::util::privilege_hint()
+        ))
+    };
     let cap = pcap::Capture::from_device(dev)
-        .map_err(|e| anyhow::anyhow!("打开 {platform} 设备 `{dev}` 失败：{e}"))?
+        .map_err(&open_err)?
         .timeout(100)
         .promisc(true)
         .immediate_mode(true)
         .open()
-        .map_err(|e| anyhow::anyhow!("打开 {platform} 设备 `{dev}` 失败：{e}"))?;
+        .map_err(open_err)?;
     // 发送的是完整以太网帧：只接受 Ethernet 链路类型（普通网卡均 EN10MB；
     // lo0 回环为 DLT_NULL，raw 发送不支持——回环目标自动选 lo0 时会在这里报错）
     if cap.get_datalink() != pcap::Linktype::ETHERNET {
@@ -493,8 +502,9 @@ fn wrap_ip6(bytes: &[u8], target: &SocketAddr) -> anyhow::Result<Vec<u8>> {
 /// 解析 (dst MAC, src MAC)：下一跳（`GetBestRoute`，0.0.0.0 = 直连目标）→ ARP 缓存
 /// （`GetIpNetTable`；未命中先发 1 字节 UDP 触发内核 ARP 再查）→ 本机接口 MAC
 /// （`GetIfEntry`）。ARP/接口查询失败用广播/全零 MAC 兜底并警告。
+/// trace TCP SYN（tcpwin.rs）也复用此函数解析发送目标 MAC。
 #[cfg(windows)]
-fn resolve_macs_win(target: Ipv4Addr) -> anyhow::Result<([u8; 6], [u8; 6])> {
+pub(crate) fn resolve_macs_win(target: Ipv4Addr) -> anyhow::Result<([u8; 6], [u8; 6])> {
     let (next_hop, if_index) = next_hop_v4(target)?;
     let mut dst = arp_lookup(next_hop);
     if dst.is_none() {
@@ -737,10 +747,11 @@ fn unix_arp_table_lookup(target: Ipv4Addr) -> Option<[u8; 6]> {
                 continue;
             }
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 6 && parts[0] == target_str {
-                if let Some(mac) = parse_mac(parts[3]) {
-                    return Some(mac);
-                }
+            if parts.len() >= 6
+                && parts[0] == target_str
+                && let Some(mac) = parse_mac(parts[3])
+            {
+                return Some(mac);
             }
         }
         None

@@ -4,16 +4,30 @@ mod capture;
 
 use crate::PrpingError;
 use crate::output;
-use crate::util::{self, interrupted};
+use crate::util::{self, TCP_RECEIVE_TRIGGER, RECV_BUF_SIZE, parse_udp_receive_trigger, interrupted};
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::net::TcpListener;
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 /// 服务端并发 TCP 连接上限。
 const MAX_CONNECTIONS: usize = 1024;
+
+/// verbose 帧 dissect+打印（三处 UDP/TCP 路径共用）。
+fn verbose_dissect(tag: &str, addr: &str, data: &[u8], n: usize, verbose: bool, capture_active: bool) {
+    if verbose && !capture_active {
+        let report = packet_dsl::dissect(data);
+        let mut w = output::stdout();
+        let _ = output::print_green(&mut w, format!("{tag} "));
+        let _ = output::print_cyan(&mut w, format!("{addr} "));
+        let _ = writeln!(&mut w, "{n} B");
+        let _ = crate::engine::eng::render_dissected(&mut w, &report, "  recv:", data);
+    }
+}
 
 /// 服务端运行报告（中断退出后返回）。
 #[derive(Debug, Default)]
@@ -32,6 +46,66 @@ struct ServerAgg {
     bytes: AtomicU64,
     sent: AtomicU64,
     micros: AtomicU64,
+}
+
+/// UDP 来源会话跟踪：按源地址聚合，空闲 2s 后打印汇总（与 TCP 连接日志对齐）。
+struct UdpSession {
+    bytes: u64,
+    packets: u64,
+    start: Instant,
+    last_activity: Instant,
+}
+
+impl UdpSession {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            bytes: 0,
+            packets: 0,
+            start: now,
+            last_activity: now,
+        }
+    }
+
+    /// 打印会话汇总（格式对齐 TCP 的 `recv IP:PORT size in secs — Mbps`）。
+    fn finish_print(&self, src: SocketAddr) {
+        let elapsed = self.start.elapsed().as_secs_f64();
+        if self.bytes == 0 || elapsed <= 0.0 {
+            return;
+        }
+        let mbits = (self.bytes as f64 * 8.0) / (elapsed * 1_000_000.0);
+        let size_str = crate::util::format_bytes(self.bytes);
+        let mut w = output::stdout();
+        let _ = output::print_green(&mut w, rust_i18n::t!("server.recv_tag"));
+        let _ = output::print_cyan(&mut w, format!("{}:{} ", src.ip(), src.port()));
+        let _ = output::print_yellow(
+            &mut w,
+            format!(
+                "{size_str} ({} pkts) in {elapsed:.2}s — {mbits:.2} Mbps",
+                self.packets,
+            ),
+        );
+        let _ = writeln!(&mut w);
+    }
+}
+
+/// 刷新空闲超时的 UDP 会话：打印汇总并从 map 中移除。
+fn flush_idle_udp_sessions(
+    sessions: &mut HashMap<SocketAddr, UdpSession>,
+    idle_timeout: std::time::Duration,
+) {
+    let now = Instant::now();
+    // 收集需要清除的 key（避免在迭代中修改 map）
+    let expired: Vec<SocketAddr> = sessions
+        .iter()
+        .filter(|(_, s)| now.duration_since(s.last_activity) >= idle_timeout)
+        .map(|(&k, _)| k)
+        .collect();
+    for key in expired {
+        if let Some(sess) = sessions.remove(&key) {
+            sess.finish_print(key);
+        }
+    }
 }
 
 /// 服务端：同时服务 latency/bandwidth 连接（TCP 回显 + UDP 回显/触发协议）。
@@ -128,34 +202,49 @@ pub async fn serve(
     let udp_socket = Arc::new(util::bind_udp(addr)?);
     let udp_agg = agg.clone();
     smol::spawn(async move {
-        let mut buf: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::new(0u8); 65536];
+        let mut buf: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::new(0u8); RECV_BUF_SIZE];
+        // 按来源地址跟踪 UDP 会话：收到第一个包时记录，来源空闲 2s 后打印汇总并清除。
+        // 与 TCP 的「连接结束打一行日志」对齐，避免逐包刷屏。
+        let mut sessions: HashMap<SocketAddr, UdpSession> = HashMap::new();
+        let idle_timeout = std::time::Duration::from_secs(2);
         loop {
-            let Ok((n, src)) = util::udp_recv(&udp_socket, &mut buf).await else {
-                continue;
+            // 中断退出前：刷新所有活跃会话的汇总
+            if interrupted() {
+                for (src, sess) in sessions.drain() {
+                    sess.finish_print(src);
+                }
+                break;
+            }
+            // 非阻塞轮询：先检查是否有来源已空闲超时需打印汇总
+            flush_idle_udp_sessions(&mut sessions, idle_timeout);
+            // 带超时的 recv：50ms 让出检查空闲会话
+            let recv = smol::future::or(util::udp_recv(&udp_socket, &mut buf), async {
+                smol::Timer::after(std::time::Duration::from_millis(50)).await;
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "poll"))
+            })
+            .await;
+            let (n, src) = match recv {
+                Ok(v) => v,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                Err(_) => continue,
             };
             let data = util::init_slice(&buf, n);
             // UDP 接收模式触发包：[0xFF, 0xFF, size(2B BE), count(4B BE)]
-            if n == 8 && data[0] == 0xFF && data[1] == 0xFF {
-                let size = u16::from_be_bytes([data[2], data[3]]) as usize;
-                let count = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+            if let Some((size, count)) = parse_udp_receive_trigger(data) {
                 // verbose 且未抓包：dissect 触发包
-                if verbose && !capture_active {
-                    let report = packet_dsl::dissect(data);
-                    let mut w = output::stdout();
-                    let _ = output::print_green(&mut w, "[udp-trigger] ");
-                    let _ = output::print_cyan(&mut w, format!("{}:{} ", src.ip(), src.port()));
-                    let _ = writeln!(&mut w, "{n} B");
-                    let _ =
-                        crate::engine::eng::render_dissected(&mut w, &report, "  trigger:", data);
-                }
+                verbose_dissect("[udp-trigger]", &format!("{}:{}", src.ip(), src.port()), data, n, verbose, capture_active);
                 // 接收模式开始：给服务端一个即时接收反馈（不逐包打印，带宽测试会刷屏）
                 let mut w = output::stdout();
                 let _ = output::print_green(&mut w, rust_i18n::t!("server.udp_trigger"));
                 let _ = output::print_cyan(&mut w, format!("{}:{} ", src.ip(), src.port()));
                 let _ = output::print_yellow(&mut w, format!("({count} × {size}B)"));
                 let _ = writeln!(&mut w);
+                // 触发模式：把已有会话刷新（如果有的话），避免混杂
+                if let Some(sess) = sessions.remove(&src) {
+                    sess.finish_print(src);
+                }
                 let sock = udp_socket.clone();
-                let payload = vec![0x42u8; size.max(1)];
+                let payload = vec![0x42u8; size.max(1usize)];
                 let agg = udp_agg.clone();
                 smol::spawn(async move {
                     let mut sent = 0u64;
@@ -181,14 +270,18 @@ pub async fn serve(
             }
             // 普通回显：原样回送并统计接收字节（UDP ping/latency 的接收量进聚合报告）
             // verbose 且未抓包：打印接收数据报的 dissect 反解
-            if verbose && !capture_active {
-                let report = packet_dsl::dissect(data);
+            verbose_dissect("[udp-echo]", &format!("{}:{}", src.ip(), src.port()), data, n, verbose, capture_active);
+            // 更新来源会话统计（首次出现时打一行 connect 日志）
+            let sess = sessions.entry(src).or_insert_with(|| {
                 let mut w = output::stdout();
-                let _ = output::print_green(&mut w, "[udp-echo] ");
-                let _ = output::print_cyan(&mut w, format!("{}:{} ", src.ip(), src.port()));
-                let _ = writeln!(&mut w, "{n} B");
-                let _ = crate::engine::eng::render_dissected(&mut w, &report, "  recv:", data);
-            }
+                let _ = output::print_green(&mut w, rust_i18n::t!("server.connect_tag"));
+                let _ = output::print_cyan(&mut w, format!("{}:{}", src.ip(), src.port()));
+                let _ = writeln!(&mut w, " (udp)");
+                UdpSession::new()
+            });
+            sess.bytes += n as u64;
+            sess.packets += 1;
+            sess.last_activity = Instant::now();
             if util::udp_send(&udp_socket, data, &src).await.is_ok() {
                 udp_agg.bytes.fetch_add(n as u64, Ordering::Relaxed);
             }
@@ -224,7 +317,7 @@ pub async fn serve(
             let _perm = perm;
             let mut stream = stream;
             stream.set_nodelay(true).ok();
-            let mut buf = vec![0u8; 65536];
+            let mut buf = vec![0u8; RECV_BUF_SIZE];
             let mut total: u64 = 0;
             let mut sent_total: u64 = 0;
             let mut echo_ok = true;
@@ -235,20 +328,10 @@ pub async fn serve(
                     Ok(n) => {
                         total += n as u64;
                         // verbose 且未抓包：打印接收数据的 dissect 反解
-                        if verbose && !capture_active {
-                            let data = &buf[..n];
-                            let report = packet_dsl::dissect(data);
-                            let mut w = output::stdout();
-                            let _ = output::print_green(&mut w, "[recv] ");
-                            let _ = output::print_cyan(&mut w, format!("{peer} "));
-                            let _ = writeln!(&mut w, "{} B", n);
-                            let _ = crate::engine::eng::render_dissected(
-                                &mut w, &report, "  recv:", data,
-                            );
-                        }
+                        verbose_dissect("[recv]", &format!("{peer}"), &buf[..n], n, verbose, capture_active);
                         // 接收模式触发（0xFF 单字节）：持续回送数据并统计发送量
-                        if n == 1 && buf[0] == 0xFF && total == 1 {
-                            let dummy = vec![0u8; 65536];
+                        if n == 1 && buf[0] == TCP_RECEIVE_TRIGGER && total == 1 {
+                            let dummy = vec![0u8; RECV_BUF_SIZE];
                             loop {
                                 if stream.write_all(&dummy).await.is_err() {
                                     break;

@@ -598,6 +598,96 @@ fn print_ploot_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
     Ok(())
 }
 
+/// Print bandwidth throughput timeline (window Mbps over time).
+///
+/// Reuses the same ASCII rendering as latency timeline but Y axis is Mbps.
+pub fn print_throughput_timeline(w: &mut StandardStream, samples: &[(f64, f64)]) -> Result<()> {
+    if PRETTY.load(Ordering::Relaxed) {
+        return print_ploot_throughput_timeline(w, samples);
+    }
+    if samples.len() < 2 {
+        return Ok(());
+    }
+    let max_y = samples.iter().map(|&(_, y)| y).fold(0.0f64, f64::max);
+    let min_y = samples.iter().map(|&(_, y)| y).fold(f64::MAX, f64::min);
+    let max_x = samples.last().unwrap().0;
+    if max_y <= 0.0 {
+        return Ok(());
+    }
+
+    let y_range = (max_y - min_y).max(0.001);
+    let height = 16usize;
+    let width = samples.len().clamp(20, 80);
+    let step = (samples.len() / width).max(1);
+
+    let mut sampled_pts = Vec::new();
+    let mut i = 0;
+    while i < samples.len() {
+        let end = (i + step).min(samples.len());
+        let avg: f64 = samples[i..end].iter().map(|&(_, y)| y).sum::<f64>() / (end - i) as f64;
+        sampled_pts.push((samples[i].0, avg));
+        i = end;
+    }
+
+    let bar_char: [&str; 9] = [" ", ".", ".", ":", ":", "|", "|", "#", "#"];
+
+    writeln!(w)?;
+    writeln!(
+        w,
+        "Throughput timeline (Y: {:.2}~{:.2} Mbps, X: 0~{:.1}s):",
+        min_y, max_y, max_x
+    )?;
+
+    for row in (0..height).rev() {
+        if row == height - 1 {
+            write!(w, "  {max_y:5.1} │")?;
+        } else if row == 0 {
+            write!(w, "  {min_y:5.1} │")?;
+        } else {
+            let y = min_y + (row as f64 / (height - 1) as f64) * y_range;
+            write!(w, "  {y:5.1} │")?;
+        }
+        for pt in &sampled_pts {
+            let normalized = if y_range > 0.0 {
+                ((pt.1 - min_y) / y_range * (height - 1) as f64).round() as usize
+            } else {
+                0
+            };
+            if normalized >= row && row < height {
+                write!(w, "{}", bar_char[8])?;
+            } else if normalized + 1 == row {
+                let idx = 4usize;
+                write!(w, "{}", bar_char[idx])?;
+            } else {
+                write!(w, " ")?;
+            }
+        }
+        writeln!(w)?;
+    }
+    writeln!(w, "        └{}", "─".repeat(sampled_pts.len()))?;
+    writeln!(w, "       0s {:.0}s", max_x)?;
+    Ok(())
+}
+
+fn print_ploot_throughput_timeline(w: &mut StandardStream, samples: &[(f64, f64)]) -> Result<()> {
+    if samples.len() < 2 {
+        return Ok(());
+    }
+    let xs: Vec<f64> = samples.iter().map(|&(t, _)| t).collect();
+    let ys: Vec<f64> = samples.iter().map(|&(_, y)| y).collect();
+    let mut fig = ploot::Figure::new();
+    fig.set_terminal_size(80, 16);
+    let ax = fig.axes2d();
+    ax.set_title("Throughput timeline");
+    ax.points(
+        xs.iter().copied(),
+        ys.iter().copied(),
+        &[ploot::PlotOption::Caption("throughput (Mbps)".into())],
+    );
+    write!(w, "{}", strip_ansi(fig.render()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

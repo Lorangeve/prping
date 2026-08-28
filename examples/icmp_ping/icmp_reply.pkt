@@ -1,0 +1,20 @@
+# ICMP Ping 步骤 2：ICMP Echo Reply（ping 应答）
+# 学习 ICMP 协议的应答机制
+#
+# Echo Reply 结构与 Request 相同，但 Type=0
+# 应答时会回显相同的 id 和 seq 值，用于匹配请求
+#
+# 注意：真实场景中，应答由目标主机自动发送，
+# 这里构造的是模拟应答，用于理解协议结构
+
+# 构造 ICMP Echo Reply（Type=0, Code=0）
+# 回显相同的 id 和 seq
+reply = icmp(type=0, code=0, id=global("id", 0), seq=global("seq", 1),
+             payload="PING_TEST_DATA_1234567890")
+
+# 封装到 IPv4（源和目标互换）
+use(reply) |> ipv4(src=params("ip", "127.0.0.1"), dst="127.0.0.1",
+                    ttl=64)
+
+export:
+- reply

@@ -353,7 +353,10 @@ prping server -v -a --filter "tcp port 53" 0.0.0.0:8080  # full-frame capture + 
 - Kept Win7-compatible on Windows
 - With `-v`, raw capture shows full frames (eth/IP/TCP headers + handshake). By default only
   traffic to the listening port is shown (Linux needs root/cap_net_raw, Windows needs Npcap,
-  macOS needs root or ChmodBPF)
+  macOS needs root or ChmodBPF). Linux defaults to a single AF_PACKET socket bound to all
+  interfaces (startup line shows "all interfaces"); when built with `--features pcap` it
+  switches to the same libpcap multi-device path as Windows/macOS (startup line shows the
+  real interface names)
 - `-a`/`--capture-all` disables the port/address filter and shows every frame visible on the
   interface — ARP, ICMP (e.g. pings to this host), broadcast/multicast, traffic to other ports,
   and the server's own outgoing replies; the `[frame]` summary line also gives address-level
@@ -581,9 +584,10 @@ prping ping -m --json 8.8.8.8          # machine-readable
 
 **Purpose**: discover the forwarding path to a target hop by hop — locate where loss or
 high latency happens, spot asymmetric routes, verify multi-line egress. The default is
-Windows `tracert`-style (ICMP echo); `--tcp` switches to a TCP SYN variant (like
-`tcptraceroute`/`tracetcp`) and `--udp` to the classic UDP variant (like Unix
-`traceroute`) — both keep working when ICMP is filtered.
+Windows `tracert`-style (ICMP echo); **a target with a port automatically switches to
+the TCP SYN variant** (same as `ping`'s "port → TCP"), and `--udp`
+to the classic UDP variant (like Unix `traceroute`) — both keep working when ICMP is
+filtered.
 
 ```bash
 prping trace www.baidu.com          # ICMP echo, at most 30 hops by default
@@ -591,7 +595,7 @@ prping trace -m 20 8.8.8.8          # at most 20 hops
 prping trace -d 8.8.8.8             # no hostname resolution (IPs only)
 prping trace --json 8.8.8.8         # machine-readable (one line per hop + summary)
 prping trace -6 ::1                 # IPv6 (Hop Limit increments)
-prping trace --tcp 8.8.8.8:443      # TCP SYN (needs HOST:PORT; SYN-ACK/RST from the target = reached)
+prping trace 8.8.8.8:443            # TCP SYN (auto when a port is given; SYN-ACK/RST from the target = reached)
 prping trace --udp 8.8.8.8          # UDP (classic traceroute, ports start at 33434)
 ```
 
@@ -619,7 +623,7 @@ Reached target www.baidu.com in 4 hops.
    (the same validation `tracert` uses)
 3. The target itself replies ICMP echo reply → reached, tracing stops
 
-**TCP SYN (`--tcp HOST:PORT`)**:
+**TCP SYN (`trace HOST:PORT`, auto when a port is given)**:
 
 1. Send TCP SYNs with the TTL incremented hop by hop; each probe uses its own
    source port, matched by the embedded TCP header's (sport, dport) — no seq needed
@@ -628,7 +632,9 @@ Reached target www.baidu.com in 4 hops.
 3. Replies come from two sockets polled together: raw ICMP (Time Exceeded) + raw
    TCP (SYN-ACK/RST); the TCP pseudo-header checksum uses the local source address
    learned from a UDP route probe
-4. **Not supported on Windows** (raw TCP sockets are restricted) — `trace --tcp` errors out
+4. **Windows uses Npcap** (raw TCP sockets are restricted): full frames are injected
+   via Npcap and replies captured — Npcap must be installed (a hint is shown
+   otherwise); IPv4 targets only
 
 **UDP (`--udp HOST`, classic Unix traceroute)**:
 
@@ -639,7 +645,7 @@ Reached target www.baidu.com in 4 hops.
    (sport, dport)); the target replies **Port Unreachable** (type 3 code 3 /
    ICMPv6 type 1 code 4) — reached
 3. Only one raw ICMP socket is needed for replies; **works on Windows** (plain UDP
-   + raw ICMP are allowed, unlike `--tcp`)
+   + raw ICMP are allowed, unlike the TCP SYN variant)
 4. If the target's UDP port happens to be open (e.g. DNS 53), it replies with data
    rather than ICMP — that probe shows `*` (classic traceroute behaves the same;
    high ports exist precisely to avoid this)
@@ -654,8 +660,8 @@ Reached target www.baidu.com in 4 hops.
   (avoid slow DNS stalling the whole path)
 - If the target never echoes/answers, all `-m` hops are probed and it still ends as
   "not reached" → non-zero exit code
-- Needs a raw socket (root / `cap_net_raw`); for `--tcp` pick a commonly open port
-  (e.g. 80/443) — filtered ports just show `*`; `--tcp` and `--udp` are mutually exclusive
+- Needs a raw socket (root / `cap_net_raw`); for TCP SYN pick a commonly open port
+  (e.g. 80/443) — filtered ports just show `*`
 
 ---
 

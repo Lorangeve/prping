@@ -13,13 +13,13 @@ use super::sniffer::SnifferMatcher;
 // 以下仅 Linux/IPPROTO_RAW 路径使用（Windows/macOS/Linux+feature=pcap 走 rawpcap）
 #[cfg(all(target_os = "linux", not(feature = "pcap")))]
 use super::icmp_echo_ids;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 use super::{Reply, match_reply};
 #[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
 use packet_dsl::ir::Layer;
 #[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
 use std::io;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 use std::time::Duration;
 
 pub(crate) fn send_raw_bytes(
@@ -101,13 +101,17 @@ pub(crate) fn send_raw_bytes(
 
 /// raw 模式应答等待：sniffer 存在时按 sniffer 匹配；否则包是 ICMP echo → 等 echo reply
 /// （按 id+seq 匹配）。socket 由调用方在**发送前**打开（见 `wait_icmp_reply` 注释）。
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 fn open_raw_icmp4() -> anyhow::Result<libc::c_int> {
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP) };
     if fd < 0 {
         anyhow::bail!(
-            "raw ICMP socket 失败（需要 root/cap_net_raw）：{}",
-            io::Error::last_os_error()
+            "{}",
+            rust_i18n::t!(
+                "errors.raw_icmp_wait",
+                hint = crate::util::privilege_hint(),
+                error = io::Error::last_os_error().to_string()
+            )
         );
     }
     Ok(fd)
@@ -119,7 +123,7 @@ fn open_raw_icmp4() -> anyhow::Result<libc::c_int> {
 /// 完成回包往返——loopback xmit 触发 NET_RX softirq，softirq 在 local_bh_enable 的
 /// 进程上下文同步执行（icmp 回显 → 回包生成 → 再次投递），回包先于 socket 存在即被
 /// 内核丢弃，发送后才开 socket 永远等不到（与 rawpcap/Npcap「先开抓包句柄再发送」同理）。
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 fn wait_icmp_reply(
     fd: libc::c_int,
     pkt: &PacketSpec,
@@ -171,7 +175,8 @@ fn wait_icmp_reply(
 
 /// AF_PACKET 原始以太网帧（Linux；默认接口 lo，可用 --iface 指定）。
 /// 链路层帧（如 ARP）不需要目标地址——帧内目的 MAC 即投递目标。
-#[cfg(target_os = "linux")]
+/// 仅 Linux 非 pcap 路径使用（Linux+feature=pcap 走 rawpcap 注入）。
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 fn send_af_packet(
     bytes: &[u8],
     _target: Option<&SocketAddr>,
@@ -193,8 +198,12 @@ fn send_af_packet(
     let fd = unsafe { libc::socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL as u16) as libc::c_int) };
     if fd < 0 {
         anyhow::bail!(
-            "AF_PACKET socket 失败（需要 root/cap_net_raw）：{}",
-            io::Error::last_os_error()
+            "{}",
+            rust_i18n::t!(
+                "errors.af_packet_socket",
+                hint = crate::util::privilege_hint(),
+                error = io::Error::last_os_error().to_string()
+            )
         );
     }
     let mut addr: sockaddr_ll = unsafe { std::mem::zeroed() };

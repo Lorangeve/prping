@@ -70,9 +70,9 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
         ProbeOutcome::Fail(e) => anyhow::bail!(e),
     }
 
-    // 二分 [0, 65507]（IPv4 最大 ICMP 载荷）
+    // 二分 [0, MAX_UDP]（IPv4 最大 ICMP 载荷）
     let mut lo = 0usize;
-    let mut hi = 65507usize;
+    let mut hi = crate::MAX_UDP;
     let mut frag_mtu: Option<usize> = None;
     let mut notes: Vec<String> = Vec::new();
     let mut seq = 1u16;
@@ -227,7 +227,7 @@ fn classify(buf: &[u8], ident: u16, seq: u16) -> Option<ProbeOutcome> {
     if buf.len() < 28 {
         return None;
     }
-    let ihl = ((buf[0] & 0x0F) as usize) * 4;
+    let ihl = util::ipv4_ihl(buf);
     let icmp = buf.get(ihl..)?;
     if icmp.len() < 8 {
         return None;

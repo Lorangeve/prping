@@ -12,7 +12,7 @@
   - **`lib.rs`** — 公开 API 入口 + `run()` 模式分派（ICMP/TCP/UDP/latency/bandwidth/MTU/traceroute）+ 核心类型（`OutcomeKind`/`BandwidthReport`/`PrpingWarning`/`PrpingError`）
   - **`serve/`** — TCP/UDP 服务端回显 + 接收模式触发协议
     - `mod.rs` — 服务端主循环（TCP 回显/接收 + UDP 回显/触发 + 并发控制 + verbose dissect）
-    - `capture.rs` — 服务端 verbose 完整帧抓包（AF_PACKET / Npcap / BPF，仅 serve 使用）；`-a` 全帧模式不过滤，显示 ARP/ICMP/广播/出向等所有可见帧（Linux 按接口逐个开混杂，需 CAP_NET_ADMIN；lo 上 AF_PACKET 双投递出向+入向），摘要行支持非 TCP-UDP 帧；`--filter` tcpdump 风格子集表达式（所有协议令牌按注册表/dissect 匹配：内置 arp/icmp/icmp6/tcp/udp/ip/ip6 归一化为层名，加固定层 eth/ipv4/ipv6/http/dns/raw 或带 #[rule] 的如 dns/http/quic_initial；port/host 限定取自反解层；三平台一致）
+    - `capture.rs` — 服务端 verbose 完整帧抓包（AF_PACKET / Npcap / BPF，仅 serve 使用；Linux 默认 AF_PACKET 单 socket 全接口、启动行显示「全接口」，开 `--features pcap` 时改走与 macOS 同款 libpcap 多设备路径、启动行显示接口列表）；`-a` 全帧模式不过滤，显示 ARP/ICMP/广播/出向等所有可见帧（Linux 按接口逐个开混杂，需 CAP_NET_ADMIN；lo 上 AF_PACKET 双投递出向+入向），摘要行支持非 TCP-UDP 帧；`--filter` tcpdump 风格子集表达式（所有协议令牌按注册表/dissect 匹配：内置 arp/icmp/icmp6/tcp/udp/ip/ip6 归一化为层名，加固定层 eth/ipv4/ipv6/http/dns/raw 或带 #[rule] 的如 dns/http/quic_initial；port/host 限定取自反解层；三平台一致）
   - **`ping/`** — 网络测量功能（ICMP/TCP/UDP ping、latency、bandwidth、MTU、traceroute）
     - `icmp.rs` — ICMP echo ping（raw socket + ICMP.DLL Windows 路径）；导出 `build_v4`/`build_v6`/`icmp_cksum` 供 MTU/trace 复用
     - `tcp.rs` / `udp.rs` — TCP connect / UDP echo ping
@@ -22,8 +22,9 @@
     - `trace/` — 路由跟踪
       - `mod.rs` — 入口分派 + 共享类型（`Hop`/`TraceReport`）+ hop 渲染（文本/JSON）
       - `icmp.rs` — ICMP echo 逐跳（raw socket 收发 + 内嵌报文解析）
-      - `tcp.rs` — TCP SYN 逐跳（raw TCP + SYN-ACK/RST 匹配，仅 Unix）
+      - `tcp.rs` — TCP SYN 逐跳（Unix raw TCP 发 + raw TCP/raw ICMP 双 socket 收，poll）
       - `udp.rs` — 经典 UDP 逐跳（UDP 发 + raw ICMP 收 Time Exceeded/Port Unreachable）
+      - `tcpwin.rs` — Windows TCP SYN 逐跳（Npcap 注入完整帧 + 抓包收回复，仅 IPv4）
       - `dns.rs` — 反向 DNS 查询（Unix libc / Windows ws2_32 getnameinfo，限时）
   - **`util/`** — 共享基础设施（按职责拆分子模块）
     - `config.rs` — `PingConfig` 测试参数结构体
@@ -70,6 +71,39 @@
 > **全部产物一览**：`just artifacts`  
 > **全平台语法检查**：`just check-all`
 
+### Linux 可选 pcap feature（`--features pcap`）
+
+Linux 默认 raw 后端是原生 socket（AF_PACKET / IPPROTO_RAW / raw ICMP），零额外依赖。
+开 `-F pcap`（Cargo feature；编译需系统 libpcap-dev，运行仍需 cap_net_raw——libpcap
+底层是 AF_PACKET socket）后，**raw 发送与 `server -v` 抓包**改走与 Windows/macOS 完全
+相同的 libpcap 路径（`engine/rawpcap.rs` 兼容层 + `serve/capture.rs` 多设备路径），语义
+对齐、可交叉验证。**其余功能完全不变**：ping/latency/bandwidth/MTU/`trace HOST:PORT`
+（TCP SYN，Linux 仍走 raw TCP）、engine 的 pcap 文件读写（`--pcap`/`--out`/`--to-pkt` 是文件
+格式，与 feature 无关）。受影响仅两处：
+
+1. **`packet --raw` 发送**（`engine/pkg/raw.rs` 按 feature 分派，pcap 委托 `rawpcap.rs`）：
+   - 默认：eth 帧 → AF_PACKET（`--iface` 是 Linux 网卡名，默认 lo，无目标也可发——帧内
+     MAC 直发）；裸 IPv4 → IPPROTO_RAW + IP_HDRINCL 直发（无 MAC 层）；裸 IPv6 → raw
+     socket 全支持；`--wait` 先开 raw ICMP socket 再发送（只收 ICMP echo 回显，无自匹配
+     问题）。
+   - pcap：`pcap_sendpacket` 链路层注入。`--iface` 改匹配 pcap 设备名（不区分大小写）/描述
+     子串；设备按目标选择（回环 → 回环设备，其余 → 首个非回环）；裸 IPv4 自动以太网封装
+     （src MAC = getifaddrs + AF_PACKET 取接口 MAC，dst MAC = 1 字节 UDP 触发 ARP + 查
+     `/proc/net/arp`，失败广播 MAC 兜底并警告）；裸 IPv6 **仅回环 ::1**（跨链路需 ND
+     邻居解析，暂报错）；`--wait` 先开抓包句柄再发送，`direction(In)` 过滤 + 跳过与发送帧
+     逐字节相同的帧（pcap 会回读自己注入的帧，防假阳性）；设备须 EN10MB 链路类型。
+2. **`server -v` 抓包**（`serve/capture.rs`）：
+   - 默认：AF_PACKET 单 socket 绑全接口（`sll_ifindex=0`），启动行显示「全接口」；只收
+     PACKET_HOST 入向；`-a` 才尽力开混杂（逐接口 PACKET_MR_PROMISC，需 CAP_NET_ADMIN）；
+     lo 上 AF_PACKET 双投递出向+入向（`-a` 模式各显示一次）。
+   - pcap：libpcap 多设备路径（与 macOS 同款）——通配绑定 0.0.0.0/:: 开全部设备、每设备
+     一个抓包线程，启动行显示真实接口名列表；恒开混杂 promisc(true)；lo 经 libpcap 是
+     EN10MB（假 MAC，无 macOS lo0 的 DLT_NULL 剥头问题），出向/入向双投递由底层
+     AF_PACKET 决定、与默认路径一致（`-a` 下同样各显示一次）。默认模式的端口/IP 过滤、
+     `-a` 全帧、`--filter` 表达式三平台一致。
+- 门禁：`just check-pcap`（`cargo check` + clippy `-D warnings`，`-F pcap`）；CI ubuntu
+  job 装 libpcap-dev 后执行。改动涉及 pcap 路径后跑 `just check-pcap`。
+
 ## CLI 设计
 
 子命令组织全部功能（bpaf `command()` 平行组合），子命令可用任意**唯一前缀**缩写
@@ -79,7 +113,7 @@ prping ping HOST[:PORT]     ICMP ping（无端口）/ TCP ping（有端口）/ U
 prping latency [OPTIONS] HOST:PORT   Latency test（-l 缺省 64；-u UDP；-r 接收）
 prping bandwidth [OPTIONS] HOST:PORT Bandwidth test（-l 缺省 8k；--parallel 并发；-u/-r）
 prping server ADDR:PORT     Server（同时服务 latency/bandwidth；-v 抓包 dissect；-a 全帧抓包显示所有可见帧，需显式 -v；--filter 表达式过滤帧，需显式 -a）
-prping trace [OPTIONS] HOST[:PORT] Traceroute（ICMP echo 默认；-t/--tcp 用 TCP SYN 需端口；-u/--udp 经典 UDP 33434 起递增；-m 最大跳数 / -d 免 DNS / --json）
+prping trace [OPTIONS] HOST[:PORT] Traceroute（ICMP echo 默认；带端口自动 TCP SYN（无 --tcp 标志）；-u/--udp 经典 UDP 33434 起递增；-m 最大跳数 / -d 免 DNS / --json）
 prping engine [OPTIONS] FILE.pkt|.pktl  引擎：分析/LSP/--ls/--hex/--pcap/配方概览（无扩展名参数自动定位 pktl：先 `<arg>.pktl`，再同名文件夹 `<arg>/<arg>.pktl`；--ls 自动分页）
 prping packet [OPTIONS] FILE.pkt|.pktl [HOST:PORT]  构建发送/配方执行（--raw/--wait/--fuzz/--out）
 prping document [SECTION]   使用手册（全文 / 章节跳转）
@@ -108,7 +142,7 @@ server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 12. 抖动 jitter — 相邻 RTT 差均值/最大（文本 + `--json` 的 `jitter_ms`/`jitter_max_ms`）
 13. 路径 MTU 探测 — `-m`/`--mtu`（ICMP DF + 变长载荷二分，解析 Fragmentation Needed）
 14. 源绑定 — `-s ADDR|IFACE`（全模式；Linux 网卡名 → IPv4）
-15. 路由跟踪 — `-t`/`--traceroute`（ICMP echo + 递增 TTL 逐跳）及 `--tcp` SYN / `--udp` 经典变体（细节 → `docs/claude-rules/measure.md`）
+15. 路由跟踪 — `-t`/`--traceroute`（ICMP echo + 递增 TTL 逐跳）及 TCP SYN（带端口自动）/ `--udp` 经典变体（细节 → `docs/claude-rules/measure.md`）
 16. 配方 `.pktl` — 多个 `.pkt` 按顺序发出，global 跨步骤存储 / extract / wait / raw 步骤开关 / on_error（细节 → `docs/claude-rules/engine.md`）
 17. 反向 DNS — `--reverse-dns`（`-R`）对探测结果中的 IP 地址进行反向 DNS 查询，`-R` 启用反向查询（增加延迟），输出中显示域名（如 `192.168.1.1 (gateway.example.com)`）
 
@@ -171,7 +205,7 @@ server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 ## 编码约定
 
 - Rust edition 2024
-- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --workspace --all-targets` 全通过（464 tests）
+- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --workspace --all-targets` 全通过（494 tests）
 - 用户可见输出英文，注释中文
 - 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端连接日志用 `output::print_server_log`）；bin 侧错误用红色、警告用橙色（lib re-export `output::{stderr, writeln_red, writeln_orange}` 给 bin 用）
 - 参数校验分层：子命令选项集结构性互斥 + `validate_*` 只留真校验 + lib `run` 管 config 级不变式
@@ -181,7 +215,7 @@ server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 - 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner（cap_net_raw，仅 `cargo run`/`cargo test` 生效）；直接跑产物用 `just cap`（rebuild 后失效需重跑）；各平台配方在 `justfile`——细节 → `docs/claude-rules/windows-build.md`
 - CI: `.github/workflows/ci.yml` — fmt/clippy/doc/全部测试 × Linux/macOS/Windows + 非门禁基准 job
 - **原语文档同步门禁**：改动原语须同步 `engine --ls` 展示与 GRAMMAR.md §4.6；`scripts/claude-hooks/primitive-docs-check.sh` 自动校验（`.claude/settings.json` PostToolUse hook 提醒 + `just doc-sync-check`）——原语清单在 `docs/claude-rules/engine.md`
-- **全平台检查**：改动涉及平台相关代码后，运行 `just check-all`（7 个交叉目标）验证编译通过；建议开发流程：`cargo check` → `just check-all` → `cargo test` → 提交。细节 → `docs/claude-rules/windows-build.md`
+- **全平台检查**：改动涉及平台相关代码后，运行 `just check-all`（7 个交叉目标）验证编译通过；涉及 pcap feature 路径（raw 发送 / serve 抓包）另跑 `just check-pcap`（见上「Linux 可选 pcap feature」）。建议开发流程：`cargo check` → `just check-all` → `cargo test` → 提交。细节 → `docs/claude-rules/windows-build.md`
 - **跨平台依赖**：平台相关代码统一使用 `windows-sys`（微软官方）；`t!` 宏导入使用 `use rust_i18n::t;`；避免在 `#[cfg(unix)]` 块内定义通用函数。Windows 类型细节（`SOCKADDR_IN`、`CStr` 指针转换等） → `docs/claude-rules/windows-build.md`
 - **缩进控制**：终端输出中的缩进使用 `output.rs` 提供的工具函数，避免硬编码空格：
   - `indent(level)` — 获取指定层级的缩进字符串（0=无缩进，1=2空格，2=4空格，3=8空格）

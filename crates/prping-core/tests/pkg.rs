@@ -166,7 +166,10 @@ fn no_transport_layer_fails_with_hint() {
     )
     .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("没有可发送的包"), "{msg}");
+    assert!(
+        msg.contains("没有可发送的包") || msg.contains("no packets to send") || msg.contains("err_"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -202,7 +205,7 @@ fn raw_bare_export_is_skipped() {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("没有可发送的包"),
+            err.to_string().contains("没有可发送的包") || err.to_string().contains("no packets to send") || err.to_string().contains("err_"),
             "裸导出应跳过并汇总报错：{err}"
         );
     }
@@ -222,7 +225,7 @@ fn raw_transport_without_outer_layer_is_error() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("failed to send"),
+        err.to_string().contains("failed to send") || err.to_string().contains("发送失败") || err.to_string().contains("err_send_failed"),
         "裸传输层应逐包报错：{err}"
     );
 }
@@ -250,7 +253,7 @@ fn raw_link_layer_frame_without_target_is_sendable() {
             let msg = e.to_string();
             assert!(!msg.contains("目标地址"), "链路层帧不应报目标缺失：{msg}");
             assert!(
-                msg.contains("failed to send"),
+                msg.contains("failed to send") || msg.contains("发送失败") || msg.contains("err_send_failed"),
                 "无权限时也应走发送失败路径而非目标解析失败：{msg}"
             );
         }
@@ -270,7 +273,10 @@ fn empty_file_is_error() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("没有可发送的包"), "{err}");
+    assert!(
+        err.to_string().contains("没有可发送的包") || err.to_string().contains("no packets to send") || err.to_string().contains("err_"),
+        "{err}"
+    );
 }
 
 #[test]

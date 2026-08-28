@@ -2,9 +2,11 @@
 //! eth/IP/TCP 头（含握手 SYN/SYN-ACK/ACK）在内核里被剥掉，要显示完整帧必须
 //! raw 抓包。
 //!
-//! - **Linux**：AF_PACKET raw socket（`ETH_P_ALL`，全接口，需 root/cap_net_raw），
-//!   按 `sll_pkttype == PACKET_HOST` 只收本机入向帧（服务端自己的出向回包
-//!   PACKET_OUTGOING 天然不显示）。
+//! - **Linux**（默认）：AF_PACKET raw socket（`ETH_P_ALL`，全接口，需
+//!   root/cap_net_raw），按 `sll_pkttype == PACKET_HOST` 只收本机入向帧（服务端
+//!   自己的出向回包 PACKET_OUTGOING 天然不显示）。
+//! - **Linux**（`--features pcap`）：改走与 Windows/macOS 完全一致的 libpcap
+//!   多设备路径——按设备列表逐设备开抓包线程，启动行显示真实接口名。
 //! - **Windows**：Npcap（复用 `rawpcap.rs` 的设备枚举与抓包句柄）；通配绑定开
 //!   全部设备（多网卡机器不漏抓），指定绑定开拥有该 IP 的设备。
 //! - **macOS**：libpcap（系统自带，底层 BPF /dev/bpf*）；lo0 为 DLT_NULL 裸 IP，
@@ -65,17 +67,27 @@ pub(crate) fn spawn(
                 Some(parse_filter(s)?)
             }
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
         {
+            // macOS（libpcap/BPF）与 Linux 开 `--features pcap` 时：pcap 多设备
+            // 路径——按设备列表逐设备开抓包线程，启动行显示真实接口名（与
+            // Windows Npcap 一致）
+            Ok(spawn_pcap_devices(
+                addr,
+                all_frames,
+                expr,
+                open_pcap_capture,
+            ))
+        }
+        #[cfg(all(target_os = "linux", not(feature = "pcap")))]
+        {
+            // Linux 默认：AF_PACKET 单 socket 绑全接口（sll_ifindex=0），
+            // 启动行显示「全接口」
             Ok(spawn_linux(addr, all_frames, expr))
         }
         #[cfg(target_os = "windows")]
         {
             Ok(spawn_windows(addr, all_frames, expr))
-        }
-        #[cfg(target_os = "macos")]
-        {
-            Ok(spawn_macos(addr, all_frames, expr))
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
@@ -140,54 +152,56 @@ fn frame_meta(frame: &[u8]) -> Option<FrameMeta> {
     }
 }
 
+/// 从 IPv4/IPv6 报文提取共享头信息。
+///
+/// 返回 `(src, dst, proto/next_header, transport_offset, fragment_offset)`：
+/// - `transport_offset`：到传输层载荷的偏移（IPv4 = ihl, IPv6 = 40，扩展头不追跳）
+/// - `fragment_offset`：IPv4 分片偏移（IPv6 分片扩展头暂不处理，返回 0）。
+///
+/// 非 IPv4/IPv6 或版本检查失败 → None。
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
-fn ip_meta(ip: &[u8], v6: bool) -> Option<FrameMeta> {
+fn parse_ip_base(ip: &[u8], v6: bool) -> Option<(IpAddr, IpAddr, u8, usize, u16)> {
     if v6 {
         if ip.len() < 40 || (ip[0] >> 4) != 6 {
             return None;
         }
         let next = ip[6];
-        if !matches!(next, 6 | 17) {
-            return None; // 扩展头（逐跳/路由/分片等）暂不追跳
-        }
-        let src = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[8..24]).ok()?);
-        let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).ok()?);
-        let (sport, dport) = ports(&ip[40..])?;
-        Some(FrameMeta {
-            src: src.into(),
-            sport,
-            dst: dst.into(),
-            dport,
-            proto: if next == 6 { "TCP" } else { "UDP" },
-        })
+        let src = IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&ip[8..24]).ok()?));
+        let dst = IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).ok()?));
+        Some((src, dst, next, 40, 0))
     } else {
         if ip.len() < 20 || (ip[0] >> 4) != 4 {
             return None;
         }
-        let ihl = ((ip[0] & 0x0F) as usize) * 4;
+        let ihl = crate::util::ipv4_ihl(ip);
         if ip.len() < ihl + 4 {
             return None;
         }
-        // 非首片分片（offset>0）无端口，跳过
         let offset = (((ip[6] & 0x1F) as u16) << 8) | ip[7] as u16;
-        if offset > 0 {
-            return None;
-        }
         let proto = ip[9];
-        if !matches!(proto, 6 | 17) {
-            return None;
-        }
-        let src = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
-        let dst = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
-        let (sport, dport) = ports(&ip[ihl..])?;
-        Some(FrameMeta {
-            src: src.into(),
-            sport,
-            dst: dst.into(),
-            dport,
-            proto: if proto == 6 { "TCP" } else { "UDP" },
-        })
+        let src = IpAddr::V4(Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]));
+        let dst = IpAddr::V4(Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]));
+        Some((src, dst, proto, ihl, offset))
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+fn ip_meta(ip: &[u8], v6: bool) -> Option<FrameMeta> {
+    let (src, dst, proto, t_offset, frag_offset) = parse_ip_base(ip, v6)?;
+    if !matches!(proto, 6 | 17) {
+        return None;
+    }
+    if !v6 && frag_offset > 0 {
+        return None; // IPv4 非首片分片无端口
+    }
+    let (sport, dport) = ports(&ip[t_offset..])?;
+    Some(FrameMeta {
+        src,
+        sport,
+        dst,
+        dport,
+        proto: if proto == 6 { "TCP" } else { "UDP" },
+    })
 }
 
 /// 传输层端口（tcp/udp 头前 4 字节）。
@@ -221,61 +235,22 @@ fn frame_summary(frame: &[u8]) -> Option<FrameSummary> {
 /// 无端口，但地址仍在基本头内）。仅 IPv4/IPv6 基本头，扩展头不追跳。
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 fn ip_summary(ip: &[u8], v6: bool) -> Option<FrameSummary> {
-    if v6 {
-        if ip.len() < 40 || (ip[0] >> 4) != 6 {
-            return None;
+    let (src, dst, proto, t_offset, frag_offset) = parse_ip_base(ip, v6)?;
+    if matches!(proto, 6 | 17) {
+        // TCP/UDP
+        if !v6 && frag_offset > 0 {
+            return None; // IPv4 非首片分片无端口
         }
-        let next = ip[6];
-        let src = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[8..24]).ok()?);
-        let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).ok()?);
-        if matches!(next, 6 | 17) {
-            let (sport, dport) = ports(&ip[40..])?;
-            Some(FrameSummary::Transport {
-                src: src.into(),
-                sport,
-                dst: dst.into(),
-                dport,
-                proto: if next == 6 { "TCP" } else { "UDP" },
-            })
-        } else {
-            Some(FrameSummary::Ip {
-                src: src.into(),
-                dst: dst.into(),
-                proto: next,
-            })
-        }
+        let (sport, dport) = ports(&ip[t_offset..])?;
+        Some(FrameSummary::Transport {
+            src,
+            sport,
+            dst,
+            dport,
+            proto: if proto == 6 { "TCP" } else { "UDP" },
+        })
     } else {
-        if ip.len() < 20 || (ip[0] >> 4) != 4 {
-            return None;
-        }
-        let ihl = ((ip[0] & 0x0F) as usize) * 4;
-        if ip.len() < ihl {
-            return None;
-        }
-        let proto = ip[9];
-        let src = Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]);
-        let dst = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
-        if matches!(proto, 6 | 17) {
-            // 非首片分片（offset>0）无端口
-            let offset = (((ip[6] & 0x1F) as u16) << 8) | ip[7] as u16;
-            if offset > 0 {
-                return None;
-            }
-            let (sport, dport) = ports(&ip[ihl..])?;
-            Some(FrameSummary::Transport {
-                src: src.into(),
-                sport,
-                dst: dst.into(),
-                dport,
-                proto: if proto == 6 { "TCP" } else { "UDP" },
-            })
-        } else {
-            Some(FrameSummary::Ip {
-                src: src.into(),
-                dst: dst.into(),
-                proto,
-            })
-        }
+        Some(FrameSummary::Ip { src, dst, proto })
     }
 }
 
@@ -356,8 +331,8 @@ impl ServiceFilter {
         frame_meta(frame).is_some_and(|m| self.matches_meta(&m))
     }
 
-    /// 裸 IP 包（macOS lo0 DLT_NULL 剥掉族头后）是否为「本服务收到的包」。
-    #[cfg(any(target_os = "macos", test))]
+    /// 裸 IP 包（DLT_NULL/LOOP 剥掉族头后）是否为「本服务收到的包」。
+    #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap"), test))]
     fn matches_bare(&self, ip: &[u8]) -> bool {
         bare_ip_meta(ip).is_some_and(|m| self.matches_meta(&m))
     }
@@ -468,20 +443,25 @@ fn local_addresses() -> Option<Vec<IpAddr>> {
     Some(out)
 }
 
-/// 打印一帧：`[frame] <摘要> N B` + 全栈 dissect（摘要按协议：TCP/UDP 带端口、
-/// ICMP 等只给地址、ARP 给 request/reply spa→tpa）。
+/// 打印一帧/裸 IP 包：`[frame] <摘要> N B` + 全栈 dissect。
+/// `summary_fn` 决定摘要提取方式（以太网帧用 `frame_summary`，裸 IP 用 `bare_ip_summary`）。
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
-fn show_frame(frame: &[u8]) {
+fn show_packet(data: &[u8], summary_fn: impl Fn(&[u8]) -> Option<FrameSummary>) {
     use std::io::Write;
-    let report = packet_dsl::dissect(frame);
+    let report = packet_dsl::dissect(data);
     let mut w = crate::output::stdout();
     let _ = crate::output::print_magenta(&mut w, "[frame] ");
-    if let Some(s) = frame_summary(frame) {
+    if let Some(s) = summary_fn(data) {
         print_summary(&mut w, &s);
     }
-    let _ = writeln!(&mut w, "{} B", frame.len());
-    // 空标题：`[frame]` 摘要行后直接跟层栈（`  [0] tcp …`），不再打印 `  frame:` 行
-    let _ = crate::engine::eng::render_dissected(&mut w, &report, "", frame);
+    let _ = writeln!(&mut w, "{} B", data.len());
+    let _ = crate::engine::eng::render_dissected(&mut w, &report, "", data);
+}
+
+/// 打印一帧（完整以太网帧）。
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+fn show_frame(frame: &[u8]) {
+    show_packet(frame, frame_summary);
 }
 
 /// 摘要行：`src:sport → dst:dport PROTO` / `src → dst PROTO` / `ARP op spa → tpa`。
@@ -509,8 +489,9 @@ fn print_summary<W: termcolor::WriteColor>(w: &mut W, s: &FrameSummary) {
 }
 
 /// 裸 IP 包（无链路层头，如 macOS lo0 的 DLT_NULL 剥掉 4 字节族头后）→ 帧元数据。
-/// 仅 macOS 回环抓包路径使用（Windows Npcap / Linux AF_PACKET 都是完整链路层帧）。
-#[cfg(any(target_os = "macos", test))]
+/// 仅 macOS 回环抓包路径实际触发（Windows Npcap / Linux AF_PACKET 与 pcap 路径
+/// 的普通网卡都是完整链路层帧；Linux 上仅为 pcap_loop 的防御性分支编译）。
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap"), test))]
 fn bare_ip_meta(ip: &[u8]) -> Option<FrameMeta> {
     match ip.first()? >> 4 {
         4 => ip_meta(ip, false),
@@ -519,8 +500,8 @@ fn bare_ip_meta(ip: &[u8]) -> Option<FrameMeta> {
     }
 }
 
-/// 裸 IP 包摘要（macOS lo0 回环帧；无 eth 层，摘要直接走 IP 路径）。
-#[cfg(any(target_os = "macos", test))]
+/// 裸 IP 包摘要（DLT_NULL/LOOP 回环帧剥掉族头后；无 eth 层，摘要直接走 IP 路径）。
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap"), test))]
 fn bare_ip_summary(ip: &[u8]) -> Option<FrameSummary> {
     match ip.first()? >> 4 {
         4 => ip_summary(ip, false),
@@ -529,20 +510,11 @@ fn bare_ip_summary(ip: &[u8]) -> Option<FrameSummary> {
     }
 }
 
-/// 打印裸 IP 包（macOS lo0 回环帧；无 eth 层，dissect 走裸 IP 路径）。
-/// 仅 macOS 抓包循环调用（无测试引用）。
-#[cfg(target_os = "macos")]
+/// 打印裸 IP 包（DLT_NULL/LOOP 回环帧剥掉族头后；无 eth 层，dissect 走裸 IP 路径）。
+/// 仅 macOS 回环路径实际触发（Linux lo 是 EN10MB，该分支不会走到）。
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
 fn show_bare_ip(ip: &[u8]) {
-    use std::io::Write;
-    let report = packet_dsl::dissect(ip);
-    let mut w = crate::output::stdout();
-    let _ = crate::output::print_magenta(&mut w, "[frame] ");
-    if let Some(s) = bare_ip_summary(ip) {
-        print_summary(&mut w, &s);
-    }
-    let _ = writeln!(&mut w, "{} B", ip.len());
-    // 空标题：`[frame]` 摘要行后直接跟层栈（同 show_frame）
-    let _ = crate::engine::eng::render_dissected(&mut w, &report, "", ip);
+    show_packet(ip, bare_ip_summary);
 }
 
 // ── --filter 表达式（tcpdump 风格子集）─────────────────────────────────────
@@ -940,10 +912,12 @@ fn dissect_addrs(r: &packet_dsl::dissect::DissectReport) -> Option<(IpAddr, IpAd
     })
 }
 
-// ── Linux：AF_PACKET ──────────────────────────────────────────────────────
+// ── Linux（默认）：AF_PACKET ──────────────────────────────────────────────
 
 /// 打开 AF_PACKET raw socket 并绑定全接口，成功则启动抓包线程。
-#[cfg(target_os = "linux")]
+/// 仅在未启用 `pcap` feature 时编译；启用后走 `spawn_pcap_devices`（libpcap
+/// 多设备路径，与 Windows/macOS 一致）。
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 fn spawn_linux(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -> CaptureStatus {
     let fd = unsafe {
         libc::socket(
@@ -953,10 +927,14 @@ fn spawn_linux(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -> 
         )
     };
     if fd < 0 {
-        return CaptureStatus::Unavailable(format!(
-            "AF_PACKET socket failed (need root/cap_net_raw): {}",
-            std::io::Error::last_os_error()
-        ));
+        return CaptureStatus::Unavailable(
+            rust_i18n::t!(
+                "errors.af_packet_socket",
+                hint = crate::util::privilege_hint(),
+                error = std::io::Error::last_os_error().to_string()
+            )
+            .to_string(),
+        );
     }
     // 绑定全接口（sll_ifindex=0）
     let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
@@ -980,11 +958,12 @@ fn spawn_linux(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -> 
     // 本机地址/广播/组播帧（ARP 请求等）；要看到网卡上其他主机的流量才需要。
     // 注意 PACKET_ADD_MEMBERSHIP 不接受 mr_ifindex=0（会 ENODEV），必须按接口
     // 逐个添加：getifaddrs 枚举接口名 → if_nametoindex 取索引；回环 lo 上混杂
-    // 无意义，跳过。
+    // 无意义，跳过。全部失败时给一次性提示（缺 CAP_NET_ADMIN 的典型症状）。
     if all_frames {
         let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
         if unsafe { libc::getifaddrs(&mut ifap) } == 0 {
             let mut cur = ifap;
+            let mut promisc_ok = false;
             unsafe {
                 while !cur.is_null() {
                     let ifa = &*cur;
@@ -998,18 +977,24 @@ fn spawn_linux(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -> 
                                 mr_alen: 0,
                                 mr_address: [0; 8],
                             };
-                            libc::setsockopt(
+                            let rc = libc::setsockopt(
                                 fd,
                                 libc::SOL_PACKET,
                                 libc::PACKET_ADD_MEMBERSHIP,
                                 &mreq as *const libc::packet_mreq as *const libc::c_void,
                                 std::mem::size_of::<libc::packet_mreq>() as libc::socklen_t,
                             );
+                            if rc == 0 {
+                                promisc_ok = true;
+                            }
                         }
                     }
                     cur = ifa.ifa_next;
                 }
                 libc::freeifaddrs(ifap);
+            }
+            if !promisc_ok {
+                eprintln!("{}", rust_i18n::t!("errors.capture_promisc_failed"));
             }
         }
     }
@@ -1027,9 +1012,9 @@ fn spawn_linux(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -> 
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 fn linux_loop(fd: libc::c_int, filter: Option<ServiceFilter>, expr: Option<FilterExpr>) {
-    let mut buf = vec![0u8; 65536];
+    let mut buf = vec![0u8; crate::util::RECV_BUF_SIZE];
     loop {
         if crate::interrupted() {
             break;
@@ -1092,8 +1077,9 @@ fn spawn_windows(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -
     // 通配绑定（0.0.0.0/::）→ 开全部设备；指定绑定 → 开拥有该 IP 的设备。
     // 不能只开 `pick_device` 的首个非回环：多网卡 Windows（Hyper-V vEthernet /
     // VPN / WiFi Direct 等虚拟适配器排在真网卡前面）上流量网卡不排第一时会把
-    // 本服务收到的帧全部漏掉——Linux AF_PACKET 是全接口、macOS 也是多设备，
-    // Windows 必须一致（每个设备一个抓包线程）。
+    // 本服务收到的帧全部漏掉——Linux AF_PACKET（默认）是全接口、macOS 是
+    // 多设备、Linux 开 `--features pcap` 也是多设备，Windows 必须一致
+    // （每个设备一个抓包线程）。
     let wanted = rawpcap::capture_devices(&devs, addr);
     if wanted.is_empty() {
         let list = rawpcap::format_device_list(&devs);
@@ -1177,47 +1163,66 @@ fn windows_loop(
     }
 }
 
-// ── macOS：libpcap（系统自带，底层 BPF /dev/bpf*）─────────────────────────
+// ── pcap 多设备路径（macOS libpcap/BPF；Linux 开 `--features pcap` 时同款）──
 
-/// 打开 macOS 抓包句柄：libpcap 设备（系统自带，底层走 BPF）。
-///
-/// 与 Windows 的 Npcap 路径共用 `pcap::Capture` API；差异在设备枚举/选择
-/// （复用 `rawpcap::list_devices` / `pick_device`）与链路类型：
+/// 打开 pcap 抓包句柄（macOS：系统 libpcap，底层走 BPF；Linux：`--features
+/// pcap` 的 libpcap）。与 Windows 的 Npcap 路径共用 `pcap::Capture` API；
+/// 差异在设备枚举/选择（复用 `rawpcap::list_devices` / `pick_device`）与链路类型：
 /// - 普通网卡：Ethernet（EN10MB），帧带 14B eth 头（`show_frame` 全栈解析）
-/// - lo0 回环：**DLT_NULL**（4 字节族头 + 裸 IP），抓包侧剥掉族头走裸 IP 路径
+/// - macOS lo0 回环：**DLT_NULL**（4 字节族头 + 裸 IP），抓包侧剥掉族头走裸 IP
+///   路径（Linux lo 经 libpcap 是 EN10MB，不会出现 NULL/LOOP，该分支仅防御性）
 ///
-/// 权限：/dev/bpf* 默认 root:wheel 600——需 `sudo` 或 Wireshark 的 ChmodBPF 授权。
-#[cfg(target_os = "macos")]
-fn spawn_macos(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -> CaptureStatus {
+/// 权限：macOS /dev/bpf* 默认 root:wheel 600——需 `sudo` 或 Wireshark 的
+/// ChmodBPF 授权；Linux 需 cap_net_raw（libpcap 底层是 AF_PACKET socket）。
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
+fn open_pcap_capture(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Active>> {
+    let cap = pcap::Capture::from_device(dev)
+        .map_err(|e| anyhow::anyhow!("打开 pcap 设备 `{dev}` 失败：{e}"))?
+        .timeout(100)
+        .promisc(true)
+        .immediate_mode(true)
+        .open()
+        .map_err(|e| anyhow::anyhow!("打开 pcap 设备 `{dev}` 失败：{e}"))?;
+    Ok(cap)
+}
+
+/// 按绑定地址在目标设备集合上逐个开抓包线程（macOS 与 Linux `--features pcap`
+/// 共用；Windows 因 Npcap 打开方式差异保留独立实现）：
+/// 通配绑定（0.0.0.0/::）→ 全部设备（回环 + 所有非回环），本地客户端走回环、
+/// 远程客户端走网卡，两者都能看到；指定绑定 → 拥有该 IP 的设备
+/// （与 Windows 共用 capture_devices，等价 Linux AF_PACKET 的「全接口」语义）。
+/// 每个设备一个抓包线程；至少一个成功才算 Active（失败原因留到全失败时返回）。
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
+fn spawn_pcap_devices(
+    addr: SocketAddr,
+    all_frames: bool,
+    expr: Option<FilterExpr>,
+    open: fn(&str) -> anyhow::Result<pcap::Capture<pcap::Active>>,
+) -> CaptureStatus {
     let devs = match crate::engine::rawpcap::list_devices() {
         Ok(d) => d,
         Err(e) => return CaptureStatus::Unavailable(e.to_string()),
     };
     let iface_all = rust_i18n::t!("server.capture_iface_all").to_string();
-    // 目标设备集合（libpcap 一次只能抓一个设备，按需开多个线程）：
-    // 通配绑定（0.0.0.0/::）→ 全部设备（回环 + 所有非回环），本地客户端走回环、
-    // 远程客户端走网卡，两者都能看到；指定绑定 → 拥有该 IP 的设备
-    // （与 Windows 共用 capture_devices，Linux 的 AF_PACKET 是全接口）
     let wanted = crate::engine::rawpcap::capture_devices(&devs, addr);
     if wanted.is_empty() {
         let list = crate::engine::rawpcap::format_device_list(&devs);
         return CaptureStatus::Unavailable(format!("找不到可用的抓包设备；可用：\n{list}"));
     }
-    // 每个设备一个抓包线程；至少一个成功才算 Active（失败原因留到全失败时返回）
     // 默认模式构造 ServiceFilter；全帧模式不过滤（None 同时作为「全帧」标记）
     let filter = (!all_frames).then(|| ServiceFilter::new(addr));
     let mut started: Vec<String> = Vec::new();
     let mut first_err: Option<String> = None;
     for idx in wanted {
         let dev = devs[idx].name.clone();
-        match open_macos_capture(&dev) {
+        match open(&dev) {
             Ok(mut cap) => {
                 let dlt = cap.get_datalink();
                 let filter = filter.clone();
                 let expr = expr.clone();
                 match std::thread::Builder::new()
                     .name("server-capture".into())
-                    .spawn(move || macos_loop(&mut cap, filter, expr, dlt))
+                    .spawn(move || pcap_loop(&mut cap, filter, expr, dlt))
                 {
                     Ok(_) => started.push(dev),
                     Err(e) => {
@@ -1237,20 +1242,8 @@ fn spawn_macos(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -> 
     }
 }
 
-#[cfg(target_os = "macos")]
-fn open_macos_capture(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Active>> {
-    let cap = pcap::Capture::from_device(dev)
-        .map_err(|e| anyhow::anyhow!("打开 pcap 设备 `{dev}` 失败：{e}"))?
-        .timeout(100)
-        .promisc(true)
-        .immediate_mode(true)
-        .open()
-        .map_err(|e| anyhow::anyhow!("打开 pcap 设备 `{dev}` 失败：{e}"))?;
-    Ok(cap)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_loop(
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
+fn pcap_loop(
     cap: &mut pcap::Capture<pcap::Active>,
     filter: Option<ServiceFilter>,
     expr: Option<FilterExpr>,
@@ -1262,7 +1255,8 @@ fn macos_loop(
         }
         match cap.next_packet() {
             Ok(p) => {
-                // lo0 回环是 DLT_NULL：4 字节族头 + 裸 IP；普通网卡是 Ethernet 帧
+                // macOS lo0 回环是 DLT_NULL：4 字节族头 + 裸 IP；普通网卡（含
+                // Linux lo）是 Ethernet 帧
                 if dlt == pcap::Linktype::NULL || dlt == pcap::Linktype::LOOP {
                     let Some(ip) = strip_null(p.data) else {
                         continue;
@@ -1317,7 +1311,7 @@ fn macos_loop(
 /// 剥 DLT_NULL/LOOP 的 4 字节族头（AF_INET=2 / AF_INET6=30），返回裸 IP 包；
 /// 族头非法或不足 → None。族头字节序：DLT_NULL 是主机字节序，DLT_LOOP 是网络
 /// 字节序——两种都接受（值都是 2/30，只是字节排列不同）。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
 fn strip_null(data: &[u8]) -> Option<&[u8]> {
     let head = data.get(..4)?;
     let le = u32::from_le_bytes(head.try_into().ok()?);
@@ -1699,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
     fn strip_null_header() {
         // DLT_NULL：4 字节族头 AF_INET=2（主机字节序）+ 裸 IPv4
         let mut data = vec![2u8, 0, 0, 0];

@@ -6,8 +6,66 @@ use std::time::{Duration, Instant};
 
 use termcolor::StandardStream;
 
-use super::{Hop, PROBE_TIMEOUT, PROBES_PER_HOP, PingConfig, finish_hop};
+use super::{Hop, PingConfig, TraceSocket};
 use crate::util;
+
+/// ICMP echo 探测器：实现 `TraceSocket`，供 `trace_loop` 调用。
+struct IcmpSocket {
+    sock: socket2::Socket,
+    target_sa: socket2::SockAddr,
+    target_ip: IpAddr,
+    ident: u16,
+    seq_counter: u16,
+}
+
+impl TraceSocket for IcmpSocket {
+    fn send_probes(&mut self, _hop_no: u32) -> Vec<(u16, Instant)> {
+        let mut probes = Vec::with_capacity(super::PROBES_PER_HOP);
+        for _ in 0..super::PROBES_PER_HOP {
+            let seq = self.seq_counter;
+            self.seq_counter = self.seq_counter.wrapping_add(1);
+            let pkt = if self.target_ip.is_ipv4() {
+                crate::ping::icmp::build_v4(self.ident, seq, 32)
+            } else {
+                crate::ping::icmp::build_v6(self.ident, seq, 32)
+            };
+            let sent = Instant::now();
+            if self.sock.send_to(&pkt, &self.target_sa).is_ok() {
+                probes.push((seq, sent));
+            }
+        }
+        probes
+    }
+
+    fn parse_reply(&self, data: &[u8], want: &[u16]) -> Option<(u16, bool)> {
+        if self.target_ip.is_ipv6() {
+            parse_reply_v6(data, self.target_ip, self.ident, want)
+        } else {
+            parse_reply_v4(data, self.target_ip, self.ident, want)
+        }
+    }
+
+    fn set_recv_timeout(&self, timeout: Duration) -> anyhow::Result<()> {
+        self.sock.set_read_timeout(Some(timeout))?;
+        Ok(())
+    }
+
+    fn recv_from(&self, buf: &mut [MaybeUninit<u8>]) -> std::io::Result<(usize, socket2::SockAddr)> {
+        self.sock.recv_from(buf)
+    }
+
+    fn dump_label(&self) -> &str {
+        if self.target_ip.is_ipv6() { "icmp-v6" } else { "icmp-v4" }
+    }
+
+    fn ttl_socket(&self) -> &socket2::Socket {
+        &self.sock
+    }
+
+    fn is_ipv6(&self) -> bool {
+        self.target_ip.is_ipv6()
+    }
+}
 
 /// ICMP echo 逐跳：raw ICMP socket 收发，回复按内嵌 ICMP 的 id/seq 匹配。
 pub(crate) fn trace_icmp(
@@ -18,116 +76,14 @@ pub(crate) fn trace_icmp(
 ) -> anyhow::Result<(Vec<Hop>, bool)> {
     let (sock, target_sa) = crate::util::create_icmp_socket(target_ip, cfg.source)?;
     let ident = crate::util::rand_u16();
-
-    let mut hops: Vec<Hop> = Vec::new();
-    let mut seq_counter: u16 = 0;
-    let mut reached = false;
-
-    for hop_no in 1..=max_hops {
-        if util::interrupted() {
-            break;
-        }
-        crate::util::set_ttl(&sock, hop_no, target_ip.is_ipv6())?;
-
-        // 发送本跳全部探测（背靠背，不逐包等待）
-        let mut probes: Vec<(u16, Instant)> = Vec::with_capacity(PROBES_PER_HOP);
-        for _ in 0..PROBES_PER_HOP {
-            let seq = seq_counter;
-            seq_counter = seq_counter.wrapping_add(1);
-            let pkt = if target_ip.is_ipv4() {
-                crate::ping::icmp::build_v4(ident, seq, 32)
-            } else {
-                crate::ping::icmp::build_v6(ident, seq, 32)
-            };
-            let sent = Instant::now();
-            if sock.send_to(&pkt, &target_sa).is_ok() {
-                probes.push((seq, sent));
-            }
-        }
-        if probes.is_empty() {
-            break; // 发送全部失败（如权限被收回），停止
-        }
-
-        // 收集回复直到全部匹配或超时
-        let want: Vec<u16> = probes.iter().map(|&(s, _)| s).collect();
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
-        let mut src: Option<IpAddr> = None;
-        let mut dest_hit = false;
-        let mut remaining = probes.len();
-        let mut buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
-        while remaining > 0 {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            sock.set_read_timeout(Some(deadline - now))?;
-            match sock.recv_from(&mut buf) {
-                Ok((n, addr)) => {
-                    let data: &[u8] =
-                        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
-                    let peer: IpAddr = addr
-                        .as_socket()
-                        .map(|s| s.ip())
-                        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                    let (seq, is_echo) = if target_ip.is_ipv6() {
-                        match parse_reply_v6(data, target_ip, ident, &want) {
-                            Some(r) => r,
-                            None => {
-                                super::trace_dump("icmp-v6", data, false);
-                                continue;
-                            }
-                        }
-                    } else {
-                        match parse_reply_v4(data, target_ip, ident, &want) {
-                            Some(r) => r,
-                            None => {
-                                super::trace_dump("icmp-v4", data, false);
-                                continue;
-                            }
-                        }
-                    };
-                    super::trace_dump(
-                        if target_ip.is_ipv6() {
-                            "icmp-v6"
-                        } else {
-                            "icmp-v4"
-                        },
-                        data,
-                        true,
-                    );
-                    if is_echo {
-                        dest_hit = true;
-                    }
-                    // 记录 RTT
-                    if let Some(idx) = probes.iter().position(|&(s, _)| s == seq)
-                        && rtts[idx].is_none()
-                    {
-                        let rtt = probes[idx].1.elapsed();
-                        rtts[idx] = Some(rtt);
-                        remaining -= 1;
-                    }
-                    src = Some(peer);
-                }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-
-        let hop = finish_hop(hop_no, cfg, src, rtts, w)?;
-        hops.push(hop);
-        if dest_hit {
-            reached = true;
-            break;
-        }
-    }
-
-    Ok((hops, reached))
+    let mut socket = IcmpSocket {
+        sock,
+        target_sa,
+        target_ip,
+        ident,
+        seq_counter: 0,
+    };
+    super::trace_loop(cfg, max_hops, &mut socket, w)
 }
 
 /// 解析 IPv4 回复。`buf` 含 IP 头（raw socket 恒含）。
@@ -144,7 +100,7 @@ pub(crate) fn parse_reply_v4(
     if buf.len() < 20 {
         return None;
     }
-    let ihl = (buf[0] & 0x0F) as usize * 4;
+    let ihl = util::ipv4_ihl(buf);
     if buf.len() < ihl + 8 {
         return None;
     }
@@ -166,7 +122,7 @@ pub(crate) fn parse_reply_v4(
             if body.len() < 20 {
                 return None;
             }
-            let inner_ihl = (body[0] & 0x0F) as usize * 4;
+            let inner_ihl = util::ipv4_ihl(body);
             if body.len() < inner_ihl + 8 {
                 return None;
             }
@@ -208,11 +164,7 @@ pub(crate) fn parse_reply_v6(
     ident: u16,
     want: &[u16],
 ) -> Option<(u16, bool)> {
-    let icmp = if buf.len() >= 48 && buf[0] >> 4 == 6 {
-        &buf[40..]
-    } else {
-        buf
-    };
+    let icmp = util::ipv6_frame_skip(buf);
     if icmp.len() < 8 {
         return None;
     }

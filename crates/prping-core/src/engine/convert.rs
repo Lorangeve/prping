@@ -21,6 +21,7 @@ use packet_dsl::ir::{ArpOp, Field, Layer, TcpFlags};
 
 use crate::engine::eng::layer_name;
 use crate::output::{indent, print_cyan, print_dim, print_magenta};
+use crate::util::hex_str;
 use termcolor::{ColorChoice, StandardStream};
 
 /// 转码选项。
@@ -614,11 +615,6 @@ fn render_recipe(
     src
 }
 
-// ── 渲染辅助 ──────────────────────────────────────────────────
-
-fn hex_str(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
 
 fn fmt_ts(rec: &crate::engine::pcap::PcapRecord, nano: bool) -> String {
     if nano {

@@ -38,6 +38,15 @@ jobs:
       - name: All tests
         run: just test
 
+      # Linux 可选 libpcap（`--features pcap`）路径：`server -v` 抓包的多设备路径
+      # + `packet --raw` 注入，编译 + clippy 零警告
+      - name: Linux pcap feature check
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev
+          just check-pcap
+
   bench:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest

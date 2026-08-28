@@ -3,10 +3,9 @@
 use crate::drive::{Probe, ProbeOutcome, drive};
 use crate::output;
 use crate::stats::{self, Stats};
-use crate::util::{self, PingConfig};
+use crate::util::{self, PingConfig, TCP_RECEIVE_TRIGGER};
 use rust_i18n::t;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
-use std::io::Write;
 use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -60,7 +59,6 @@ impl Probe for LatencyTcpProbe<'_> {
         _seq: u64,
         is_warmup: bool,
     ) -> anyhow::Result<ProbeOutcome> {
-        let start = Instant::now();
         let mut stream = match util::connect_first(&self.addrs, self.cfg.source).await {
             Ok(s) => s,
             Err(e) => {
@@ -73,10 +71,12 @@ impl Probe for LatencyTcpProbe<'_> {
             }
         };
         stream.get_ref().set_nodelay(true)?;
+        // RTT = payload 发送到回复的耗时（非连接时间），从这里开始计时
+        let start = Instant::now();
 
         if self.cfg.receive {
             // 发送触发字节，服务器回送 size 字节
-            stream.write_all(&[0xFF]).await?;
+            stream.write_all(&[TCP_RECEIVE_TRIGGER]).await?;
             match smol::future::or(
                 async {
                     stream.read_exact(&mut self.buf[..1]).await?;
@@ -230,18 +230,15 @@ fn print_latency(
     size: usize,
     warmup: bool,
 ) -> anyhow::Result<()> {
-    output::print_green(w, t!("common.reply_from"))?;
-    output::print_cyan(w, addr.ip().to_string())?;
-    write!(w, ":")?;
-    output::print_magenta(w, addr.port().to_string())?;
-    write!(w, ": {}{size} ", t!("common.bytes"))?;
-    output::print_yellow(
+    output::print_probe_result(
         w,
-        format!("{}{:.2}ms", t!("common.time"), rtt.as_secs_f64() * 1000.0),
+        &t!("common.reply_from"),
+        addr,
+        Some(size),
+        rtt,
+        None,
+        warmup,
+        None,
     )?;
-    if warmup {
-        output::print_dim(w, format!(" {}", t!("common.warmup")))?;
-    }
-    writeln!(w)?;
     Ok(())
 }

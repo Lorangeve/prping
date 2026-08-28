@@ -2,7 +2,7 @@ rust_i18n::i18n!("locales");
 
 use bpaf::*;
 use prping_core::{
-    DEFAULT_MAX_HOPS, OutcomeKind, PingConfig, PrpingError, PrpingWarning,
+    OutcomeKind, PingConfig, PrpingError, PrpingWarning,
     configure_executor_threads, find_sections, manual_for, parse_histogram, print_paged,
     resolve_source, run, serve, set_json, set_pretty, stderr, toc, writeln_orange, writeln_red,
 };
@@ -173,9 +173,12 @@ struct BandwidthArgs {
     size: Option<String>,
     receive: bool,
     parallel: Option<u32>,
+    graph: bool,
+    pretty: bool,
     count: Option<String>,
     interval: Option<f64>,
     quiet: bool,
+    histogram: Option<String>,
     warmup: Option<u64>,
     json: bool,
     v4: bool,
@@ -196,9 +199,8 @@ struct ServerArgs {
     addr: String,
 }
 
-/// trace 子命令（ICMP echo / TCP SYN / UDP 逐跳路径发现）
+/// trace 子命令（ICMP echo / TCP SYN（带端口自动）/ UDP 逐跳路径发现）
 struct TraceArgs {
-    tcp: bool,
     udp: bool,
     max_hops: Option<u32>,
     no_dns: bool,
@@ -352,9 +354,18 @@ fn bandwidth_cmd() -> impl Parser<Command> {
             .argument::<u32>("N")
             .help(t!("help.options.parallel").as_ref())
             .optional()),
+        graph(long("graph")
+            .short('g')
+            .switch()
+            .help(t!("help.options.graph").as_ref())),
+        pretty(long("pretty")
+            .short('p')
+            .switch()
+            .help(t!("help.options.pretty").as_ref())),
         count(opt_count()),
         interval(opt_interval()),
         quiet(opt_quiet()),
+        histogram(opt_histogram()),
         warmup(opt_warmup()),
         json(opt_json()),
         v4(opt_v4()),
@@ -398,10 +409,6 @@ fn server_cmd() -> impl Parser<Command> {
 
 fn trace_cmd() -> impl Parser<Command> {
     construct!(TraceArgs {
-        tcp(long("tcp")
-            .short('t')
-            .switch()
-            .help(t!("help.options.tcp").as_ref())),
         udp(long("udp")
             .short('u')
             .switch()
@@ -691,8 +698,10 @@ fn apply_lang(lang: &Option<String>) {
 /// 统一收尾：lib run() + 退出码（丢包/未到达目标 → 1）。
 fn dispatch_run(cfg: PingConfig, ctrl_echo: Option<CtrlCEchoGuard>) -> anyhow::Result<()> {
     match run(&cfg, |w| {
-        let mut err = stderr();
-        let _ = writeln_orange(&mut err, render_warning(w));
+        if !cfg.quiet {
+            let mut err = stderr();
+            let _ = writeln_orange(&mut err, render_warning(w));
+        }
     }) {
         Ok(kind) => {
             let has_loss = match &kind {
@@ -705,51 +714,38 @@ fn dispatch_run(cfg: PingConfig, ctrl_echo: Option<CtrlCEchoGuard>) -> anyhow::R
                 std::process::exit(1);
             }
         }
-        Err(PrpingError::UdpRequiresPort) => {
-            drop(ctrl_echo);
-            let mut w = stderr();
-            let _ = writeln_red(&mut w, t!("errors.udp_requires_port"));
-            std::process::exit(1);
+        Err(e) => {
+            // 7 个模式级错误统一用红色报错退出；其它错误向上透传。
+            if let Some(msg) = cli_error_message(&e) {
+                fail(ctrl_echo, msg);
+            } else {
+                return Err(e.into());
+            }
         }
-        Err(PrpingError::BandwidthRequiresPort) => {
-            drop(ctrl_echo);
-            let mut w = stderr();
-            let _ = writeln_red(&mut w, t!("errors.bandwidth_requires_port"));
-            std::process::exit(1);
-        }
-        Err(PrpingError::ConflictV4V6) => {
-            drop(ctrl_echo);
-            let mut w = stderr();
-            let _ = writeln_red(&mut w, t!("errors.conflict_v4_v6"));
-            std::process::exit(1);
-        }
-        Err(PrpingError::MtuRequiresNoPort) => {
-            drop(ctrl_echo);
-            let mut w = stderr();
-            let _ = writeln_red(&mut w, t!("errors.mtu_requires_no_port"));
-            std::process::exit(1);
-        }
-        Err(PrpingError::TracerouteRequiresNoPort) => {
-            drop(ctrl_echo);
-            let mut w = stderr();
-            let _ = writeln_red(&mut w, t!("errors.trace_requires_no_port"));
-            std::process::exit(1);
-        }
-        Err(PrpingError::TcpTraceRequiresPort) => {
-            drop(ctrl_echo);
-            let mut w = stderr();
-            let _ = writeln_red(&mut w, t!("errors.tcp_trace_requires_port"));
-            std::process::exit(1);
-        }
-        Err(PrpingError::TraceProtoConflict) => {
-            drop(ctrl_echo);
-            let mut w = stderr();
-            let _ = writeln_red(&mut w, t!("errors.trace_udp_tcp_conflict"));
-            std::process::exit(1);
-        }
-        Err(e) => return Err(e.into()),
     }
     Ok(())
+}
+
+/// PrpingError 对应的本地化 CLI 错误消息（None = 非用户错误，透传）。
+fn cli_error_message(e: &PrpingError) -> Option<String> {
+    match e {
+        PrpingError::UdpRequiresPort => Some(t!("errors.udp_requires_port").to_string()),
+        PrpingError::BandwidthRequiresPort => Some(t!("errors.bandwidth_requires_port").to_string()),
+        PrpingError::ConflictV4V6 => Some(t!("errors.conflict_v4_v6").to_string()),
+        PrpingError::MtuRequiresNoPort => Some(t!("errors.mtu_requires_no_port").to_string()),
+        PrpingError::TracerouteRequiresNoPort => Some(t!("errors.trace_requires_no_port").to_string()),
+        PrpingError::TcpTraceRequiresPort => Some(t!("errors.tcp_trace_requires_port").to_string()),
+        PrpingError::TraceProtoConflict => Some(t!("errors.trace_udp_tcp_conflict").to_string()),
+        _ => None,
+    }
+}
+
+/// 红字报错并退出（恢复终端设置后退出码 1）。
+fn fail(ctrl_echo: Option<CtrlCEchoGuard>, msg: impl AsRef<str>) -> ! {
+    drop(ctrl_echo); // 恢复终端设置（Drop impl）
+    let mut w = stderr();
+    let _ = writeln_red(&mut w, msg);
+    std::process::exit(1);
 }
 
 fn run_ping(a: PingArgs) -> anyhow::Result<()> {
@@ -779,25 +775,18 @@ fn run_ping(a: PingArgs) -> anyhow::Result<()> {
         port: port.unwrap_or(0),
         count: cnt,
         duration: dur,
-        interval: a.interval.unwrap_or(1.0),
         size: a.size.as_deref().map(parse_size).transpose()?,
         quiet: a.quiet,
         histogram: a.histogram.as_deref().and_then(parse_histogram),
-        warmup: a.warmup.unwrap_or(4),
         v4: a.v4,
         v6: a.v6,
         source: a.source.as_deref().map(resolve_source).transpose()?,
-        parallel: 1,
         udp: a.udp,
-        receive: false,
-        bandwidth: false,
         mtu: a.mtu,
-        traceroute: false,
-        trace_tcp: false,
-        trace_udp: false,
-        max_hops: DEFAULT_MAX_HOPS,
-        no_dns: false,
         graph: a.graph,
+        interval: a.interval.unwrap_or(PingConfig::default().interval),
+        warmup: a.warmup.unwrap_or(PingConfig::default().warmup),
+        ..PingConfig::default()
     };
     dispatch_run(cfg, _ctrl_echo)
 }
@@ -831,25 +820,18 @@ fn run_latency(a: LatencyArgs) -> anyhow::Result<()> {
         port,
         count: cnt,
         duration: dur,
-        interval: a.interval.unwrap_or(1.0),
         size: Some(parse_size(a.size.as_deref().unwrap_or("64"))?),
         quiet: a.quiet,
         histogram: a.histogram.as_deref().and_then(parse_histogram),
-        warmup: a.warmup.unwrap_or(4),
         v4: a.v4,
         v6: a.v6,
         source: a.source.as_deref().map(resolve_source).transpose()?,
-        parallel: 1,
         udp: a.udp,
         receive: a.receive,
-        bandwidth: false,
-        mtu: false,
-        traceroute: false,
-        trace_tcp: false,
-        trace_udp: false,
-        max_hops: DEFAULT_MAX_HOPS,
-        no_dns: false,
         graph: a.graph,
+        interval: a.interval.unwrap_or(PingConfig::default().interval),
+        warmup: a.warmup.unwrap_or(PingConfig::default().warmup),
+        ..PingConfig::default()
     };
     dispatch_run(cfg, _ctrl_echo)
 }
@@ -864,6 +846,7 @@ fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
 
     let _ctrl_echo = suppress_ctrl_c_echo(a.json);
     set_json(a.json);
+    set_pretty(a.pretty);
 
     let (host, port) = parse_target(&a.target)?;
     let port = port.ok_or_else(|| anyhow::anyhow!(t!("errors.bandwidth_requires_port")))?;
@@ -876,11 +859,9 @@ fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
         port,
         count: cnt,
         duration: dur,
-        interval: a.interval.unwrap_or(1.0),
         size: a.size.as_deref().map(parse_size).transpose()?, // None → lib 默认 8192
         quiet: a.quiet,
-        histogram: None,
-        warmup: a.warmup.unwrap_or(4),
+        histogram: a.histogram.as_deref().and_then(parse_histogram),
         v4: a.v4,
         v6: a.v6,
         source: a.source.as_deref().map(resolve_source).transpose()?,
@@ -888,13 +869,10 @@ fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
         udp: a.udp,
         receive: a.receive,
         bandwidth: true,
-        mtu: false,
-        traceroute: false,
-        trace_tcp: false,
-        trace_udp: false,
-        max_hops: DEFAULT_MAX_HOPS,
-        no_dns: false,
-        graph: false,
+        graph: a.graph,
+        interval: a.interval.unwrap_or(PingConfig::default().interval),
+        warmup: a.warmup.unwrap_or(PingConfig::default().warmup),
+        ..PingConfig::default()
     };
     dispatch_run(cfg, _ctrl_echo)
 }
@@ -913,9 +891,6 @@ fn run_server(a: ServerArgs) -> anyhow::Result<()> {
     println!("{}", t!("server.bandwidth_listening", addr = addr));
     // 依赖链由 validate_server 保证（-a 需 -v、--filter 需 -a），
     // 三个标志原样传给 serve，不再隐含开启。
-    if a.verbose {
-        println!("{}", t!("server.verbose_hint"));
-    }
     let report = smol::block_on(serve(addr, a.verbose, a.capture_all, a.filter.as_deref()))?;
     println!(
         "{}",
@@ -940,27 +915,15 @@ fn run_trace(a: TraceArgs) -> anyhow::Result<()> {
     let cfg = PingConfig {
         host,
         port: port.unwrap_or(0),
-        count: 0,
-        duration: None,
-        interval: 1.0,
-        size: None,
-        quiet: false,
-        histogram: None,
-        warmup: 4,
         v4: a.v4,
         v6: a.v6,
         source: a.source.as_deref().map(resolve_source).transpose()?,
-        parallel: 1,
-        udp: false,
-        receive: false,
-        bandwidth: false,
-        mtu: false,
         traceroute: true,
-        trace_tcp: a.tcp,
+        // TCP SYN 由 lib 按「带端口」自动启用（run 分派层 resolve_trace_probe）
         trace_udp: a.udp,
-        max_hops: a.max_hops.unwrap_or(DEFAULT_MAX_HOPS),
+        max_hops: a.max_hops.unwrap_or(PingConfig::default().max_hops),
         no_dns: a.no_dns,
-        graph: false,
+        ..PingConfig::default()
     };
     dispatch_run(cfg, _ctrl_echo)
 }
@@ -1056,6 +1019,9 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
     apply_lang(&a.lang);
     validate_packet(&a)?;
 
+    // 先解析文件路径（后续预检和发送都需要）
+    let path = resolve_pktl_arg(std::path::Path::new(&a.file))?;
+
     let target = match a.target.as_deref() {
         Some(t) => {
             let (host, port) = parse_target(t)?;
@@ -1064,15 +1030,39 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
                 // raw 模式端口无意义（原始 socket 不带端口；链路层帧如 ARP 甚至不需要
                 // 目标）——允许裸 HOST，端口按 0 处理
                 None if a.raw => 0,
-                None => return Err(anyhow::anyhow!(t!("errors.pkg_requires_port"))),
+                None => {
+                    // 预检：如果所有导出包都是 raw-only（无 TCP/UDP 传输层），自动升级
+                    // 为 raw 模式并给提示，而不是报"需要端口"的误导性错误
+                    if all_exports_raw_only(&path, &a) {
+                        let mut w = prping_core::stderr();
+                        let _ = writeln_orange(&mut w, t!("engine.auto_raw_upgrade"));
+                        let _ = writeln!(&mut w);
+                        0
+                    } else {
+                        return Err(anyhow::anyhow!(t!("errors.pkg_requires_port")));
+                    }
+                }
             };
             Some(resolve_target(&host, port)?)
         }
-        None => None,
+        None => {
+            // 未给目标：如果所有导出包都是 raw-only，提前提示需要 root 权限
+            if !a.raw && all_exports_raw_only(&path, &a) {
+                let mut w = prping_core::stderr();
+                let _ = writeln_orange(&mut w, t!("engine.auto_raw_upgrade"));
+                let _ = writeln!(&mut w);
+            }
+            None
+        }
     };
+    let raw_mode = a.raw
+        || (all_exports_raw_only(&path, &a)
+            && target
+                .as_ref()
+                .is_none_or(|t: &std::net::SocketAddr| t.port() == 0));
     let opts = prping_core::PkgOptions {
         target,
-        mode: if a.raw {
+        mode: if raw_mode {
             prping_core::SendMode::Raw {
                 iface: a.iface.clone(),
             }
@@ -1087,7 +1077,6 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
         summary: a.summary,
         libs: resolve_libs(&a.lib),
     };
-    let path = resolve_pktl_arg(std::path::Path::new(&a.file))?;
     if is_recipe(&path) {
         return prping_core::send_recipe(&path, &opts);
     }
@@ -1345,34 +1334,27 @@ fn resolve_libs(extra: &[String]) -> Vec<std::path::PathBuf> {
     libs
 }
 
-/// 解析 `packet` 子命令目标（DNS 解析）。
+/// 解析 `packet` 子命令目标（DNS 解析，复用 lib 统一入口）。
 fn resolve_target(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
-    use std::net::ToSocketAddrs;
-    let mut addrs: Vec<SocketAddr> = (host, port)
-        .to_socket_addrs()
-        .ok()
-        .map(|it| it.collect())
-        .ok_or_else(|| anyhow::anyhow!(t!("errors.resolve_failed", host = host)))?;
-    if addrs.is_empty() {
-        anyhow::bail!(t!("errors.resolve_failed", host = host));
-    }
-    addrs.sort_by_key(|a| u8::from(a.is_ipv6()));
-    Ok(addrs[0])
+    prping_core::resolve(host, port, false, false)
 }
 
 /// 解析 `--params k=v,k2=v2`。
 fn parse_params(list: &[String]) -> anyhow::Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     for s in list {
+        // 校验所有 pair 都含 '='（parse_kv_pairs 会静默跳过无效项，这里需要报错）
         for pair in s.split(',') {
             let pair = pair.trim();
             if pair.is_empty() {
                 continue;
             }
-            let (k, v) = pair
-                .split_once('=')
-                .ok_or_else(|| anyhow::anyhow!(t!("errors.params_format", value = pair)))?;
-            out.push((k.trim().to_string(), v.trim().to_string()));
+            if !pair.contains('=') {
+                anyhow::bail!(t!("errors.params_format", value = pair));
+            }
+        }
+        for (k, v) in prping_core::parse_kv_pairs(s) {
+            out.push((k.to_string(), v.to_string()));
         }
     }
     Ok(out)
@@ -1406,6 +1388,79 @@ fn is_recipe(path: &std::path::Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("pktl"))
         .unwrap_or(false)
+}
+
+/// 预检：加载 .pkt/.pktl 文件，检查所有导出包是否都是 raw-only（无 TCP/UDP 传输层，
+/// 但有 eth/ipv4/ipv6 外层可 raw 发送）。用于 CLI 层在缺少端口时判断是否可以自动
+/// 升级为 raw 模式，而不是报"需要端口"的误导性错误。
+///
+/// 失败时静默返回 false（让后续真正发送时报出更有意义的错误）。
+fn all_exports_raw_only(path: &std::path::Path, a: &PacketArgs) -> bool {
+    let libs = resolve_libs(&a.lib);
+    let params_vec: Vec<(String, String)> = parse_params(&a.params).unwrap_or_default();
+    let params: packet_dsl::Params = params_vec.into_iter().collect();
+    let globals: packet_dsl::Globals = parse_globals(&a.global).unwrap_or_default();
+
+    if is_recipe(path) {
+        // 配方：解析 recipe，逐步骤检查每个 .pkt 文件
+        let recipe = match prping_core::parse_recipe(path) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        if recipe.steps.is_empty() {
+            return false;
+        }
+        // 收集所有步骤的 .pkt 文件路径
+        let pkt_files: Vec<std::path::PathBuf> =
+            recipe.steps.iter().map(|s| s.pkg.clone()).collect();
+        // 逐个检查：只要有一步的包需要 TCP/UDP payload 模式，就返回 false
+        for pkt_file in &pkt_files {
+            let module = match packet_dsl::parse_file_with_libs(pkt_file, &libs) {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
+            let sources = match packet_dsl::resolve_sources_with_globals(&module, &params, &globals)
+            {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let pkts: Vec<_> = sources.iter().flat_map(|(_, pkts)| pkts).collect();
+            if pkts.is_empty() {
+                return false;
+            }
+            // 只要有任何一个包需要 TCP/UDP payload 模式（有传输层），就不是 all-raw-only
+            if pkts.iter().any(|pkt| has_tcp_udp(pkt)) {
+                return false;
+            }
+        }
+        true
+    } else {
+        // 单文件：检查所有导出包
+        let module = match packet_dsl::parse_file_with_libs(path, &libs) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let sources = match packet_dsl::resolve_sources_with_globals(&module, &params, &globals) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let pkts: Vec<_> = sources.iter().flat_map(|(_, pkts)| pkts).collect();
+        if pkts.is_empty() {
+            return false;
+        }
+        // 没有任何包需要 TCP/UDP payload 模式
+        !pkts.iter().any(|pkt| has_tcp_udp(pkt))
+    }
+}
+
+/// 包是否包含 TCP/UDP 传输层（payload 模式可提取载荷发送）。
+fn has_tcp_udp(pkt: &packet_dsl::PacketSpec) -> bool {
+    pkt.layers.iter().any(|l| {
+        matches!(
+            l,
+            packet_dsl::ir::Layer::Tcp(_) | packet_dsl::ir::Layer::Udp(_)
+        )
+    })
 }
 
 /// 无扩展名参数 → pktl 定位：先试 `<arg>.pktl`（当前目录/参数所在目录下的同名文件），

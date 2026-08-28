@@ -1,0 +1,38 @@
+# TCP 数据传输步骤 1：数据发送（PSH|ACK）
+# 学习 TCP 协议的数据传输机制
+#
+# TCP 数据传输特点：
+#   - 面向连接：需要先建立连接（三次握手）
+#   - 可靠传输：序列号、确认号、重传机制
+#   - 流量控制：滑动窗口机制
+#   - 拥塞控制：慢启动、拥塞避免
+#
+# TCP 标志位组合：
+#   - SYN: 同步序列号（连接建立）
+#   - ACK: 确认号有效
+#   - PSH: 推送数据（立即发送，不缓冲）
+#   - FIN: 结束连接
+#   - RST: 重置连接
+#
+# 常见 TCP 标志位组合：
+#   - SYN: 连接请求（三次握手第一步）
+#   - SYN|ACK: 连接确认（三次握手第二步）
+#   - ACK: 数据确认（三次握手第三步）
+#   - PSH|ACK: 数据推送（数据传输）
+#   - FIN|ACK: 连接关闭（四次挥手）
+#
+# 运行：prping packet tcp_data 127.0.0.1:80 --wait 1
+# 目标地址可注入：-p ip=127.0.0.1,port=80
+
+# 构造 TCP 数据包（PSH|ACK）
+# 序列号和确认号使用全局变量，模拟连续数据传输
+data = raw(bytes="Hello, TCP! This is a data transmission test.")
+
+# 封装到 TCP（PSH|ACK 标志，表示推送数据）
+use(data) |> tcp(sport=40000, dport=params("port", 80),
+                 seq=global("cseq", 0x1000), ack=global("sseq", 0x2000),
+                 flags=bor(psh(), ack()), window=65535)
+          |> ipv4(src="127.0.0.1", dst=params("ip", "127.0.0.1"))
+
+export:
+- data

@@ -5,9 +5,8 @@ use crate::output;
 use crate::stats::{self, Stats};
 use crate::util::{self, PingConfig};
 use rust_i18n::t;
-use std::io::Write;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use termcolor::StandardStream;
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
@@ -29,6 +28,9 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
         }
         if let Some(d) = cfg.duration {
             println!("{}", t!("tcp.duration", secs = d, warmup = cfg.warmup));
+        } else if cfg.count == 0 {
+            // 默认（无 -n）为无限模式：明确显示，避免「N 次迭代」误导
+            println!("{}", t!("common.iterations_infinite", warmup = cfg.warmup));
         } else {
             println!(
                 "{}",
@@ -67,11 +69,8 @@ impl Probe for TcpProbe<'_> {
         _seq: u64,
         is_warmup: bool,
     ) -> anyhow::Result<ProbeOutcome> {
-        let start = Instant::now();
-        // 5 秒 connect 超时 + 多地址回退
-        match util::connect_first(&self.addrs, self.cfg.source).await {
-            Ok(stream) => {
-                let rtt = start.elapsed();
+        match util::connect_timed(&self.addrs, self.cfg.source).await {
+            Ok((stream, rtt)) => {
                 let local = stream.get_ref().local_addr().ok();
                 let peer = stream.get_ref().peer_addr().unwrap_or(self.addrs[0]);
                 if !self.cfg.quiet && !stats::json() {
@@ -98,20 +97,15 @@ fn print_connected(
     rtt: Duration,
     warmup: bool,
 ) -> anyhow::Result<()> {
-    output::print_green(w, &t!("common.connecting_to"))?;
-    output::print_cyan(w, addr.ip().to_string())?;
-    write!(w, ":")?;
-    output::print_magenta(w, addr.port().to_string())?;
-    if warmup {
-        output::print_dim(w, format!(" {}", t!("common.warmup")))?;
-    }
-    write!(w, ": ")?;
-    if let Some(l) = local {
-        output::print_dim(w, format!("{} {}:", t!("common.from"), l.ip()))?;
-        output::print_dim(w, l.port().to_string())?;
-        write!(w, ": ")?;
-    }
-    output::print_yellow(w, format!("{:.2}ms", rtt.as_secs_f64() * 1000.0))?;
-    writeln!(w)?;
+    output::print_probe_result(
+        w,
+        &t!("common.connecting_to"),
+        addr,
+        None,
+        rtt,
+        None,
+        warmup,
+        local,
+    )?;
     Ok(())
 }

@@ -632,18 +632,7 @@ fn str_bytes(v: Option<&str>, out: &mut Vec<u8>) -> bool {
 
 /// 层的展示名（与 `--eng` 一致）。
 pub(crate) fn layer_kind(l: &Layer) -> String {
-    match l {
-        Layer::Ethernet(_) => "eth".into(),
-        Layer::Arp(_) => "arp".into(),
-        Layer::Ipv4(_) => "ipv4".into(),
-        Layer::Ipv6(_) => "ipv6".into(),
-        Layer::Icmp(_) => "icmp".into(),
-        Layer::Tcp(_) => "tcp".into(),
-        Layer::Udp(_) => "udp".into(),
-        Layer::Http(_) => "http".into(),
-        Layer::Dns(_) => "dns".into(),
-        Layer::Raw(_) => "raw".into(),
-    }
+    crate::engine::eng::layer_name(l).to_string()
 }
 
 /// 按 sniffer 声明校验回包（宿主/测试用）：`spec` 取自 `Module.sniffer`。

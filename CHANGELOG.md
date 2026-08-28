@@ -6,6 +6,27 @@
 
 ### 新增
 
+- **`trace` 带端口自动启用 TCP SYN，移除 `--tcp`/`-t` 标志**（`prping trace HOST:PORT`）：
+  与 `ping` 的「带端口 → TCP」一致，分派层决策收敛为纯函数 `lib.rs::resolve_trace_probe`
+  （`trace HOST` 仍是 ICMP echo 默认；`--udp` 不变、仍不接受端口）；`--tcp` 在 CLI 层
+  移除（未知参数即解析报错），库层 `PingConfig.trace_tcp` 与 `TcpTraceRequiresPort` /
+  `TraceProtoConflict` 校验保留供库调用方使用
+- **`trace --tcp` 支持 Windows（Npcap 路径）**：raw TCP socket 在 Windows 被禁止，改用与
+  `packet --raw` 相同的 pcap 兼容层——Npcap 注入完整以太网帧（eth + IPv4 + TCP SYN，TTL 递增
+  写在 IP 头里，IP/TCP 校验和手算；MAC 经 `GetBestRoute`/ARP 缓存/`GetIfEntry` 解析，复用
+  `rawpcap.rs`），同一抓包句柄收 SYN-ACK/RST（目标到达）与 ICMP Time Exceeded（中间路由），
+  回复按内嵌 TCP 头 (sport, dport) 匹配归属（`ping/trace/tcpwin.rs`）；抓包句柄先于发送打开、
+  与发送帧逐字节相同者跳过（Npcap 回读注入帧）；**未装 Npcap** 时 banner 前经
+  `ensure_wpcap()`（LoadLibrary 探测）报友好错误（`errors.tcp_trace_npcap`），不触发 wpcap.dll
+  delay-load 异常；**仅 IPv4**（IPv6 跨链路需 ND 邻居解析，Win7 不可枚举，`errors.tcp_trace_ipv6`）；
+  `-s` 源绑定（v4）与 `--json`/反向 DNS 等选项语义与 Unix 一致
+- **修复 Unix `trace --tcp` 两处缺陷**（`ping/trace/tcp.rs`）：① 回包端口匹配逻辑反了
+  （SYN-ACK/RST 回复的 (src port, dst port) = (目标端口, 我们的源端口)，旧代码按同向匹配，
+  真实回复全部被当杂包丢弃、目标永远"未到达"；回环下误把自己的 SYN 回声当回复）——改为
+  源端口=目标端口 + 目的端口∈探测源端口 + 源 IP=目标，并新增单测；② 恢复双 socket 收包
+  （raw TCP 只收 TCP 包，收不到中间路由的 ICMP Time Exceeded——旧实现中间跳恒超时）：raw
+  ICMP + raw TCP 双 socket `libc::poll` 同时等待，Time Exceeded 按内嵌 TCP 端口匹配
+  （`parse_ttl_exceeded_v4/v6`）；TCP flags 判定位置从 IP 头修正到 TCP 头偏移
 - 服务端 `server -a`/`--capture-all` 全帧抓包：不做「目的端口 == 监听端口」过滤，显示网卡上所有可见帧
   （ARP/ICMP/广播/组播/其他端口流量/出向回包，隐含 `-v`）；`[frame]` 摘要行对 ARP/ICMP 等非
   TCP-UDP 帧也给出地址级摘要（`serve/capture.rs` 新增 `FrameSummary`，Linux/Windows/macOS 三平台
@@ -69,6 +90,14 @@
 
 ### 修复
 
+- **Windows ICMP ping 全部显示「请求超时」**（实测：系统 ping.exe 正常、prping 100% 超时且失败是
+  即时的）——根因：同步单请求在 `rc>=1`（IcmpSendEcho2 已写入应答）后用 `IcmpParseReplies` 当判据，
+  而该函数对非 `IP_SUCCESS` 的应答（超时占位/错误回复）返回 0，**实测对真实成功应答也返回 0**
+  （`PRPING_ICMP_DEBUG=1` 转储 `rc=1 replies=0`，直接读 Status 为 `IP_SUCCESS`）→ `n==0 → 超时`
+  短路把成功/不可达/无路由全部掩成「请求超时」→ 改为经典用法：`rc>=1` 时直接读缓冲区内首个
+  `ICMP_ECHO_REPLY`/`ICMPV6_ECHO_REPLY_LH` 按 `Status` 分类（`ping/icmpwin.rs`，v4/v6 同步改）；
+  新增 `PRPING_ICMP_DEBUG=1` 逐探测转储（rc/GetLastError/Status 名称/RTT，`[icmp-win]` 前缀，
+  与 `PRPING_TRACE_DUMP` 同约定）+ 非预期失败一次性 `[icmp-win] warning`（不再静默掩码）
 - **`packet --raw` 无法发送链路层协议（ARP/CDP/LLDP 等）**——目标推导 `derive_target` 只认 IP 层
   `dst`，纯链路层帧（最外层 eth、无 IP 层）一律报「包没有定义目标地址，请显式指定 HOST:PORT」，
   而 AF_PACKET 本就按帧内目的 MAC 直发、不需要目标 → 链路层帧 raw 发送放行无目标

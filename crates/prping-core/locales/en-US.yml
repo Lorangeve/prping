@@ -16,6 +16,7 @@ udp:
   echo_hint: 'Note: UDP gets a reply only if the target echoes it back — run prping -s ADDR:PORT on the target'
 common:
   resolving: Resolving %{host} -> %{ip}
+  iterations_infinite: 'infinite iterations (warmup %{warmup}) ping test:'
   reply_from: 'Reply from '
   bytes: bytes=
   time: time=
@@ -47,6 +48,8 @@ bandwidth:
   udp_test: 'UDP Bandwidth test:'
   sent_bytes: Sent = %{bytes} bytes in %{secs}s
   received_bytes: Received = %{bytes} bytes in %{secs}s
+  bytes_human: '(%{bytes})'
+  connections: 'Connections = %{count}'
   bandwidth: Bandwidth = %{mbps} Mbps
   progress:
     packets: "%{done}/%{total} pkts (%{done_bytes}/%{total_bytes})  %{mbps} Mbps"
@@ -78,12 +81,15 @@ engine:
   note_wait_reply: 'note: waiting up to %{secs}s for a matching reply'
   note_wait_recipe: 'note: waiting up to %{secs}s for replies (per-step wait: overrides)'
   note_bare_export: 'note: bare layer export (no TCP/UDP transport, no eth/ipv4/ipv6 outer layer) cannot be sent, skipped — --eng display only'
-  note_raw_fallback: 'note: no TCP/UDP transport — sending full packet via raw sockets'
+  note_bare_export_short: 'note: bare layer export, skipped'
+  note_raw_fallback: 'note: no TCP/UDP transport — sending full packet via raw sockets (%{hint})'
+  note_raw_fallback_short: 'note: no TCP/UDP transport — raw fallback'
   note_raw_only: 'note: no TCP/UDP transport layer — full packet can only be sent via raw mode (--raw / recipe raw: true); payload mode cannot extract a payload'
+  auto_raw_upgrade: 'Hint: all exports in this recipe/file have no TCP/UDP transport layer (e.g. ICMP/ARP) — auto-upgrading to --raw mode (requires root/cap_net_raw)'
   note_fakeip_target: 'note: target %{ip} is a proxy fake-ip (198.18.0.0/15) — eth raw frames bypass the proxy and cannot be delivered; use examples/network_icmp_bare/ (kernel-routed/proxy, bare IP) or disable the proxy'
   note_fakeip_src: 'note: src auto-filled to %{ip} (suspected proxy fake-ip gateway) — eth raw frames bypass the proxy, the real gateway drops them; use examples/network_icmp_bare/ (kernel-routed/proxy, bare IP)'
   note_src_filled: 'note: src auto-filled → %{ip}'
-  note_src_unfillable: 'note: src=0.0.0.0/:: and local address could not be auto-filled — replies may not route back; use --params src=<local IP>'
+  note_src_unfillable: 'note: src=0.0.0.0/:: cannot be auto-filled — replies may not route back; use --params src=<local IP>'
   target_none: 'link-layer'
   note_linklayer_no_target: 'link-layer frame, no IP target (AF_PACKET sends by the frame dst MAC)'
   note_arp_miss: 'note: cannot resolve MAC of %{next_hop} (ARP cache miss) — sending to broadcast, replies may not arrive'
@@ -94,9 +100,23 @@ engine:
   note_stack_payload_only: 'note: %{inner} inside %{outer}: ICMP/ARP should only carry raw payload'
   note_stack_uninferrable_proto: 'note: %{inner} inside %{outer}: cannot infer protocol number (proto=0 / next_header=59) — set it explicitly or add a transport layer'
   note_stack_wrong_carrier: 'note: %{inner} declares carrier %{carriers} (via #[rule]) but is wrapped in %{outer}'
+  err_no_packets: 'no packets to send: file has no default or named exports'
+  err_all_bare: 'no packets to send: all %{total} export(s) are bare layers (no TCP/UDP transport, no eth/ipv4/ipv6 outer layer)'
+  err_send_failed: '%{failed} of %{total} packets failed to send'
 errors:
-  raw_socket: 'cannot create raw socket: %{error}. Requires root or cap_net_raw'
-  raw_socket_windows: 'cannot create raw socket: %{error}. Windows raw sockets require administrator privileges and are broken on Windows 7 RTM (SP0) (WSAEINVAL 10022) — ICMP ping uses the ICMP API instead, but the MTU probe / ICMP traceroute may be unavailable here'
+  # Privilege hints (conditionally compiled per platform, appended to every
+  # raw-socket / packet-capture permission failure)
+  priv_hint_linux: 'run with `sudo`, grant cap_net_raw'
+  priv_hint_windows: 'run as administrator'
+  priv_hint_macos: 'run with `sudo`, or install Wireshark ChmodBPF to authorize /dev/bpf*'
+  priv_hint_other: 'requires root privileges'
+  raw_socket: 'raw socket: %{error} (%{hint})'
+  raw_socket_windows: 'cannot create raw socket: %{error}. Windows raw sockets require administrator privileges (%{hint}) and are broken on Windows 7 RTM (SP0) (WSAEINVAL 10022) — ICMP ping uses the ICMP API instead, but the MTU probe / ICMP traceroute may be unavailable here'
+  raw_socket_macos: 'cannot create raw socket: %{error} (%{hint})'
+  af_packet_socket: 'AF_PACKET: %{error} (%{hint})'
+  raw_icmp_wait: 'raw ICMP: %{error} (%{hint})'
+  pcap_open: 'failed to open %{platform} device `%{dev}`: %{error} (%{hint})'
+  capture_promisc_failed: 'note: could not enable promiscuous mode (needs CAP_NET_ADMIN) — only local/broadcast/multicast frames are captured'
   no_npcap: 'Npcap is not installed (wpcap.dll not found) — packet --raw needs Npcap (https://npcap.com); all other prping features work without it'
   cannot_resolve: 'cannot resolve host: %{host}'
   invalid_bind: 'invalid bind address: %{addr}. Format: host:port'
@@ -120,7 +140,7 @@ errors:
   eng_requires_file: "--eng needs a .pkt file to analyze (or --eng --lsp)"
   eng_lsp_no_file: "--lsp does not take a file argument"
   pkg_requires_target: "--pkt needs a HOST:PORT target"
-  pkg_requires_port: "--pkt needs a target port (HOST:PORT)"
+  pkg_requires_port: "--pkt needs a target port (HOST:PORT). Hint: if this recipe has no TCP/UDP layer (e.g. ICMP/ARP), add --raw: prping packet FILE HOST --raw"
   udp_requires_port: 'UDP requires a port: HOST:PORT'
   bandwidth_requires_port: bandwidth requires HOST:PORT
   invalid_count: 'invalid count value: %{value} (use N or Ns)'
@@ -139,14 +159,15 @@ errors:
   mtu_requires_no_port: 'MTU probe does not take a port: prping ping -m HOST'
   conflict_mtu_histogram: "--mtu does not support -H histogram"
   conflict_trace_mode: "-t cannot be combined with: %{opts}"
-  trace_requires_no_port: 'traceroute does not take a port: prping trace HOST'
-  tcp_trace_requires_port: 'TCP traceroute requires a port: prping trace --tcp HOST:PORT'
-  trace_udp_tcp_conflict: "--tcp and --udp cannot be used together"
-  tcp_trace_windows: 'TCP traceroute is not supported on Windows (raw TCP sockets are restricted) — use ICMP traceroute (prping trace HOST) or an Npcap-based tool'
+  trace_requires_no_port: 'UDP traceroute does not take a port: prping trace --udp HOST (destination ports auto-increment from 33434)'
+  tcp_trace_requires_port: 'TCP traceroute requires a port: prping trace HOST:PORT'
+  trace_udp_tcp_conflict: "TCP and UDP traceroute cannot be requested together"
+  tcp_trace_npcap: 'TCP traceroute on Windows requires Npcap (wpcap.dll not found) — install Npcap from https://npcap.com and retry, or use ICMP traceroute (prping trace HOST)'
+  tcp_trace_ipv6: 'TCP traceroute on Windows (Npcap path) supports IPv4 only — IPv6 targets need ND neighbor resolution; use ICMP traceroute instead (prping trace HOST)'
   raw_eth_macos: '--raw sending Ethernet frames (eth) on macOS requires libpcap with root or ChmodBPF authorization — run with sudo, or use packets without an eth layer (ipv4/ipv6 outer layer works fine)'
   trace_no_local_addr: cannot determine the local source address (UDP route probe failed)
-  max_hops_requires_trace: "-m only applies with -t (traceroute)"
-  no_dns_requires_trace: "-d only applies with -t (traceroute)"
+  max_hops_requires_trace: "-m only applies with trace (traceroute)"
+  no_dns_requires_trace: "-d only applies with trace (traceroute)"
   resolve_failed: cannot resolve %{host}
   engine_mode_required: 'no mode given: use --eng / --pkt / --ls / --hex / --pcap'
   help_pkg_not_found: |-
@@ -170,7 +191,7 @@ cmd:
   latency: Latency test (echo round-trip over TCP/UDP)
   bandwidth: Bandwidth test (TCP/UDP throughput)
   server: Run the test server (serves latency/bandwidth clients)
-  trace: Traceroute (ICMP echo with increasing TTL, hop-by-hop)
+  trace: 'Traceroute (ICMP echo; TCP SYN when a port is given, UDP with -u)'
   engine: 'Packet engine: analyze .pkt/.pktl, LSP, --ls/--hex/--pcap'
   packet: Build packets from a .pkt/.pktl file and send
 help:
@@ -192,16 +213,15 @@ help:
     udp: UDP mode (default is TCP)
     mtu: Probe path MTU via ICMP DF + binary search
     traceroute: 'Traceroute: ICMP echo with increasing TTL, hop-by-hop path discovery'
-    tcp: 'TCP traceroute: hop-by-hop SYN probing (needs HOST:PORT; SYN-ACK/RST from the target means reached)'
     trace_udp: 'UDP traceroute (classic: destination ports start at 33434; Port Unreachable from the target means reached)'
-    max_hops: 'Maximum hops (default 30, with -t)'
-    no_dns: 'Skip reverse DNS lookup (with -t)'
+    max_hops: 'Maximum hops (default 30)'
+    no_dns: 'Skip reverse DNS lookup'
     eng: 'Engine mode: analyze a .pkt file with rich output (add --lsp for a language server)'
     lsp: Start a Language Server for .pkt files (with --eng; JSON-RPC over stdio)
     pkg: >-
       Build packets from a .pkt file and send to HOST:PORT (optional; derived from packet dst/dport when omitted, add --raw
       for raw sockets)
-    raw: 'Send full serialized packets via raw sockets (Linux: root/cap_net_raw; Windows: Npcap installed)'
+    raw: 'Send full serialized packets via raw sockets (Linux: root/cap_net_raw; Windows: Npcap installed, run as admin; macOS: root/ChmodBPF)'
     iface: 'Network interface for raw ethernet frames (default: lo)'
     params: Runtime parameters for the .pkt script (-p k=v,k2=v2; read via params("name") in the script)
     global: >-
@@ -254,7 +274,7 @@ help:
     Examples:
       prping trace 8.8.8.8                   ICMP echo traceroute
       prping trace -m 60 8.8.8.8
-      prping trace --tcp 8.8.8.8:443         TCP SYN traceroute (works when ICMP is filtered)
+      prping trace 8.8.8.8:443               TCP SYN traceroute (auto with a port, works when ICMP is filtered)
       prping trace --udp 8.8.8.8             UDP traceroute (classic, ports start at 33434)
   footer_engine: |-
     Examples:

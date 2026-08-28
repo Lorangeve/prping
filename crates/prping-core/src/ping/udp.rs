@@ -5,7 +5,6 @@ use crate::output;
 use crate::stats::{self, Stats};
 use crate::util::{self, PingConfig};
 use rust_i18n::t;
-use std::io::Write;
 use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -27,6 +26,9 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
         );
         if let Some(d) = cfg.duration {
             println!("{}", t!("udp.duration", secs = d, warmup = cfg.warmup));
+        } else if cfg.count == 0 {
+            // 默认（无 -n）为无限模式：明确显示，避免「N 次迭代」误导
+            println!("{}", t!("common.iterations_infinite", warmup = cfg.warmup));
         } else {
             println!(
                 "{}",
@@ -142,18 +144,15 @@ fn print_reply(
     rtt: Duration,
     warmup: bool,
 ) -> anyhow::Result<()> {
-    output::print_green(w, t!("common.reply_from"))?;
-    output::print_cyan(w, src.ip().to_string())?;
-    write!(w, ":")?;
-    output::print_magenta(w, src.port().to_string())?;
-    write!(w, ": {}{size} ", t!("common.bytes"))?;
-    output::print_yellow(
+    output::print_probe_result(
         w,
-        format!("{}{:.2}ms", t!("common.time"), rtt.as_secs_f64() * 1000.0),
+        &t!("common.reply_from"),
+        src,
+        Some(size),
+        rtt,
+        None,
+        warmup,
+        None,
     )?;
-    if warmup {
-        output::print_dim(w, format!(" {}", t!("common.warmup")))?;
-    }
-    writeln!(w)?;
     Ok(())
 }

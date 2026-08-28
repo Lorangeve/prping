@@ -29,6 +29,72 @@ const IP_DEST_NO_ROUTE: u32 = 11019;
 const ERROR_SEM_TIMEOUT: u32 = 121;
 const ERROR_IO_PENDING: u32 = 997;
 
+// ---- Windows ICMP 诊断（排查 IcmpSendEcho2 被安全软件/防火墙拦截等环境问题）----
+
+/// 非预期底层错误只警告一次（无限模式下避免刷屏）；正常超时不打印。
+fn unexpected_warn(msg: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[icmp-win] warning: {msg} — currently treated as timeout; \
+             set PRPING_ICMP_DEBUG=1 for per-probe details"
+        );
+    }
+}
+
+/// `PRPING_ICMP_DEBUG=1` 时打印每次 IcmpSendEcho2/Icmp6SendEcho2 探测的底层结果
+/// （rc/GetLastError/应答数/Status/RTT）。零开销零输出，与 trace 的
+/// `PRPING_TRACE_DUMP=1` 约定一致。
+fn icmp_debug(msg: &str) {
+    if std::env::var_os("PRPING_ICMP_DEBUG").is_none() {
+        return;
+    }
+    eprintln!("[icmp-win] {msg}");
+}
+
+/// rc==0 时的 GetLastError 是否属于「正常超时」（无需警告）。
+fn is_timeout_error(code: u32) -> bool {
+    matches!(
+        code,
+        ERROR_SEM_TIMEOUT | ERROR_IO_PENDING | IP_REQ_TIMED_OUT
+    )
+}
+
+/// 是否属于已分类的已知 IP_STATUS（决定非预期 Status 是否需要警告）。
+fn is_known_status(code: u32) -> bool {
+    matches!(
+        code,
+        IP_SUCCESS
+            | IP_DEST_NET_UNREACH
+            | IP_DEST_HOST_UNREACH
+            | IP_DEST_PROT_UNREACH
+            | IP_DEST_PORT_UNREACH
+            | IP_REQ_TIMED_OUT
+            | IP_TTL_EXPIRED_TRANSIT
+            | IP_TTL_EXPIRED_REASSEM
+            | IP_BAD_DESTINATION
+            | IP_DEST_NO_ROUTE
+    )
+}
+
+/// IP_STATUS 数值 → 名称（`PRPING_ICMP_DEBUG` 诊断输出用）。
+fn icmp_status_name(code: u32) -> &'static str {
+    match code {
+        IP_SUCCESS => "IP_SUCCESS",
+        IP_DEST_NET_UNREACH => "IP_DEST_NET_UNREACH",
+        IP_DEST_HOST_UNREACH => "IP_DEST_HOST_UNREACH",
+        IP_DEST_PROT_UNREACH => "IP_DEST_PROT_UNREACH",
+        IP_DEST_PORT_UNREACH => "IP_DEST_PORT_UNREACH",
+        IP_REQ_TIMED_OUT => "IP_REQ_TIMED_OUT",
+        IP_TTL_EXPIRED_TRANSIT => "IP_TTL_EXPIRED_TRANSIT",
+        IP_TTL_EXPIRED_REASSEM => "IP_TTL_EXPIRED_REASSEM",
+        IP_BAD_DESTINATION => "IP_BAD_DESTINATION",
+        IP_DEST_NO_ROUTE => "IP_DEST_NO_ROUTE",
+        _ => "IP_STATUS_UNKNOWN",
+    }
+}
+
 /// 状态码 → 探测失败原因（None = 成功）。纯函数，跨平台单测。
 pub(crate) fn classify_status(code: u32) -> Option<IcmpErr> {
     match code {
@@ -48,7 +114,7 @@ pub(crate) mod ws {
     use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         ICMP_ECHO_REPLY, ICMPV6_ECHO_REPLY_LH, Icmp6CreateFile, Icmp6SendEcho2, IcmpCloseHandle,
-        IcmpCreateFile, IcmpParseReplies, IcmpSendEcho2,
+        IcmpCreateFile, IcmpSendEcho2,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET6, SOCKADDR_IN6};
 
@@ -132,19 +198,40 @@ pub(crate) mod ws {
                     )
                 };
                 if rc == 0 {
-                    return Err(super::last_error_to_icmp(
-                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32,
+                    let err = std::io::Error::last_os_error();
+                    let code = err.raw_os_error().unwrap_or(0) as u32;
+                    super::icmp_debug(&format!(
+                        "IcmpSendEcho2 dest={v4} rc=0 last_error={code} timeout_ms={timeout_ms}"
                     ));
+                    if !super::is_timeout_error(code) {
+                        super::unexpected_warn(&format!(
+                            "IcmpSendEcho2 failed: {err} (GetLastError={code})"
+                        ));
+                    }
+                    return Err(super::last_error_to_icmp(code));
                 }
-                // SAFETY: rc >= 1 时缓冲含至少一个 ICMP_ECHO_REPLY（+数据）。
-                let n = unsafe { IcmpParseReplies(reply.as_mut_ptr().cast(), reply_size) };
-                if n == 0 {
-                    return Err(IcmpErr::Timeout);
-                }
-                // SAFETY: 首个应答结构按 C 布局读取；Vec 堆分配对齐 ≥ 8。
+                // rc >= 1：同步单请求直接读首个应答结构（经典 MSDN 用法，
+                // `(PICMP_ECHO_REPLY)ReplyBuffer` 直读）。不能拿 IcmpParseReplies
+                // 当判据——它对非 IP_SUCCESS 的应答（超时占位 / 错误回复）返回 0，
+                // 会把真实 Status 掩成超时（实测 rc=1 而 replies=0 正是"快速失败"的根因）。
+                // SAFETY: rc >= 1 保证缓冲开头有完整 ICMP_ECHO_REPLY；Vec 堆分配对齐 ≥ 8。
                 let r = unsafe { &*(reply.as_ptr() as *const ICMP_ECHO_REPLY) };
+                super::icmp_debug(&format!(
+                    "IcmpSendEcho2 dest={v4} rc={rc} status={} ({}) rtt={:.1}ms",
+                    r.Status,
+                    super::icmp_status_name(r.Status),
+                    t0.elapsed().as_secs_f64() * 1000.0
+                ));
                 match super::classify_status(r.Status) {
-                    Some(e) => Err(e),
+                    Some(e) => {
+                        if !super::is_known_status(r.Status) {
+                            super::unexpected_warn(&format!(
+                                "unexpected IcmpSendEcho2 reply Status={}",
+                                r.Status
+                            ));
+                        }
+                        Err(e)
+                    }
                     None => Ok((r.Options.Ttl, 8 + r.DataSize as usize)),
                 }
             }
@@ -182,20 +269,40 @@ pub(crate) mod ws {
                     )
                 };
                 if rc == 0 {
-                    return Err(super::last_error_to_icmp(
-                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32,
+                    let err = std::io::Error::last_os_error();
+                    let code = err.raw_os_error().unwrap_or(0) as u32;
+                    super::icmp_debug(&format!(
+                        "Icmp6SendEcho2 dest={v6} rc=0 last_error={code} timeout_ms={timeout_ms}"
                     ));
+                    if !super::is_timeout_error(code) {
+                        super::unexpected_warn(&format!(
+                            "Icmp6SendEcho2 failed: {err} (GetLastError={code})"
+                        ));
+                    }
+                    return Err(super::last_error_to_icmp(code));
                 }
-                let n = unsafe { IcmpParseReplies(reply.as_mut_ptr().cast(), reply_size) };
-                if n == 0 {
-                    return Err(IcmpErr::Timeout);
-                }
+                // 同 v4：直接读首个应答结构，不依赖 IcmpParseReplies。
+                // SAFETY: rc >= 1 保证缓冲开头有完整 ICMPV6_ECHO_REPLY_LH。
                 let r = unsafe { &*(reply.as_ptr() as *const ICMPV6_ECHO_REPLY_LH) };
+                super::icmp_debug(&format!(
+                    "Icmp6SendEcho2 dest={v6} rc={rc} status={} ({}) rtt={:.1}ms",
+                    r.Status,
+                    super::icmp_status_name(r.Status),
+                    t0.elapsed().as_secs_f64() * 1000.0
+                ));
                 match super::classify_status(r.Status) {
+                    Some(e) => {
+                        if !super::is_known_status(r.Status) {
+                            super::unexpected_warn(&format!(
+                                "unexpected Icmp6SendEcho2 reply Status={}",
+                                r.Status
+                            ));
+                        }
+                        Err(e)
+                    }
                     // ICMPV6_ECHO_REPLY 无 TTL 字段 → 0（与 Windows raw ICMPv6 收包一致）；
                     // 结构也无 DataSize 字段（仅 Address/Status/RoundTripTime），应答数据
                     // 回显请求载荷 → 总字节 = ICMPv6 头 8 + 载荷长度。
-                    Some(e) => Err(e),
                     None => Ok((0, 8 + payload.len())),
                 }
             }

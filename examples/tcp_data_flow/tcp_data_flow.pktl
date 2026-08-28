@@ -1,0 +1,42 @@
+# 配方 demo：TCP 数据传输流程（数据发送 → 数据确认）
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine tcp_data_flow                    # 概览
+#   prping packet tcp_data_flow 127.0.0.1:80 --wait 1
+#     （目标需有 TCP 服务监听，如 prping server 127.0.0.1:80 或 nginx 等；
+#       ip/port 默认 127.0.0.1:80 可注入 -p ip=...,port=...）
+#
+# 学习要点：
+#   - TCP 数据传输基于序列号和确认号
+#   - PSH|ACK 标志组合用于数据推送
+#   - ACK 标志用于数据确认
+#   - 滑动窗口机制实现流量控制
+#   - 累积确认机制简化确认过程
+#
+# TCP 数据传输过程：
+#   1. 发送方发送数据（PSH|ACK，seq=X, ack=Y）
+#   2. 接收方确认数据（ACK，seq=Y, ack=X+len）
+#   3. 发送方发送更多数据（PSH|ACK，seq=X+len, ack=Y）
+#   4. 接收方确认数据（ACK，seq=Y, ack=X+2*len）
+#
+# TCP 标志位说明：
+#   - SYN: 同步序列号（连接建立）
+#   - ACK: 确认号有效
+#   - PSH: 推送数据（立即发送，不缓冲）
+#   - FIN: 结束连接
+#   - RST: 重置连接
+#
+# 窗口机制：
+#   - 接收方通告窗口大小（window field）
+#   - 发送方不能发送超过窗口大小的数据
+#   - 窗口缩放选项（Window Scale）支持大窗口
+
+global:
+- name: cseq      # 客户端 TCP 序列号
+  init: 0x1000
+- name: sseq      # 服务端 TCP 序列号
+  init: 0x2000
+
+recipe:
+- pkg: tcp_data.pkt   # 步骤 1：TCP 数据发送（PSH|ACK）
+- pkg: tcp_ack.pkt    # 步骤 2：TCP 数据确认（ACK）

@@ -16,8 +16,10 @@ use termcolor::WriteColor;
 
 use crate::engine::eng::{libs_display, value_display};
 use crate::output::{
-    print_cyan, print_dim, print_green, print_magenta, print_yellow, spaces, writeln_orange,
+    print_bold, print_cyan, print_dim, print_green, print_magenta, print_red, print_yellow,
+    spaces, writeln_orange,
 };
+use crate::util::hex_str;
 
 /// 折行宽度回退值（stdout 非 tty 或探测失败时）。
 const WRAP_DEFAULT: usize = 100;
@@ -278,9 +280,9 @@ pub fn render_dissected<W: WriteColor>(
     if report.layers.is_empty() {
         if header.is_empty() {
             // 无标题行时与层栈行同缩进（2 空格），避免孤立的「 — 」前缀
-            print_red_plain(w, &format!("{}未能识别任何层", spaces(2)))?;
+            print_red(w, format!("{}未能识别任何层", spaces(2)))?;
         } else {
-            print_red_plain(w, &format!("{header} — 未能识别任何层"))?;
+            print_red(w, format!("{header} — 未能识别任何层"))?;
         }
         writeln!(w)?;
     } else {
@@ -328,18 +330,6 @@ fn render_proto_hit<W: WriteColor>(
         render_proto_hit(w, sub, indent + 2)?;
     }
     Ok(())
-}
-
-fn print_red_plain<W: WriteColor>(w: &mut W, text: &str) -> io::Result<()> {
-    w.set_color(termcolor::ColorSpec::new().set_fg(Some(termcolor::Color::Red)))?;
-    write!(w, "{text}")?;
-    w.reset()
-}
-
-fn print_bold_plain<W: WriteColor>(w: &mut W, text: &str) -> io::Result<()> {
-    w.set_color(termcolor::ColorSpec::new().set_bold(true))?;
-    write!(w, "{text}")?;
-    w.reset()
 }
 
 /// 16 字节一行的 hexdump：偏移 + hex + ASCII。
@@ -399,10 +389,6 @@ fn layer_raw(l: &Layer) -> Option<&[u8]> {
         Layer::Dns(f) => f.raw.as_deref(),
         Layer::Raw(_) => None,
     }
-}
-
-fn hex_str(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// 地址展示：域名解析来源时显示 `dns(host->ip)`，否则显示 IP。
@@ -804,11 +790,12 @@ pub(crate) fn render_module_header<W: WriteColor>(
     module: &Module,
     total: usize,
     libs: &[PathBuf],
+    params: &[(String, String)],
 ) -> io::Result<()> {
-    print_magenta(w, "packet-dsl engine")?;
+    print_magenta(w, "prping engine")?;
     writeln!(w)?;
     print_cyan(w, "module: ")?;
-    print_bold_plain(w, &module.name)?;
+    print_bold(w, &module.name)?;
     if let Some(path) = &module.path {
         print_dim(w, format!("{}(file: {})", spaces(2), path.display()))?;
     }
@@ -833,16 +820,22 @@ pub(crate) fn render_module_header<W: WriteColor>(
                 None => i.module.clone(),
             })
             .collect();
-        print_dim(w, format!("imports: {}   ", imps.join(", ")))?;
+        print_dim(w, format!("imports: {}", imps.join(", ")))?;
+        write!(w, "  ")?;
     }
     if !module.exports.is_empty() {
         let exps: Vec<&str> = module.exports.iter().map(|(n, _)| n.as_str()).collect();
-        print_dim(w, format!("exports: {}   ", exps.join(", ")))?;
+        print_dim(w, format!("exports: {}", exps.join(", ")))?;
+        if module.default.is_some() {
+            write!(w, "  ")?;
+        }
     }
     if module.default.is_some() {
         print_dim(w, "default: yes")?;
     }
-    writeln!(w)?;
+    if !module.imports.is_empty() || !module.exports.is_empty() || module.default.is_some() {
+        writeln!(w)?;
+    }
     if !module.defs.is_empty() {
         let defs: Vec<&str> = module.defs.iter().map(|d| d.name.as_str()).collect();
         print_dim(w, format!("defs: {}", defs.join(", ")))?;
@@ -861,6 +854,11 @@ pub(crate) fn render_module_header<W: WriteColor>(
             print_dim(w, format!("func {}({})", f.name, params.join(", ")))?;
             writeln!(w)?;
         }
+    }
+    if !params.is_empty() {
+        let p_str: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        print_dim(w, format!("params: {}", p_str.join(", ")))?;
+        writeln!(w)?;
     }
     print_dim(w, format!("packets: {total}"))?;
     writeln!(w)?;

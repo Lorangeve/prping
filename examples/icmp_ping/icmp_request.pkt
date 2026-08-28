@@ -1,0 +1,29 @@
+# ICMP Ping 步骤 1：ICMP Echo Request（ping 请求）
+# 学习 ICMP 协议的基础用法
+#
+# ICMP (Internet Control Message Protocol) 是网络诊断协议：
+#   - Type=8: Echo Request（ping 请求）
+#   - Type=0: Echo Reply（ping 应答）
+#   - Type=3: Destination Unreachable（目标不可达）
+#   - Type=11: Time Exceeded（TTL 超时，traceroute 使用）
+#
+# 字段说明：
+#   - id: 标识符，用于匹配请求和应答（同一 ping 会话使用相同 id）
+#   - seq: 序列号，用于区分同一会话中的不同 ping 包
+#   - payload: 载荷数据，ping 通常填充时间戳和序号
+#
+# 运行：sudo prping packet icmp_request 127.0.0.1 --raw --wait 1
+# （--raw 发原始 ICMP 包需 root/cap_net_raw；ICMP 无端口，用裸 HOST 即可）
+# 目标地址可注入：-p ip=127.0.0.1
+
+# 构造 ICMP Echo Request（Type=8, Code=0）
+req = icmp(type=8, code=0, id=rand16(), seq=global("seq", 1),
+           payload="PING_TEST_DATA_1234567890")
+
+# 封装到 IPv4（proto=1 表示 ICMP，自动推导）
+use(req) |> ipv4(src="127.0.0.1", dst=params("ip", "127.0.0.1"),
+                  ttl=64)
+
+# 导出供 sniffer 匹配
+export:
+- req

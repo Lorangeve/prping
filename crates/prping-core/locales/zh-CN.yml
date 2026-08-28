@@ -16,6 +16,7 @@ udp:
   echo_hint: '提示: 目标端口需有回显服务（如 prping -s ADDR:PORT）才会回包'
 common:
   resolving: 解析 %{host} -> %{ip}
+  iterations_infinite: "无限次迭代 (预热 %{warmup}) ping 测试:"
   reply_from: '来自 '
   bytes: 字节=
   time: 时间=
@@ -47,6 +48,8 @@ bandwidth:
   udp_test: 'UDP 带宽测试:'
   sent_bytes: 已发送 = %{bytes} 字节，耗时 %{secs}秒
   received_bytes: 已接收 = %{bytes} 字节，耗时 %{secs}秒
+  bytes_human: '（%{bytes}）'
+  connections: '并发连接 = %{count}'
   bandwidth: 带宽 = %{mbps} Mbps
   progress:
     packets: "%{done}/%{total} 包（%{done_bytes}/%{total_bytes}）  %{mbps} Mbps"
@@ -78,12 +81,15 @@ engine:
   note_wait_reply: 'note: 等待匹配应答最多 %{secs}s'
   note_wait_recipe: 'note: 等待应答最多 %{secs}s（每步 wait: 覆盖）'
   note_bare_export: 'note: 裸层导出（无 TCP/UDP 传输、也无 eth/ipv4/ipv6 外层）无法发送，跳过——仅作 --eng 展示'
-  note_raw_fallback: 'note: 无 TCP/UDP 传输——改用原始套接字发送完整包'
+  note_bare_export_short: 'note: 裸层导出，跳过'
+  note_raw_fallback: 'note: 无 TCP/UDP 传输——改用原始套接字发送完整包（%{hint}）'
+  note_raw_fallback_short: 'note: 无 TCP/UDP 传输——raw 回退'
   note_raw_only: 'note: 无 TCP/UDP 传输层——本包只能经 raw 模式发送完整包（--raw / 配方 raw: true），payload 模式无法提取载荷'
+  auto_raw_upgrade: '提示：此配方/文件的所有导出包均无 TCP/UDP 传输层（如 ICMP/ARP），自动升级为 --raw 模式（需 root/cap_net_raw）'
   note_fakeip_target: 'note: 目标 %{ip} 是代理 fake-ip（198.18.0.0/15）——eth 原始帧绕过代理直发不可达；用 examples/network_icmp_bare/（裸 IP 走内核路由/代理）或关代理直连'
   note_fakeip_src: 'note: src 自动填充为 %{ip}（疑似代理 fake-ip 网关）——eth 原始帧绕过代理直发，真实网关会丢弃；用 examples/network_icmp_bare/（裸 IP 走内核路由/代理）'
   note_src_filled: 'note: src 自动填充 → %{ip}'
-  note_src_unfillable: 'note: src=0.0.0.0/:: 且无法自动填充本地地址——回包可能路由不回来；用 --params src=<本机 IP>'
+  note_src_unfillable: 'note: src=0.0.0.0/:: 无法自动填充——回包可能路由不回来；用 --params src=<本机 IP>'
   target_none: '链路层'
   note_linklayer_no_target: '链路层帧，无需 IP 目标（AF_PACKET 按帧内目的 MAC 直发）'
   note_arp_miss: 'note: 无法解析 %{next_hop} 的 MAC（ARP 缓存未命中）——用广播地址发送，回包可能无法到达'
@@ -94,9 +100,22 @@ engine:
   note_stack_payload_only: 'note: %{inner} 是 %{outer} 的载荷：ICMP/ARP 只应承载原始载荷'
   note_stack_uninferrable_proto: 'note: %{inner} 是 %{outer} 的载荷：无法推断协议号（proto=0 / next_header=59）——请显式指定或加传输层'
   note_stack_wrong_carrier: 'note: %{inner} 声明载体为 %{carriers}（#[rule]），但被包在 %{outer} 里'
+  err_no_packets: '没有可发送的包：文件既无默认导出，也无命名导出'
+  err_all_bare: '没有可发送的包：%{total} 个导出均为纯裸层（无 TCP/UDP 传输、也无 eth/ipv4/ipv6 外层）'
+  err_send_failed: '%{failed} / %{total} 个包发送失败'
 errors:
-  raw_socket: '无法创建 raw socket: %{error}。需要 root 权限或 cap_net_raw'
-  raw_socket_windows: '无法创建 raw socket: %{error}。Windows 的 raw socket 需要管理员权限，且 Win7 RTM（SP0）存在缺陷（WSAEINVAL 10022）——ICMP ping 已改用 ICMP API，但 MTU 探测/ICMP 路由跟踪在本机可能不可用'
+  # 权限提示（随平台条件编译，挂到所有需要 raw socket / 抓包权限的报错上）
+  priv_hint_linux: '用 `sudo` 运行，授予 cap_net_raw'
+  priv_hint_windows: '以管理员身份运行'
+  priv_hint_macos: '用 `sudo` 运行，或安装 Wireshark 的 ChmodBPF 授权 /dev/bpf*'
+  priv_hint_other: '需要 root 权限'
+  raw_socket: 'raw socket: %{error}（%{hint}）'
+  raw_socket_windows: '无法创建 raw socket: %{error}。Windows 的 raw socket 需要管理员权限（%{hint}），且 Win7 RTM（SP0）存在缺陷（WSAEINVAL 10022）——ICMP ping 已改用 ICMP API，但 MTU 探测/ICMP 路由跟踪在本机可能不可用'
+  raw_socket_macos: '无法创建 raw socket: %{error}（%{hint}）'
+  af_packet_socket: 'AF_PACKET: %{error}（%{hint}）'
+  raw_icmp_wait: 'raw ICMP: %{error}（%{hint}）'
+  pcap_open: '打开 %{platform} 设备 `%{dev}` 失败：%{error}（%{hint}）'
+  capture_promisc_failed: 'note: 未能开启混杂模式（需 CAP_NET_ADMIN）——只能收到本机地址/广播/组播帧'
   no_npcap: '未安装 Npcap（找不到 wpcap.dll）——packet --raw 需要 Npcap（https://npcap.com）；prping 其它功能不需要 Npcap'
   cannot_resolve: '无法解析主机: %{host}'
   invalid_bind: '无效的绑定地址: %{addr}。格式: host:port'
@@ -120,7 +139,7 @@ errors:
   eng_requires_file: "--eng 需要 .pkt 文件（或 --eng --lsp）"
   eng_lsp_no_file: "--lsp 不接受文件参数"
   pkg_requires_target: "--pkt 需要目标 HOST:PORT"
-  pkg_requires_port: "--pkt 需要目标端口（HOST:PORT）"
+  pkg_requires_port: "--pkt 需要目标端口（HOST:PORT）。提示：如果此配方不含 TCP/UDP 层（如 ICMP/ARP），请加 --raw：prping packet FILE HOST --raw"
   udp_requires_port: 'UDP 模式需要端口: HOST:PORT'
   bandwidth_requires_port: 带宽测试需要 HOST:PORT
   invalid_count: '无效的次数: %{value}（使用 N 或 Ns）'
@@ -139,14 +158,15 @@ errors:
   mtu_requires_no_port: "MTU 探测不接受端口: prping ping -m HOST"
   conflict_mtu_histogram: "--mtu 不支持 -H 直方图"
   conflict_trace_mode: "-t 不能与其他模式/测试/输出参数一起使用：%{opts}"
-  trace_requires_no_port: "trace 不接受端口: prping trace HOST"
-  tcp_trace_requires_port: "TCP 路由跟踪需要端口: prping trace --tcp HOST:PORT"
-  trace_udp_tcp_conflict: "--tcp 与 --udp 不能同时使用"
-  tcp_trace_windows: "TCP 路由跟踪暂不支持 Windows（raw TCP socket 受限）——请用 ICMP 路由跟踪（prping trace HOST）或 Npcap 工具"
+  trace_requires_no_port: "UDP 路由跟踪不接受端口: prping trace --udp HOST（目标端口从 33434 起自动递增）"
+  tcp_trace_requires_port: "TCP 路由跟踪需要端口: prping trace HOST:PORT"
+  trace_udp_tcp_conflict: "TCP 与 UDP 路由跟踪不能同时请求"
+  tcp_trace_npcap: "TCP 路由跟踪在 Windows 上需要 Npcap（找不到 wpcap.dll）——请安装 Npcap（https://npcap.com）后重试，或改用 ICMP 路由跟踪（prping trace HOST）"
+  tcp_trace_ipv6: "Windows 的 TCP 路由跟踪（Npcap 路径）仅支持 IPv4——IPv6 目标需要 ND 邻居解析，请改用 ICMP 路由跟踪（prping trace HOST）"
   raw_eth_macos: "macOS --raw 发送以太网帧（eth）需要 libpcap 权限（root 或 ChmodBPF 授权）——请用 sudo 运行，或改用不带 eth 层的包（ipv4/ipv6 外层可正常发送）"
   trace_no_local_addr: 无法确定本地源地址（UDP 路由探测失败）
-  max_hops_requires_trace: "-m 只能与 -t（路由跟踪）一起使用"
-  no_dns_requires_trace: "-d 只能与 -t（路由跟踪）一起使用"
+  max_hops_requires_trace: "-m 只能与 trace（路由跟踪）一起使用"
+  no_dns_requires_trace: "-d 只能与 trace（路由跟踪）一起使用"
   resolve_failed: 无法解析 %{host}
   engine_mode_required: 未指定模式：请用 --eng / --pkt / --ls / --hex / --pcap
   help_pkg_not_found: |-
@@ -170,7 +190,7 @@ cmd:
   latency: 延迟测试（TCP/UDP 回显往返）
   bandwidth: 带宽测试（TCP/UDP 吞吐）
   server: 启动测试服务端（服务 latency/bandwidth 客户端）
-  trace: 路由跟踪（ICMP echo + 递增 TTL 逐跳）
+  trace: 路由跟踪（ICMP echo；带端口自动 TCP SYN，-u 用 UDP）
   engine: 包引擎：分析 .pkt/.pktl、LSP、--ls/--hex/--pcap
   packet: 从 .pkt/.pktl 文件构建并发送网络包
 help:
@@ -192,14 +212,13 @@ help:
     udp: UDP 模式（默认 TCP）
     mtu: MTU 探测：ICMP DF + 变长载荷二分
     traceroute: 路由跟踪（traceroute）：ICMP echo + 递增 TTL 逐跳探测路径
-    tcp: TCP 路由跟踪：SYN 逐跳探测（需 HOST:PORT；目标回 SYN-ACK/RST 即到达）
     trace_udp: UDP 路由跟踪（经典 traceroute：33434 起递增端口；目标回端口不可达即到达）
-    max_hops: 最大跳数（默认 30，配合 -t）
-    no_dns: 跳过反向 DNS 解析（配合 -t）
+    max_hops: 最大跳数（默认 30）
+    no_dns: 跳过反向 DNS 解析
     eng: 引擎模式：分析 .pkt 文件并精美输出（加 --lsp 启动语言服务器）
     lsp: 为 .pkt 文件启动 LSP 语言服务器（配合 --eng；JSON-RPC over stdio）
     pkg: 从 .pkt 文件构建网络包并发送到 HOST:PORT（可省略，省略时按包内 dst/dport 推导；加 --raw 用原始套接字）
-    raw: 用原始套接字发送完整序列化包（Linux 需 root/cap_net_raw；Windows 需安装 Npcap）
+    raw: 用原始套接字发送完整序列化包（Linux 需 root/cap_net_raw；Windows 需安装 Npcap 并以管理员运行；macOS 需 root/ChmodBPF）
     iface: 原始以太网帧使用的网卡（默认 lo）
     params: 传给 .pkt 脚本的运行时参数（-p k=v,k2=v2；脚本内用 params("name") 读取）
     global: >-
@@ -252,7 +271,7 @@ help:
     示例:
       prping trace 8.8.8.8                   ICMP echo 路由跟踪
       prping trace -m 60 8.8.8.8
-      prping trace --tcp 8.8.8.8:443         TCP SYN 路由跟踪（ICMP 被过滤时可用）
+      prping trace 8.8.8.8:443               TCP SYN 路由跟踪（带端口自动启用，ICMP 被过滤时可用）
       prping trace --udp 8.8.8.8             UDP 路由跟踪（经典 traceroute，33434 起递增端口）
   footer_engine: |-
     示例:

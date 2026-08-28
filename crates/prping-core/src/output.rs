@@ -96,11 +96,9 @@ pub fn indent(level: usize) -> &'static str {
 
 /// 将文本填充到指定宽度，用于对齐。
 ///
-/// # 示例
-/// ```
-/// use prping_core::output::pad_to;
-/// assert_eq!(pad_to("hello", 10), "hello     ");
-/// ```
+/// `output` 模块为私有（lib 公开面最小化，只 re-export
+/// `output::{stderr, writeln_red, writeln_orange}`），此函数仅供 crate 内部
+/// 调用；等价于 `format!("{:<width$}", text)`。
 pub fn pad_to(text: &str, width: usize) -> String {
     format!("{:<width$}", text, width = width)
 }
@@ -121,6 +119,51 @@ pub fn print_dim<W: WriteColor>(w: &mut W, text: impl AsRef<str>) -> Result<()> 
     )?;
     write!(w, "{}", text.as_ref())?;
     w.reset()
+}
+
+/// 打印探测结果行（udp/latency/tcp/icmp 共用）。
+///
+/// 格式：`<label> <ip>:<port>: bytes=<N> time=<ms> [ttl=<N>] [warmup]`
+/// - `label`：标签文本（如 `"Reply from"` / `"Connecting to"`）
+/// - `addr`：SocketAddr（ip + port）；ICMP 无端口时 port=0 可隐藏
+#[allow(clippy::too_many_arguments)]
+pub fn print_probe_result<W: WriteColor>(
+    w: &mut W,
+    label: &str,
+    addr: std::net::SocketAddr,
+    size: Option<usize>,
+    rtt: std::time::Duration,
+    ttl: Option<u8>,
+    warmup: bool,
+    local: Option<std::net::SocketAddr>,
+) -> Result<()> {
+    print_green(w, label)?;
+    print_cyan(w, addr.ip().to_string())?;
+    if addr.port() != 0 {
+        write!(w, ":")?;
+        print_magenta(w, addr.port().to_string())?;
+    }
+    if let Some(sz) = size {
+        write!(w, ": {}{sz} ", t!("common.bytes"))?;
+    }
+    if warmup {
+        print_dim(w, format!(" {} ", t!("common.warmup")))?;
+    }
+    if let Some(l) = local {
+        write!(w, "{} {}:", t!("common.from"), l.ip())?;
+        print_dim(w, l.port().to_string())?;
+        write!(w, ": ")?;
+    }
+    write!(w, ": ")?;
+    print_yellow(
+        w,
+        format!("{}{:.2}ms", t!("common.time"), rtt.as_secs_f64() * 1000.0),
+    )?;
+    if let Some(t) = ttl {
+        write!(w, " {}={t}", t!("common.ttl"))?;
+    }
+    writeln!(w)?;
+    Ok(())
 }
 
 /// 服务端连接日志（三态：发送 -r 触发模式 / 接收 / 纯连接；着色统一在此）。

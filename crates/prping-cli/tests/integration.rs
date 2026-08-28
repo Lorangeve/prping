@@ -297,39 +297,22 @@ fn udp_ping_requires_port() {
 }
 
 #[test]
-fn traceroute_requires_no_port() {
-    // trace 带端口目标：lib run 分派层报错（先于 resolve/socket）
-    let out = run_check(&["trace", "127.0.0.1:9"]);
-    assert!(!out.status.success());
-    assert!(
-        stderr_str(&out).contains("does not take a port"),
-        "stderr: {}",
-        stderr_str(&out)
-    );
-}
-
-#[test]
-fn tcp_trace_requires_port() {
-    // trace --tcp 缺端口：lib run 分派层报错（先于 resolve/socket）
-    let out = run_check(&["trace", "--tcp", "127.0.0.1"]);
-    assert!(!out.status.success());
-    assert!(
-        stderr_str(&out).contains("requires a port"),
-        "stderr: {}",
-        stderr_str(&out)
-    );
-}
-
-#[test]
-fn udp_trace_conflicts_with_tcp() {
-    // trace --tcp --udp 互斥：lib run 分派层报错
-    let out = run_check(&["trace", "--tcp", "--udp", "127.0.0.1:80"]);
-    assert!(!out.status.success());
-    assert!(
-        stderr_str(&out).contains("cannot be used together"),
-        "stderr: {}",
-        stderr_str(&out)
-    );
+fn trace_tcp_flag_removed() {
+    // --tcp 标志已移除（带端口自动启用 TCP SYN）：未知参数，解析即报错
+    for args in [
+        &["trace", "--tcp", "127.0.0.1"][..],
+        &["trace", "--tcp", "127.0.0.1:80"][..],
+        &["trace", "-t", "127.0.0.1:80"][..],
+        &["trace", "--tcp", "--udp", "127.0.0.1:80"][..],
+    ] {
+        let out = run_check(args);
+        assert!(!out.status.success(), "args: {args:?}");
+        assert!(
+            stderr_str(&out).contains("--tcp") || stderr_str(&out).contains("-t"),
+            "args: {args:?}, stderr: {}",
+            stderr_str(&out)
+        );
+    }
 }
 
 #[test]

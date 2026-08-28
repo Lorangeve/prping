@@ -193,6 +193,12 @@ fmt-check:
 check:
     cargo check --workspace
 
+# Linux pcap feature 语法检查（`server -v` 抓包的 pcap 多设备路径 + `packet --raw`
+# 注入；需系统安装 libpcap-dev，如 Ubuntu: sudo apt install libpcap-dev）
+check-pcap:
+    cargo check --workspace --features pcap
+    cargo clippy --all-targets --workspace --features pcap -- -D warnings
+
 # 检查全部平台语法（本机 + Windows + Linux 交叉）
 [script]
 check-all:

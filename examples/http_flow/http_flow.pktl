@@ -1,0 +1,37 @@
+# 配方 demo：HTTP 请求/响应流程（GET 请求 → 200 OK 响应）
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine http_flow                    # 概览
+#   prping packet http_flow 127.0.0.1:80 --wait 1
+#     （目标需有 HTTP 服务监听，如 prping server 127.0.0.1:80 或 nginx 等；
+#       ip/port 默认 127.0.0.1:80 可注入 -p ip=...,port=...）
+#
+# 学习要点：
+#   - HTTP 协议是应用层协议，基于 TCP 传输
+#   - 请求格式：请求行 + 头部 + 空行 + 体
+#   - 响应格式：状态行 + 头部 + 空行 + 体
+#   - HTTP 是无状态协议（每次请求独立）
+#   - 常见方法：GET/POST/PUT/DELETE
+#   - 常见状态码：200/301/302/404/500
+#
+# HTTP 请求示例：
+#   GET /index.html HTTP/1.1
+#   Host: example.com
+#   Connection: keep-alive
+#
+# HTTP 响应示例：
+#   HTTP/1.1 200 OK
+#   Content-Type: text/html
+#   Content-Length: 36
+#
+#   <html><body>Hello</body></html>
+
+global:
+- name: cseq      # 客户端 TCP 序列号
+  init: 0x1000
+- name: sseq      # 服务端 TCP 序列号
+  init: 0x2000
+
+recipe:
+- pkg: http_request.pkt   # 步骤 1：HTTP GET 请求
+- pkg: http_response.pkt  # 步骤 2：HTTP 200 OK 响应

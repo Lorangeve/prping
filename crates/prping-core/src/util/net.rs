@@ -6,6 +6,9 @@ use std::net::{IpAddr, SocketAddr};
 #[cfg(not(windows))]
 use std::time::Duration;
 
+/// 通用接收缓冲区大小（64 KiB），用于带宽/服务端/抓包等场景。
+pub const RECV_BUF_SIZE: usize = 64 * 1024;
+
 /// 创建带大收发缓冲的 UDP socket（socket2 设置后包成 smol::Async）。
 ///
 /// 内核默认 UDP 缓冲（~212KB）在带宽测试突发下会溢出丢包，这里放大到 4MB。
@@ -105,6 +108,20 @@ pub async fn connect_first(
     }))
 }
 
+/// 带计时的 TCP 连接（connect_first + elapsed + TCP_NODELAY），供 tcp/latency Probe 共用。
+///
+/// 返回 `(stream, rtt)`；stream 已设 `TCP_NODELAY(true)`。
+pub async fn connect_timed(
+    addrs: &[SocketAddr],
+    source: Option<IpAddr>,
+) -> std::io::Result<(smol::Async<std::net::TcpStream>, std::time::Duration)> {
+    let start = std::time::Instant::now();
+    let stream = connect_first(addrs, source).await?;
+    stream.get_ref().set_nodelay(true)?;
+    let rtt = start.elapsed();
+    Ok((stream, rtt))
+}
+
 /// 阻塞 connect + 5s 超时。
 ///
 /// - Unix：`socket2::connect_timeout`（内部用 `poll`，各版本正确）。
@@ -196,7 +213,7 @@ fn win_connect_select(sock: &socket2::Socket, addr: &socket2::SockAddr) -> std::
 pub async fn drain_after_send(stream: &mut smol::Async<std::net::TcpStream>) {
     use smol::io::AsyncReadExt;
     let _ = stream.get_ref().shutdown(std::net::Shutdown::Write);
-    let mut buf = [0u8; 65536];
+    let mut buf = [0u8; RECV_BUF_SIZE];
     loop {
         match stream.read(&mut buf).await {
             Ok(0) | Err(_) => break,

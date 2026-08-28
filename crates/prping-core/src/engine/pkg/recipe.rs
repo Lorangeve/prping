@@ -14,8 +14,9 @@ use termcolor::{ColorChoice, StandardStream};
 use super::send::{SendCtx, fmt_target, send_module};
 use super::sniffer::{FVal, field_bytes, layer_kind, sniffer_extract};
 use super::{PkgOptions, SendMode};
+use crate::engine::eng::{aggregate_pkt_params, collect_pkt_params};
 use crate::engine::recipe::{ExtractAs, OnError};
-use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta};
+use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta, print_orange};
 
 pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     crate::engine::eng::ensure_dns_resolver();
@@ -36,16 +37,9 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     let per_step: Vec<Vec<(String, Option<packet_dsl::ast::Value>)>> = recipe
         .steps
         .iter()
-        .map(|s| crate::engine::eng::collect_pkt_params(&s.pkg).unwrap_or_default())
+        .map(|s| collect_pkt_params(&s.pkg).unwrap_or_default())
         .collect();
-    let mut param_names: Vec<String> = Vec::new();
-    for used in &per_step {
-        for (n, _) in used {
-            if !param_names.contains(n) {
-                param_names.push(n.clone());
-            }
-        }
-    }
+    let params_agg = aggregate_pkt_params(&per_step);
 
     let mut w = StandardStream::stdout(ColorChoice::Auto);
     let target_str = match opts.target {
@@ -55,7 +49,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     if opts.summary {
         // 摘要模式：不发头部，执行完只打一行结果
     } else {
-        print_magenta(&mut w, "packet-dsl recipe")?;
+        print_magenta(&mut w, "prping packet recipe")?;
         writeln!(&mut w)?;
         print_cyan(
             &mut w,
@@ -64,17 +58,45 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                 file.display(),
                 recipe.steps.len(),
                 recipe.globals.len(),
-                param_names.len(),
+                params_agg.len(),
                 target_str,
             ),
         )?;
         writeln!(&mut w)?;
-        if !param_names.is_empty() {
-            print_dim(&mut w, format!("params: {}", param_names.join(", ")))?;
+        if !params_agg.is_empty() {
+            print_dim(&mut w, "params:")?;
             writeln!(&mut w)?;
+            for (name, defaults, _) in &params_agg {
+                let has_default = !defaults.is_empty();
+                let def = match defaults.len() {
+                    0 => "required".to_string(),
+                    1 => format!("default: {}", crate::engine::eng::value_display(&defaults[0])),
+                    _ => format!(
+                        "default: {}",
+                        defaults
+                            .iter()
+                            .map(crate::engine::eng::value_display)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                // 无默认值（必需参数）用橙色警告，有默认值用灰色
+                if has_default {
+                    print_dim(
+                        &mut w,
+                        format!("{}- {name} ({def})", indent(1)),
+                    )?;
+                } else {
+                    print_orange(
+                        &mut w,
+                        format!("{}- {name} ({def})", indent(1)),
+                    )?;
+                }
+                writeln!(&mut w)?;
+            }
         }
         if let Some(secs) = opts.wait {
-            crate::output::print_yellow(&mut w, t!("engine.note_wait_recipe", secs = secs))?;
+            crate::output::print_orange(&mut w, t!("engine.note_wait_recipe", secs = secs))?;
             writeln!(&mut w)?;
         }
         writeln!(&mut w)?;
@@ -115,7 +137,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                 writeln!(&mut w)?;
             }
             if !sleep_interruptible(secs) {
-                crate::output::print_yellow(
+                crate::output::print_orange(
                     &mut w,
                     format!("{}interrupted during delay — stopping recipe", indent(1)),
                 )?;
@@ -179,8 +201,9 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
             fail_step(
                 &mut w,
                 &format!(
-                    "{} 没有可发送的包（无默认导出/命名导出）",
-                    step.pkg.display()
+                    "{}: {}",
+                    step.pkg.display(),
+                    t!("engine.err_no_packets")
                 ),
             )?;
             total_failed += 1;
@@ -327,7 +350,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         print_cyan(
             &mut w,
             format!(
-                "packet-dsl recipe: {file} — {steps} step(s){target}, {packets_sent} packet(s) sent, {total_failed} failed",
+                "prping packet recipe: {file} — {steps} step(s){target}, {packets_sent} packet(s) sent, {total_failed} failed",
                 file = file.display(),
                 steps = recipe.steps.len(),
                 target = target_phrase,

@@ -64,7 +64,7 @@ prping latency -l SIZE HOST:PORT   # 延迟测试（-l 缺省 64）
 prping bandwidth -l SIZE HOST:PORT # 带宽测试（-l 缺省 8k；--parallel 并发）
 prping server ADDR:PORT         # 服务端（同时支持延迟/带宽/接收模式）
 prping trace HOST               # 路由跟踪（ICMP echo + 递增 TTL，逐跳路径）
-prping trace --tcp HOST:PORT    # TCP SYN 路由跟踪（ICMP 被过滤时可用）
+prping trace HOST:PORT          # TCP SYN 路由跟踪（带端口自动启用，ICMP 被过滤时可用）
 prping trace --udp HOST         # UDP 路由跟踪（经典 traceroute，33434 起递增端口）
 prping ping -s 192.168.1.10 HOST  # 指定源地址/网卡（Linux 网卡名 → IPv4）
 prping --version                # 版本号
@@ -128,8 +128,10 @@ prping engine --pcap x.pcap --to-pkt dir/  # pcap → 每记录一个 .pkt + .pk
 |------|------|
 | `-m N` | 最大跳数 |
 | `-d` | 免 DNS 解析 |
-| `--tcp` | TCP SYN 逐跳（需端口；Windows 不支持） |
 | `--udp` | 经典 UDP 逐跳（33434 起递增端口） |
+
+> 带端口的 `trace HOST:PORT` 自动走 TCP SYN 逐跳（Windows 走 Npcap 注入，需安装
+> Npcap、仅 IPv4）；无端口为 ICMP echo。
 
 ### hex/raw 为基 + 层 bytes 直喂
 
@@ -204,9 +206,10 @@ LSP / pcap）集成在 prping 同一 binary 中（与测量模式互斥）。
   （IPv4；途中 Fragmentation Needed 报回的 MTU 一并展示）。
 - **路由跟踪**：`-t`（`--traceroute`）ICMP echo + 递增 TTL 逐跳探测路径（每跳 3 次、
   反向 DNS、超时 `*`；`-m` 最大跳数默认 30、`-d` 跳过 DNS；目标回显即停止，
-  未到达返回非零退出码；IPv4/IPv6）。`trace --tcp HOST:PORT` 用 **TCP SYN** 变体
-  （每探测独立源端口按 (sport,dport) 匹配；目标回 SYN-ACK/RST 即到达）——ICMP 被
-  过滤时仍可用；Unix 支持，Windows 受限（raw TCP socket 禁止，报错提示）。
+  未到达返回非零退出码；IPv4/IPv6）。**带端口自动启用 TCP SYN 变体**
+  （`trace HOST:PORT`：每探测独立源端口按 (sport,dport) 匹配；目标回 SYN-ACK/RST
+  即到达）——ICMP 被过滤时仍可用；Unix 走 raw socket，
+  Windows 走 Npcap 注入（需安装 Npcap，仅 IPv4）。
   `trace --udp HOST` 用经典 **UDP** 变体（33434 起递增目标端口，内核构 UDP 头；
   目标回 ICMP Port Unreachable 即到达）——跨平台可用。
 - **源绑定**：`-s ADDR|IFACE` 指定探测源地址（TCP/UDP/ICMP/延迟/带宽全模式；

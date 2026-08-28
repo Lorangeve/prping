@@ -672,16 +672,11 @@ fn read_ident_at(s: &str, b: &[u8], pos: usize) -> Option<(String, usize)> {
 
 /// `params: k=v,k2=v2`（与 `--params` 同格式）。
 fn parse_params_list(v: &str, line: usize) -> anyhow::Result<Vec<(String, String)>> {
-    let mut out = Vec::new();
-    for pair in v.split(',') {
-        let pair = pair.trim();
-        if pair.is_empty() {
-            continue;
-        }
-        let (k, val) = pair
-            .split_once('=')
-            .ok_or_else(|| err(line, format!("`params` 需要 `k=v,k2=v2`，得到 `{v}`")))?;
-        out.push((k.trim().to_string(), val.trim().to_string()));
+    let out: Vec<_> = crate::util::parse_kv_pairs(v)
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    if out.is_empty() && !v.trim().is_empty() {
+        return Err(err(line, format!("`params` 需要 `k=v,k2=v2`，得到 `{v}`")));
     }
     Ok(out)
 }

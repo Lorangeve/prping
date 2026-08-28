@@ -125,12 +125,13 @@ pub use send::{derive_target, patch_zero_src};
 pub use sniffer::{SnifferMatcher, sniffer_match, sniffer_match_with};
 
 pub(crate) use send::print_raw_only_hint;
+pub use send::raw_only;
 pub(crate) use sniffer::{reply_field_names, sniffer_field_names};
 
 // ── 平台无关工具 ──────────────────────────────────────────────
 
 /// 到达 `target` 的本地源地址（UDP connect 路由探测，不发数据）。
-/// `trace --tcp` 的 TCP 伪头部校验和也用它取源 IP。
+/// trace TCP SYN 的 TCP 伪头部校验和也用它取源 IP。
 pub fn local_ip_for(target: &SocketAddr) -> Option<IpAddr> {
     let bind = if target.is_ipv4() {
         "0.0.0.0:0"

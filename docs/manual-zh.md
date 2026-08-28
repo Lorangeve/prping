@@ -352,7 +352,9 @@ prping server -v -a --filter "tcp port 53" 0.0.0.0:8080  # 全帧抓包 + 只显
 - Windows 上为 Win7 兼容保留
 - `-v` 时启动 raw 抓包显示完整帧（eth/IP/TCP 头 + 握手）。默认只显示发往监听
   端口的本服务流量（Linux 需 root/cap_net_raw，Windows 需装 Npcap，macOS 需
-  root 或 ChmodBPF）
+  root 或 ChmodBPF）。Linux 默认 AF_PACKET 单 socket 全接口抓取（启动行显示
+  「全接口」）；以 `--features pcap` 构建时改走与 Windows/macOS 相同的
+  libpcap 多设备路径（启动行显示真实接口名列表）
 - `-a`/`--capture-all` 全帧模式：不做端口/地址过滤，显示网卡上所有可见帧——
   ARP、ICMP（如 ping 本机）、广播/组播、其他端口流量，以及本机出向回包；
   `[frame]` 摘要行对 ARP/ICMP 等非 TCP-UDP 帧也给出地址级摘要。Linux 下尽力
@@ -573,8 +575,9 @@ prping ping -m --json 8.8.8.8          # 机器可读
 
 **用途**：逐跳查看数据包到目标的转发路径——定位丢包/高延迟发生在哪一跳、
 发现不对称路由、验证多线出口。默认对标 Windows `tracert`（ICMP echo）；
-`--tcp` 用 TCP SYN 变体（对标 `tcptraceroute`/`tracetcp`）、`--udp` 用经典
-UDP 变体（对标 Unix `traceroute`）——ICMP 被防火墙过滤时依然可用。
+**目标带端口时自动用 TCP SYN 变体**（与 `ping` 的「带端口 → TCP」一致），
+`--udp` 用经典 UDP 变体（对标 Unix `traceroute`）——
+ICMP 被防火墙过滤时依然可用。
 
 ```bash
 prping trace www.baidu.com          # ICMP echo，默认最多 30 跳
@@ -582,7 +585,7 @@ prping trace -m 20 8.8.8.8          # 最多 20 跳
 prping trace -d 8.8.8.8             # 不解析主机名（只显示 IP）
 prping trace --json 8.8.8.8         # 机器可读（每跳一行 + 汇总行）
 prping trace -6 ::1                 # IPv6（Hop Limit 递增）
-prping trace --tcp 8.8.8.8:443      # TCP SYN（需 HOST:PORT；目标回 SYN-ACK/RST 即到达）
+prping trace 8.8.8.8:443            # TCP SYN（带端口自动启用；目标回 SYN-ACK/RST 即到达）
 prping trace --udp 8.8.8.8          # UDP（经典 traceroute，33434 起递增端口）
 ```
 
@@ -608,7 +611,7 @@ prping trace --udp 8.8.8.8          # UDP（经典 traceroute，33434 起递增�
    按 id/seq 匹配确认归属（与 `tracert` 同款校验）
 3. 目标本身回 ICMP echo reply → 到达，停止跟踪
 
-**TCP SYN（`--tcp HOST:PORT`）**：
+**TCP SYN（`trace HOST:PORT` 带端口自动启用）**：
 
 1. 发 TCP SYN，TTL 逐跳递增；每个探测用独立源端口，按内嵌 TCP 头的
    (sport, dport) 匹配归属（无需 seq）
@@ -616,7 +619,8 @@ prping trace --udp 8.8.8.8          # UDP（经典 traceroute，33434 起递增�
    （端口开）或 **RST**（端口关）即到达——两种都算到达目标
 3. 收包用两个 socket：raw ICMP（Time Exceeded）+ raw TCP（SYN-ACK/RST），
    `poll` 同时等待；TCP 伪头部校验和按 UDP 路由探测得到的本地源地址计算
-4. **Windows 不支持**（raw TCP socket 受限），`trace --tcp` 报错提示
+4. **Windows 走 Npcap**（raw TCP socket 受限）：经 Npcap 注入完整帧 + 抓包收回复，
+   需安装 Npcap（未装时提示安装）；仅支持 IPv4 目标
 
 **UDP（`--udp HOST`，经典 Unix traceroute）**：
 
@@ -625,7 +629,7 @@ prping trace --udp 8.8.8.8          # UDP（经典 traceroute，33434 起递增�
 2. 中间路由回 Time Exceeded（内嵌原始 UDP 头，按 (sport, dport) 匹配归属）；
    目标回 **Port Unreachable**（type 3 code 3 / ICMPv6 type 1 code 4）即到达
 3. 只需一个 raw ICMP socket 收包；**跨平台可用**（Windows 支持普通 UDP +
-   raw ICMP，不像 `--tcp` 被禁止）
+   raw ICMP，TCP SYN 在 Windows 走 Npcap 路径）
 4. 目标 UDP 端口恰好开放（如 DNS 53）时回的是数据而非 ICMP——该探测显示 `*`
    （经典 traceroute 同样如此，选高段端口正是为避开）
 
@@ -636,8 +640,8 @@ prping trace --udp 8.8.8.8          # UDP（经典 traceroute，33434 起递增�
 - `-m N` 上限 255（TTL 字段上限），默认 30；`-d` 跳过反向 DNS
   （避免慢 DNS 拖慢整条路径）
 - 目标不回显/不答 SYN/不回端口不可达时跑满 `-m` 跳仍标记未到达 → 非零退出码
-- 需要 raw socket（root / `cap_net_raw`）；`--tcp` 的端口建议选常用开放端口
-  （如 80/443），被过滤时退化为 `*`；`--tcp` 与 `--udp` 互斥
+- 需要 raw socket（root / `cap_net_raw`）；TCP SYN 的端口建议选常用开放端口
+  （如 80/443），被过滤时退化为 `*`
 
 ---
 

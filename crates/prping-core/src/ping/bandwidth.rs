@@ -2,7 +2,7 @@
 
 use crate::output;
 use crate::stats::{self, HistogramSpec};
-use crate::util::{self, PingConfig};
+use crate::util::{self, PingConfig, TCP_RECEIVE_TRIGGER, RECV_BUF_SIZE};
 use rust_i18n::t;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use std::io::{IsTerminal, Write};
@@ -38,6 +38,57 @@ enum ProgressKind {
 }
 
 const BAR_WIDTH: usize = 20;
+
+/// 吞吐量采样器：每 ~100ms 记录一次窗口吞吐量 (elapsed_secs, mbps)。
+struct ThroughputSampler {
+    start: Instant,
+    last_sample: Instant,
+    last_bytes: u64,
+    samples: Vec<(f64, f64)>,
+}
+
+impl ThroughputSampler {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            start: now,
+            last_sample: now,
+            last_bytes: 0,
+            samples: Vec::new(),
+        }
+    }
+
+    /// 每次写入/读取后调用，传入当前累计字节数。
+    fn tick(&mut self, total_bytes: u64) {
+        let now = Instant::now();
+        if now.duration_since(self.last_sample) >= Duration::from_millis(100) {
+            let elapsed = now.duration_since(self.start).as_secs_f64();
+            let window_bytes = total_bytes.saturating_sub(self.last_bytes);
+            let window_secs = now.duration_since(self.last_sample).as_secs_f64();
+            if window_secs > 0.0 {
+                let mbps = window_bytes as f64 * 8.0 / (window_secs * 1_000_000.0);
+                self.samples.push((elapsed, mbps));
+            }
+            self.last_sample = now;
+            self.last_bytes = total_bytes;
+        }
+    }
+
+    fn finish(&mut self, total_bytes: u64) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.start).as_secs_f64();
+        let window_bytes = total_bytes.saturating_sub(self.last_bytes);
+        let window_secs = now.duration_since(self.last_sample).as_secs_f64();
+        if window_secs > 0.001 && window_bytes > 0 {
+            let mbps = window_bytes as f64 * 8.0 / (window_secs * 1_000_000.0);
+            self.samples.push((elapsed, mbps));
+        }
+    }
+
+    fn samples(&self) -> &[(f64, f64)] {
+        &self.samples
+    }
+}
 
 /// 构造进度条：时长模式按时间；次数模式按包（发送）/字节（接收）。
 fn make_progress(
@@ -223,14 +274,15 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
     if receive {
         let mut stream = util::connect_timeout(addr, cfg.source).await?;
         stream.get_ref().set_nodelay(true)?;
-        stream.write_all(&[0xFF]).await?;
+        stream.write_all(&[TCP_RECEIVE_TRIGGER]).await?;
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
         let target_bytes = deadline.map(|_| u64::MAX).unwrap_or(count * size as u64);
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; RECV_BUF_SIZE];
         let mut total: u64 = 0;
         let start = Instant::now();
         let mut prog = make_progress(duration, count, size as u64, true, cfg.quiet);
         let mut times = Vec::new();
+        let mut sampler = ThroughputSampler::new();
         while total < target_bytes {
             if util::interrupted() {
                 break;
@@ -251,8 +303,10 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             if target_bytes != u64::MAX && total > target_bytes {
                 total = target_bytes;
             }
+            sampler.tick(total);
             prog.update(0, total);
         }
+        sampler.finish(total);
         prog.finish(0, total);
         return report(ReportArgs {
             label: t!("bandwidth.tcp_test").to_string(),
@@ -263,6 +317,9 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             quiet: cfg.quiet,
             target: format!("{}:{}", cfg.host, cfg.port),
             received: cfg.receive,
+            parallel: 1,
+            throughput_timeline: sampler.samples(),
+            graph: cfg.graph,
         });
     }
 
@@ -275,6 +332,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let mut sent: u64 = 0;
         let start = Instant::now();
         let mut prog = make_progress(duration, count, size as u64, false, cfg.quiet);
+        let mut sampler = ThroughputSampler::new();
         loop {
             if util::interrupted() {
                 break;
@@ -291,11 +349,13 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                 times.push(t0.elapsed());
             }
             sent += 1;
+            sampler.tick(sent * size as u64);
             prog.update(sent, sent * size as u64);
         }
         // 优雅结束发送方向：避免 RST 清队列导致服务端统计偏小
         util::drain_after_send(&mut stream).await;
         drop(stream);
+        sampler.finish(sent * size as u64);
         prog.finish(sent, sent * size as u64);
         report(ReportArgs {
             label: t!("bandwidth.tcp_test").to_string(),
@@ -306,6 +366,9 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             quiet: cfg.quiet,
             target: format!("{}:{}", cfg.host, cfg.port),
             received: cfg.receive,
+            parallel: 1,
+            throughput_timeline: sampler.samples(),
+            graph: cfg.graph,
         })
     } else {
         // 并行连接：全局配额保证总量精确等于 count（修复 count < parallel 时发 0 包）
@@ -415,6 +478,9 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             quiet: cfg.quiet,
             target: format!("{}:{}", cfg.host, cfg.port),
             received: cfg.receive,
+            parallel: parallel as u16,
+            throughput_timeline: &[],
+            graph: cfg.graph,
         })
     }
 }
@@ -455,11 +521,12 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         );
         util::udp_send(&sock, &trigger, &addr).await?;
         let target = deadline.map(|_| u64::MAX).unwrap_or(count * size as u64);
-        let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); 65536];
+        let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); RECV_BUF_SIZE];
         let mut total: u64 = 0;
         let start = Instant::now();
         let mut prog = make_progress(duration, count, size as u64, true, cfg.quiet);
         let mut times = Vec::new();
+        let mut sampler = ThroughputSampler::new();
         while total < target {
             if util::interrupted() {
                 break;
@@ -479,6 +546,7 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                         times.push(t0.elapsed());
                     }
                     total += n as u64;
+                    sampler.tick(total);
                     prog.update(0, total);
                 }
                 Err(_) => break,
@@ -494,6 +562,9 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             quiet: cfg.quiet,
             target: format!("{}:{}", cfg.host, cfg.port),
             received: cfg.receive,
+            parallel: 1,
+            throughput_timeline: sampler.samples(),
+            graph: cfg.graph,
         });
     }
 
@@ -530,6 +601,9 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         quiet: cfg.quiet,
         target: format!("{}:{}", cfg.host, cfg.port),
         received: cfg.receive,
+        parallel: 1,
+        throughput_timeline: &[],
+        graph: cfg.graph,
     })
 }
 
@@ -543,6 +617,12 @@ pub(crate) struct ReportArgs<'a> {
     pub quiet: bool,
     pub target: String,
     pub received: bool,
+    /// 并发连接数（仅并行 TCP 模式 >1 时有意义）。
+    pub parallel: u16,
+    /// 吞吐量时间线采样：(elapsed_secs, window_mbps)。
+    pub throughput_timeline: &'a [(f64, f64)],
+    /// 是否渲染时间线图（`-g`）。
+    pub graph: bool,
 }
 
 fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
@@ -555,6 +635,9 @@ fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
         quiet,
         target,
         received,
+        parallel,
+        throughput_timeline,
+        graph,
     } = args;
     let secs = elapsed.as_secs_f64();
     let mbits = total_bytes as f64 * 8.0 / (secs * 1_000_000.0);
@@ -564,10 +647,6 @@ fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
         secs,
         mbps: mbits,
     };
-
-    if quiet {
-        return Ok(report);
-    }
 
     let mut w = output::stdout();
     if stats::json() {
@@ -583,6 +662,7 @@ fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
         return Ok(report);
     }
 
+    // quiet 模式只抑制进度条，不抑制汇总（与 latency/ping 的 -q 行为一致）
     println!();
     output::print_bold(&mut w, label)?;
     writeln!(&mut w)?;
@@ -600,6 +680,18 @@ fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
         )
     };
     writeln!(&mut w, "  {verb}")?;
+    // 人性化字节数（如 "800.00 KiB"），与原始字节数并列方便对比
+    if !quiet {
+        let human = crate::util::format_bytes(total_bytes);
+        writeln!(&mut w, "  {}", t!("bandwidth.bytes_human", bytes = human))?;
+    }
+    if parallel > 1 {
+        writeln!(
+            &mut w,
+            "  {}",
+            t!("bandwidth.connections", count = parallel)
+        )?;
+    }
     output::print_green(
         &mut w,
         format!(
@@ -610,6 +702,9 @@ fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
     if let Some(spec) = histogram {
         // 直方图直接消费耗时样本（不再临时构造 Stats）
         crate::stats::print_histogram(&mut w, times, spec)?;
+    }
+    if graph && !throughput_timeline.is_empty() {
+        crate::stats::print_throughput_timeline(&mut w, throughput_timeline)?;
     }
     Ok(report)
 }

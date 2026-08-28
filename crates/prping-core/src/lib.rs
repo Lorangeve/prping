@@ -22,7 +22,7 @@
 //!
 //! | 条件 | 模式 |
 //! |------|------|
-//! | `traceroute`（-t） | 路由跟踪（无端口） |
+//! | `traceroute`（trace 子命令） | 路由跟踪（无端口 ICMP；**带端口自动 TCP SYN**；`trace_udp` 经典 UDP） |
 //! | `mtu`（-M） | MTU 探测（无端口） |
 //! | `bandwidth` + 端口 | 带宽测试 |
 //! | `size`（-l）+ 端口 | 延迟测试 |
@@ -88,8 +88,8 @@ pub use output::{indent, pad_to, spaces, stderr, writeln_orange, writeln_red};
 pub use serve::{ServerReport, serve};
 pub use stats::{HistogramSpec, Stats, parse_histogram, set_json, set_pretty};
 pub use util::{
-    PingConfig, configure_executor_threads, interrupted, reset_interrupt, resolve_source,
-    set_interrupted,
+    PingConfig, configure_executor_threads, interrupted, parse_kv_pairs, resolve,
+    reset_interrupt, resolve_source, set_interrupted,
 };
 
 // 测量模块
@@ -107,8 +107,8 @@ pub use engine::eng::{
 pub use engine::pcap::{LinkType, PcapRecord, linktype_of, read_pcap, write_pcap};
 pub use engine::pkg::{
     PkgOptions, Reply, SendMode, SendOutcome, SnifferMatcher, Transport, derive_target,
-    extract_payload, patch_zero_src, send_packets, send_recipe, sniffer_match, sniffer_match_with,
-    step_send_mode,
+    extract_payload, patch_zero_src, raw_only, send_packets, send_recipe, sniffer_match,
+    sniffer_match_with, step_send_mode,
 };
 pub use engine::recipe::{
     Extract, ExtractAs, FromSpec, GlobalDecl, OnError, Recipe, Step, StepRaw, parse as parse_recipe,
@@ -168,11 +168,13 @@ pub enum PrpingError {
     ConflictV4V6,
     #[error("MTU probe does not take a port: --mtu HOST")]
     MtuRequiresNoPort,
-    #[error("traceroute does not take a port: trace HOST")]
+    #[error(
+        "UDP traceroute does not take a port: trace --udp HOST (destination ports auto-increment from 33434)"
+    )]
     TracerouteRequiresNoPort,
-    #[error("TCP traceroute requires a port: trace --tcp HOST:PORT")]
+    #[error("TCP traceroute requires a port: trace HOST:PORT")]
     TcpTraceRequiresPort,
-    #[error("--tcp and --udp cannot be used together")]
+    #[error("TCP and UDP traceroute cannot be requested together")]
     TraceProtoConflict,
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -219,17 +221,11 @@ pub fn run(
 
     // 路由跟踪模式（trace）
     if cfg.traceroute {
-        if cfg.trace_tcp && cfg.trace_udp {
-            return Err(PrpingError::TraceProtoConflict);
-        }
-        if cfg.trace_tcp {
-            if cfg.port == 0 {
-                return Err(PrpingError::TcpTraceRequiresPort);
-            }
-        } else if cfg.port != 0 {
-            // ICMP / UDP 变体都不接受端口（UDP 端口自动从 33434 起递增）
-            return Err(PrpingError::TracerouteRequiresNoPort);
-        }
+        // 探测协议决策：显式 --tcp/--udp 各自校验；未指定时带端口自动 TCP
+        // SYN（与 ping 的「带端口 → TCP」一致），无端口默认 ICMP echo。
+        let probe = resolve_trace_probe(cfg.trace_tcp, cfg.trace_udp, cfg.port)?;
+        cfg.trace_tcp = probe == TraceProbe::Tcp;
+        cfg.trace_udp = probe == TraceProbe::Udp;
         let report = ping::trace::traceroute(&cfg)?;
         return Ok(OutcomeKind::Traceroute(report));
     }
@@ -281,9 +277,11 @@ pub fn run(
     Ok(OutcomeKind::Ping(stats))
 }
 
+/// UDP 数据报负载上限（IPv4 65507 / IPv6 65527，取保守值）。
+pub const MAX_UDP: usize = 65507;
+
 /// UDP 数据报负载上限（IPv4 65507 / IPv6 65527，取保守值），超限时截断并告警。
 fn clamp_udp_size(size: usize, udp: bool, on_warning: &mut impl FnMut(PrpingWarning)) -> usize {
-    const MAX_UDP: usize = 65507;
     if udp && size > MAX_UDP {
         on_warning(PrpingWarning::UdpSizeClamped {
             requested: size,
@@ -292,4 +290,91 @@ fn clamp_udp_size(size: usize, udp: bool, on_warning: &mut impl FnMut(PrpingWarn
         return MAX_UDP;
     }
     size
+}
+
+/// 路由跟踪探测协议（`run` 分派层的最终决策结果）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceProbe {
+    /// ICMP echo（`trace HOST`，默认）。
+    Icmp,
+    /// TCP SYN（`trace HOST:PORT` 带端口自动；库调用方可显式置 `trace_tcp`）。
+    Tcp,
+    /// 经典 UDP（`trace --udp HOST`，33434 起递增端口）。
+    Udp,
+}
+
+/// trace 探测协议决策与校验：`--tcp` 需端口、`--udp` 不接受端口、两者互斥；
+/// 未显式指定协议时**带端口自动启用 TCP SYN**（与 ping 的「带端口 → TCP」一致），
+/// 无端口默认 ICMP echo。
+fn resolve_trace_probe(
+    trace_tcp: bool,
+    trace_udp: bool,
+    port: u16,
+) -> Result<TraceProbe, PrpingError> {
+    if trace_tcp && trace_udp {
+        return Err(PrpingError::TraceProtoConflict);
+    }
+    if trace_tcp {
+        if port == 0 {
+            return Err(PrpingError::TcpTraceRequiresPort);
+        }
+        return Ok(TraceProbe::Tcp);
+    }
+    if trace_udp {
+        if port != 0 {
+            return Err(PrpingError::TracerouteRequiresNoPort);
+        }
+        return Ok(TraceProbe::Udp);
+    }
+    Ok(if port != 0 {
+        TraceProbe::Tcp
+    } else {
+        TraceProbe::Icmp
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_probe_explicit_modes() {
+        // --tcp 需端口
+        assert!(matches!(
+            resolve_trace_probe(true, false, 80),
+            Ok(TraceProbe::Tcp)
+        ));
+        assert!(matches!(
+            resolve_trace_probe(true, false, 0),
+            Err(PrpingError::TcpTraceRequiresPort)
+        ));
+        // --udp 不接受端口（33434 起自动递增）
+        assert!(matches!(
+            resolve_trace_probe(false, true, 0),
+            Ok(TraceProbe::Udp)
+        ));
+        assert!(matches!(
+            resolve_trace_probe(false, true, 80),
+            Err(PrpingError::TracerouteRequiresNoPort)
+        ));
+        // --tcp 与 --udp 互斥
+        assert!(matches!(
+            resolve_trace_probe(true, true, 80),
+            Err(PrpingError::TraceProtoConflict)
+        ));
+    }
+
+    #[test]
+    fn trace_probe_auto_from_port() {
+        // 带端口且未指定协议 → 自动 TCP SYN（与 ping 的「带端口 → TCP」一致）
+        assert!(matches!(
+            resolve_trace_probe(false, false, 443),
+            Ok(TraceProbe::Tcp)
+        ));
+        // 无端口 → ICMP echo（默认）
+        assert!(matches!(
+            resolve_trace_probe(false, false, 0),
+            Ok(TraceProbe::Icmp)
+        ));
+    }
 }

@@ -254,16 +254,6 @@ fn ping_config() -> PingConfig {
 }
 
 #[test]
-fn run_traceroute_requires_no_port() {
-    // 默认 ICMP trace 不接受端口：分派层错误（先于 socket 创建，离线可测）
-    let mut cfg = ping_config();
-    cfg.traceroute = true;
-    cfg.port = 80;
-    let err = run(&cfg, |_| {}).expect_err("should fail");
-    assert!(matches!(err, PrpingError::TracerouteRequiresNoPort));
-}
-
-#[test]
 fn run_tcp_trace_requires_port() {
     // --tcp 必须带端口（HOST:PORT）：分派层错误（先于 socket 创建，离线可测）
     let mut cfg = ping_config();
