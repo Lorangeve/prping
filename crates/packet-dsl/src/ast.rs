@@ -307,38 +307,71 @@ pub enum AttrArg {
     },
 }
 
-/// `sniffer:` 回包匹配声明（`--pkt --wait` 校验应答），与 `export:` 同风格的列表：
+/// `sniffer:` 回包/监听匹配声明（`--pkt --wait` 校验应答、`--listen` 监听规则），
+/// 与 `export:` 同风格的列表；**顶层列表 = 隐式 OR**（向后兼容）。
 ///
 /// ```pkt
 /// sniffer:
 ///   - match icmp(type=0, id=id, seq=seq)
+///   - and(match udp(dport=53), match http(method="GET"))
 /// ```
 ///
-/// 每个 `match 层(字段=值, ...)` 是一个匹配子句：回包反解后必须满足该子句全部等式；
-/// 多子句时**任一命中**即匹配成功。匹配值：
+/// 每个 `match 层(条件, ...)` 是一个匹配子句：反解后必须满足该子句全部条件。
+/// 匹配值（字段等式右值）：
 /// - 字面量（Int/Hex/Str）= 常量比较（如 `type=0`：回包 icmp.type == 0）；
-/// - 裸 Ident = 引用**发包同层同名字段**（如 `id=id`：回包 icmp.id == 发包 icmp.id）；
+/// - 裸 Ident = 引用**发包同层同名字段**（如 `id=id`：回包 icmp.id == 发包 icmp.id；
+///   监听模式无发包，构建期报错）；
 /// - 值表达式（字节原语 / 值函数 / `params(...)` / 字节列表）= **字节级比较**
 ///   （如 `id=be16(0x1234)`：求值为字节后与回包字段字节比较——函数最终算出的
 ///   也是字节，可直接复用已写好的值函数）。
 #[derive(Debug, Clone)]
 pub struct SnifferSpec {
-    /// 匹配子句列表（任一命中即匹配）。
-    pub clauses: Vec<SnifferClause>,
+    /// 顶层匹配谓词列表（任一命中即匹配 = 隐式 OR）。
+    pub clauses: Vec<SnifferPred>,
     pub span: Span,
 }
 
-/// 单个匹配子句：`match 层(字段=值, ...)`。
+/// 匹配谓词：单个 match 子句或 `and`/`or`/`not` 组合（与 `#[rule]` 同构）。
+#[derive(Debug, Clone)]
+pub enum SnifferPred {
+    /// `match 层(条件, ...)`：层内全部条件 AND。
+    Clause(SnifferClause),
+    /// `and(...)`：全部子谓词满足。
+    And(Vec<SnifferPred>),
+    /// `or(...)`：任一子谓词满足。
+    Or(Vec<SnifferPred>),
+    /// `not(...)`：子谓词不满足（监听/回包反解后整包判定；`#[rule]` 侧不支持）。
+    Not(Box<SnifferPred>),
+}
+
+/// 单个匹配子句：`match 层(条件, ...)`。
 #[derive(Debug, Clone)]
 pub struct SnifferClause {
-    /// 期望的回包层类型（eth/arp/ipv4/ipv6/icmp/tcp/udp/http/dns）。
+    /// 期望的层类型（eth/arp/ipv4/ipv6/icmp/tcp/udp/http/dns 或 proto 命中名）。
     pub layer: String,
-    /// (字段名, 匹配值)。
-    pub fields: Vec<(String, SnifferValue)>,
+    /// 层内匹配条件列表（全部 AND）。
+    pub items: Vec<SnifferItem>,
     pub span: Span,
 }
 
-/// sniffer 匹配值。
+/// 层内匹配条件。
+#[derive(Debug, Clone)]
+pub enum SnifferItem {
+    /// `字段=值` 等式（值语义见 [`SnifferValue`]）。
+    FieldEq { name: String, val: SnifferValue },
+    /// `ne(字段, 值)` 不等比较（值语义同等式；匹配时不报告命中字段）。
+    FieldNe { name: String, val: SnifferValue },
+    /// `mask(0xc0)`：层原始字节首字节位掩码 `(首字节 & mask) == mask`。
+    Mask(Value),
+    /// `startswith("...")`：层原始字节前缀匹配。
+    StartsWith(String),
+    /// `endswith("...")`：层原始字节后缀匹配。
+    EndsWith(String),
+    /// `contains("...")`：层原始字节子串匹配。
+    Contains(String),
+}
+
+/// sniffer 匹配值（字段等式右值）。
 #[derive(Debug, Clone)]
 pub enum SnifferValue {
     /// 常量比较。

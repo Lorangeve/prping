@@ -403,10 +403,13 @@ fn render_layer(l: &Layer) -> (String, bool) {
             )
         }
         Layer::Arp(f) => {
+            // RARP(3) 等未知 opcode 输出数值（arp(op=3, ...)），roundtrip 保真
+            // （此前 None 兜底 request() 会静默改写 op）
             let op = match f.op {
-                Some(ArpOp::Request) => "request()",
-                Some(ArpOp::Reply) => "reply()",
-                None => "request()",
+                Some(ArpOp::Request) => "request()".to_string(),
+                Some(ArpOp::Reply) => "reply()".to_string(),
+                Some(ArpOp::Other(n)) => n.to_string(),
+                None => "request()".to_string(),
             };
             let sha = f.sha.map(|m| m.to_string()).unwrap_or_default();
             let tha = f.tha.map(|m| m.to_string()).unwrap_or_default();
@@ -601,7 +604,7 @@ fn render_recipe(
     ));
     src.push_str("global:\nrecipe:\n");
     for (k, (i, rec)) in selected.iter().enumerate() {
-        src.push_str(&format!("- pkg: record_{:05}.pkt\n", i + 1));
+        src.push_str(&format!("- packet: record_{:05}.pkt\n", i + 1));
         if k > 0 {
             let prev = &selected[k - 1].1;
             let gap = ts_secs(rec, nano) - ts_secs(prev, nano);
@@ -614,7 +617,6 @@ fn render_recipe(
     }
     src
 }
-
 
 fn fmt_ts(rec: &crate::engine::pcap::PcapRecord, nano: bool) -> String {
     if nano {

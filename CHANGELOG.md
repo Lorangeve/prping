@@ -6,6 +6,64 @@
 
 ### 新增
 
+- **sniffer 统一谓词引擎**（packet-dsl `matchpred`，与 `#[rule]` 共享字段取值内核）：
+  `.pkt` 的 `sniffer:` 段支持 `and(...)`/`or(...)`/`not(...)` 组合（跨层 AND、取反）、
+  层内 `ne(字段, 值)` 不等、`mask(0xc0)`/`startswith`/`endswith`/`contains("...")`
+  字节谓词（层原始字节；proto 命中时作用于整个报文）；字段取值器
+  （`layer_field`/`layer_field_bytes`/`field_names`）下沉 packet-dsl，sniffer 匹配、
+  配方 `extract`、`reply()` 表达式、`--eng` 展示共用一套字段表（`opcode` 等不实际
+  解析的字段从表移除，改为构建期报错而非静默不匹配）
+- **配方 `extract` 支持 `sent.<层>.<字段>`**：从**本步发包**反解字段取值写 global
+  （无需 `wait`；`send_module` 新增 `on_sent` 回调收集完整序列化包字节），与
+  `reply.<层>.<字段>`（需 wait）并存
+- **裸 `--wait` 持续监听**（pktlang 对话的服务端，`--listen` 已并入）：**发送段先行**——文件有
+  可发送的导出先发送再监听（含 `reply()` 的应答模板自动跳过）；绑定 UDP 地址（显式
+  `HOST:PORT` 或按包内最外层 udp/tcp dport 推导），按 `.pkt` 的 sniffer 规则匹配
+  收到的数据报——命中**原样回显**（`✓ matched ... from peer` + 反解展示），未命中
+  忽略，Ctrl+C 优雅退出并打印匹配统计；监听规则不能引用发包字段（构建期报错）；
+  与客户端 `--wait` 配对可让两个进程用 export + sniffer 模拟通信
+- **`--wait --raw` 链路层监听完整版**：持续接收完整帧（Linux AF_PACKET /
+  macOS·Windows libpcap·Npcap，需 root/管理员），按 sniffer 统一谓词匹配，命中后按
+  **应答模板**（.pkt 默认导出，`reply("层","字段")` 取收到的帧字段）构造应答帧并
+  raw 注入；自注入/lo 双投递防护；`--iface` 选网卡；`resolve_sources_with_reply`
+  在 packet-dsl 支持带 reply 访问器求值；`open_af_packet`/混杂抽取到
+  `util::socket`（serve 抓包与监听共用）
+- **demo：`examples/icmp_echo_server/`**——纯 pktlang 的 ICMP echo 服务端
+  （`sudo prping packet --wait --raw server.pkt` 后 `prping ping` 即被应答），
+  附 README 说明三层监听对比
+- **配方 `wait:` 与 CLI `--wait` 同语义（监听触发并入，负数 = 无限等待）**：`.pktl`
+  步骤选项 `wait:` 无值或负数 = **无限等待**（无值 = 持续监听，等价 CLI 裸 `--wait`/
+  负数 `--wait`，如 `--wait=-2`）——本步不发送，用该 `.pkt` 的 sniffer 匹配外部到达的包，**命中后配方
+  继续**（触发后续步骤发包）；匹配包供 `extract` 取值，新增 **`reply.peer.ip`/
+  `reply.peer.port`** 对端来源（UDP 监听载荷无 udp 头，对端来自 socket peer）；
+  `raw: true|网卡` 走链路层监听。demo → `examples/dns_trigger/`（配方服务端：wait
+  监听匹配查询 → extract → 触发发包应答）
+- **`--count N` / 配方步骤 `count: N`（一次发多个包）**：`packet` 的 `--count N`
+  让每个包重复发送 N 次（`send_module` 循环层实现，输出/统计/--json 按 ×N）；
+  配方步骤 `count:` 覆盖 CLI（默认 1）；持续监听（裸 `--wait`）不支持 `--count > 1`；
+  `--count 0` 拒绝
+- **配方 `on_timeout` wait 超时处理**：步骤 `wait: 秒数` 超时未收到匹配应答 →
+  `on_timeout: retry [N]` **重发当前步骤的包 N 次**（每次重新 wait，任一次等到
+  回包即成功，默认 1；`recipe::OnTimeout::Retry`）或 `on_timeout: 文件` 打印
+  超时信息并**发送备选 .pkt**（发其它包），步骤继续；备选包注入当前
+  global/params（`pkg.rs::send_on_timeout_packet`）。demo →
+  `examples/wait_timeout/`（超时 → 发 fallback 包）
+- **配方步骤键改名 `pkg:` → `packet:`**（纯改名，旧键写 `pkg:` 报错提示改名；
+  裸文件名 `- 文件` 保留；convert.rs 转码配方与全部 examples/docs 同步）
+- **裸 IP 应答注入（macOS lo0 修复）**：`--wait --raw` 应答模板为裸 IPv4 外层
+  （无 eth 层）时，注入改走**内核 IP 栈路由**（`util::socket::inject_ip4`：Linux
+  IPPROTO_RAW+IP_HDRINCL 整包 / macOS 按报文协议开 raw socket 只发 IP 载荷），
+  回环与局域网均无需 MAC 解析——macOS lo0 的 DLT_NULL 裸 IP 帧也能被应答
+  （此前 eth 模板取不到 `reply("eth","src")` 逐帧报错跳过）；eth 外层应答仍走
+  链路层注入；三个监听 demo（icmp/dns/tcp）的应答模板统一改为裸 IP 外层
+- **demo：`examples/sniffer_chat/`**——双进程通信模拟（裸 `--wait` 服务端回显 +
+  客户端配方 `sent.`/`reply.` extract 全链路），附独立 README.md 说明
+- **demo 修正：`examples/icmp_mock/` 回环内核替答**——回环（macOS/Linux）上内核会替答
+  ICMP echo（纯回显的 reply 与内核替答逐字节相同，client 命中的是内核回包）：`reply.pkt`
+  把回包 seq 偏移 +1000 作配方标记，client sniffer 只匹配 1001/1002 排除内核替答；
+  client 步骤 2 加 `delay: 0.5` 给 server 重开下一轮抓包留时间（否则错过 req2 只命中 3 条）；
+  同步更新 README 与 `icmp_mock_recipe_simulation` 测试
+
 - **`trace` 带端口自动启用 TCP SYN，移除 `--tcp`/`-t` 标志**（`prping trace HOST:PORT`）：
   与 `ping` 的「带端口 → TCP」一致，分派层决策收敛为纯函数 `lib.rs::resolve_trace_probe`
   （`trace HOST` 仍是 ICMP echo 默认；`--udp` 不变、仍不接受端口）；`--tcp` 在 CLI 层
@@ -90,6 +148,33 @@
 
 ### 修复
 
+- **`bandwidth` 不带 `-n` 时发送 0 包**（`count=0` 在带宽循环里语义是「立即停止」，与 ping 的「0=无限」/latency 的「0→1」不一致；`--help` 示例本身就不带 `-n`）→ 缺省 `-n 1000`（对齐 psping 的 `-n` 默认），显式 `-n 0` 报错
+- **`ping HOST:PORT -l N` 静默派发到 latency（echo 协议）**（旧功能残留：`-l` + 端口组合被 lib `run()` 的模式嗅探误判；目标不是 prping server 时全部超时且输出上下文仍是 ping）→ CLI 层明确报错（`-l` 仅对无端口 ICMP ping 有效）
+- **MTU 探测：DF 位下载荷超过本机接口 MTU 时 `send_to` 报 EMSGSIZE 直接中止整个探测**（Linux `IP_PMTUDISC_DO`/BSD `IP_DONTFRAG` 下发送超 MTU 立即返回 EMSGSIZE，「路径 MTU < 本机 MTU」正是探测目标场景）→ 视为 FragNeeded 继续二分（`mtu=本地 MTU`，Linux 经 `IP_MTU` getsockopt 查询，其余平台记 None 不污染聚合；`ProbeOutcome::FragNeeded` 改携带 `Option<usize>`）
+- **服务端聚合报告忽略 UDP 会话时长**（`micros` 只由 TCP 连接累加，纯 UDP 流量时摘要恒 `in 0.00s (avg 0.00 Mbps)`）→ UDP 会话汇总时把会话耗时计入 `micros`
+- **drive 循环固定次数/时长模式末尾多睡一个完整 interval**（循环顶先睡再查 `done()`，`-n 2 -i 0.5` 实测 3.04s vs 理论 2.5s）→ 间隔改在 `advance()` 后、确认还有下一轮再睡；睡眠分片（100ms 检查 Ctrl+C），中断响应不再被长 interval 拖住
+- **Unix raw ICMP ping 单次收包、杂包即误判超时**（raw ICMP socket 收到本机所有 ICMP 流量，其他进程的回显/错误报文会让本次探测立刻记丢包；UDP ping 有循环过滤而 ICMP 没有）→ 循环收包直到 deadline，按 ident/seq 过滤；type 3/11 校验内嵌原始报文 id/seq 才归属
+- **`bandwidth -u` 发送方向从不排空服务端回显**（4MB 接收缓冲打满后服务端回显阻塞、本端发送被本地缓冲排空速率拖住，测的是本机速率而非链路吞吐）→ 并行 drain 任务持续丢弃回包（发送完成后停止）
+- **`bandwidth -H` 非法值静默忽略**（与 ping/latency 的 `bad_histogram` 校验不一致）→ 统一校验
+- **trace ICMP v4 截断归属与 v6 不一致**（v4 在 id/seq 不匹配但内嵌 dst 对时一律归 `want[0]`，v6 只在内嵌头缺失时兜底）→ 统一：仅内嵌 ICMP 头截断（<8B）时按 dst 归属，id/seq 不匹配不再误归属
+- **trace TCP SYN v6 目标端口 0x6000-0x6FFF（24576-28671）回包解析错位**（无头 TCP 数据的首字节=回复源端口高位，被 version-nibble 启发误判为带头）→ `tcp_frame_v6` 追加 next header=TCP 与 src==target 双校验再判定带头
+- **UDP ping 2 字节 seq 回绕**（>65535 次迭代后与陈旧回包撞号）→ 改 4 字节 u32 seq（负载最小 4 字节）
+- **JSONL seq 从预热数起且不连续**（warmup 不输出行但 seq 含预热偏移）→ 用有效迭代计数（跳过预热）从 1 连续编号
+- **`ping host:badport` 报迷惑的 DNS 解析错误** → `parse_target` 对 host 含冒号且端口非数字明确报「invalid port」
+- **`server 0.0.0.0:0` 打印「监听在 :0」** → 监听行移到 `serve()` 绑定后，打印实际端口
+- **`packet --wait`（持续监听）发送段先行失败会杀死监听**（纯监听场景被「本机暂无可发送对端」阻断）→ 降级为橙色警告并继续监听
+- **`listen_addr` 只取第一个包的 dport**（多 export 不同端口时静默只监听一个）→ 收集全部 dport，多个不同端口明确报错提示显式指定 ADDR:PORT
+- **trace 硬编码中文错误「无法获取本机路由地址」** → 改用 i18n `errors.trace_no_local_addr`（tcpwin 已在用）
+- **超长 ping 的 percentile/直方图口径**：采样窗口 10000 → 100000，窗口满后文本摘要/JSON 标注「基于最近 N 个样本」（min/max/avg/stddev 仍按全历史）
+- 顶层 `--help-pkg` 已失效但文档/提示仍引导使用 → 全部迁移到 `document` 子命令（README/CLAUDE.md/手册提示/manual.rs 模块注释）
+
+### 变更
+
+- **`bandwidth` 缺省次数改为 1000**（对齐 psping 的 `-n` 默认；原为「不带 `-n` 发 0 包」的静默空跑）
+- **`ping HOST:PORT -l N` 从「静默变 latency」改为报错**（负载大小仅限无端口 ICMP ping；带端口负载请用 latency/bandwidth）
+- **`packet --wait` 发送段先行失败从「中止」改为「警告并继续监听」**
+- **`server` 的监听地址行改由 `serve()` 在绑定后打印**（显示真实端口）
+- **顶层 `--help-pkg` 正式废弃**（解析直接报错），手册统一走 `prping document`
 - **Windows ICMP ping 全部显示「请求超时」**（实测：系统 ping.exe 正常、prping 100% 超时且失败是
   即时的）——根因：同步单请求在 `rc>=1`（IcmpSendEcho2 已写入应答）后用 `IcmpParseReplies` 当判据，
   而该函数对非 `IP_SUCCESS` 的应答（超时占位/错误回复）返回 0，**实测对真实成功应答也返回 0**

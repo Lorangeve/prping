@@ -16,6 +16,8 @@
 //! - `sniffer.rs`：`sniffer:` 段回包匹配器（FVal 规范值 / 字段提取 / 字节级 Expr 比较）。
 //! - `raw.rs`：原始套接字发送（AF_PACKET / IPPROTO_RAW / raw ICMP 收包）。
 
+mod listen;
+mod listen_raw;
 mod raw;
 mod recipe;
 mod send;
@@ -64,10 +66,32 @@ pub struct SendOutcome {
     pub reply: Option<Reply>,
 }
 
+/// `--wait` 模式：等待匹配 = 一次性（发后等一个应答）或持续（服务端监听）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum WaitMode {
+    /// 不等待。
+    #[default]
+    Off,
+    /// `--wait SECS`：发送后等一个匹配应答（超时退出）。
+    OneShot(f64),
+    /// `--wait`（无值）：持续监听，命中回显/按应答模板应答（Ctrl+C 退出）。
+    Continuous,
+}
+
+impl WaitMode {
+    /// 一次性等待的秒数（仅 [`WaitMode::OneShot`] 返回 Some）。
+    pub fn one_shot_secs(self) -> Option<f64> {
+        match self {
+            WaitMode::OneShot(s) => Some(s),
+            WaitMode::Off | WaitMode::Continuous => None,
+        }
+    }
+}
+
 /// `--pkt` 的完整选项。
 #[derive(Debug, Clone, Default)]
 pub struct PkgOptions {
-    /// 显式目标（None = 逐包从包内推导）。
+    /// 显式目标（None = 逐包从包内推导；监听模式 = 监听地址）。
     pub target: Option<SocketAddr>,
     pub mode: SendMode,
     /// 运行时参数（`params("name")` 值引用）。
@@ -75,8 +99,11 @@ pub struct PkgOptions {
     /// 配方全局存储（`-g name=value`（--global）注入；`global("name")` 值原语读取——
     /// 普通 `--pkt` 也生效，配方执行时步骤间由 extract 更新）。
     pub globals: packet_dsl::Globals,
-    /// 发送后等待应答的秒数（对标 scapy `sr1`；None = 不等待）。
-    pub wait: Option<f64>,
+    /// 等待/监听模式：`--wait SECS` = 发送后等一个匹配应答（对标 scapy `sr1`）；
+    /// `--wait`（无值）= 持续监听（服务端，命中回显/应答）。
+    pub wait: WaitMode,
+    /// 每个包重复发送次数（`--count N` / 配方步骤 `count: N`，默认 1）。
+    pub count: usize,
     /// fuzz 模式：未填字段全部随机化（对标 scapy `fuzz()`）。
     pub fuzz: bool,
     /// 构建的包另存为 pcap（对标 scapy `wrpcap`）。
@@ -111,6 +138,18 @@ pub fn send_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
 ///   `on_error: continue` 记录失败继续（退出码仍非零）。
 pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     recipe::send_recipe(file, opts)
+}
+
+/// 监听模式（`--listen`）：绑定 UDP 地址，按 .pkt 的 sniffer 规则匹配收到的
+/// 数据报并回显（pktlang 对话的服务端；与客户端 `--wait` 配对模拟通信）。
+pub fn listen_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
+    listen::listen_packets(file, opts)
+}
+
+/// 链路层监听（`--listen --raw`）：持续接收完整帧（AF_PACKET / libpcap），
+/// 按 .pkt 的 sniffer 规则匹配，命中后按应答模板（默认导出）构造应答帧注入。
+pub fn listen_raw_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
+    listen_raw::listen_raw_packets(file, opts)
 }
 
 /// 提取最外层 TCP/UDP 的应用层载荷（默认序列化器）。
@@ -184,7 +223,7 @@ pub(crate) fn match_reply(
     if let Some(sn) = sniffer {
         let report = sent_report.ok_or_else(|| anyhow::anyhow!("内部错误：sniffer 缺发包反解"))?;
         return Ok(sn
-            .matches(data, report)
+            .matches(data, Some(report))
             .map(|fields| (data.to_vec(), Some(fields))));
     }
     let Some((id, seq)) = icmp_echo_ids(pkt) else {

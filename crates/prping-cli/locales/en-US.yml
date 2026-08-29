@@ -88,6 +88,8 @@ errors:
   lsp_requires_eng: "--lsp only applies with --eng"
   raw_requires_pkg: "--raw only applies with --pkt"
   iface_requires_raw: "--iface only applies with --pkt --raw"
+  listen_conflict: "continuous listen (bare --wait) cannot be combined with --fuzz/--out (receives and echoes; --raw = link-layer listen, pairs with --iface)"
+  listen_raw_no_target: "--wait --raw (link-layer listen) takes no ADDR:PORT (frames are addressed by their MAC/IP fields)"
   params_requires_eng_pkg: "--params only applies with --eng or --pkt"
   params_format: "--params expects k=v format: `%{value}`"
   global_requires_eng_pkg: "--global only applies with --eng or --pkt"
@@ -99,6 +101,11 @@ errors:
   eng_sub_requires_eng: "--ls / --hex / --pcap only apply with --eng"
   eng_sub_conflict_lsp: "--ls / --hex / --pcap cannot be combined with --lsp"
   eng_sub_no_file: "--ls / --hex / --pcap do not take a file argument"
+  eng_json_sub_conflict: "--json is only valid for FILE.pkt/.pktl analysis (cannot combine with --ls/--hex/--pcap/--lsp)"
+  pkt_json_listen_conflict: "--json cannot be combined with continuous listen (bare --wait)"
+
+  pkt_count_zero: '--count must be >= 1 (how many times to send each packet)'
+  listen_count_conflict: 'continuous listen (bare --wait) does not support --count > 1 (listen does not send)'
   to_pkt_requires_pcap: "--to-pkt only applies with --pcap"
   structured_requires_to_pkt: "--structured only applies with --to-pkt"
   skip_limit_requires_to_pkt: "--skip / --limit only apply with --to-pkt"
@@ -113,6 +120,10 @@ errors:
   bandwidth_requires_port: bandwidth requires HOST:PORT
   invalid_count: 'invalid count value: %{value} (use N or Ns)'
   invalid_histogram: 'invalid histogram value: %{value} (use N or t1,t2,...)'
+  invalid_port: 'invalid port: %{value}'
+  ping_port_no_size: 'ping %{target} with a port does not take -l (payload size -l is only valid for ICMP ping without a port; with a port use latency -l or bandwidth -l)'
+  parallel_zero: '--parallel must be >= 1'
+  count_zero_bandwidth: 'bandwidth count (-n) must be >= 1 (default 1000; use -n Ns for duration mode)'
   udp_size_clamped: UDP payload clamped to %{max} bytes (requested %{size})
   interval_min: interval clamped to minimum 1ms (requested %{value}s)
   parallel_udp_ignored: "--parallel ignored in UDP mode (UDP bandwidth is single-connection)"
@@ -146,6 +157,7 @@ errors:
   conflict_json_pretty: "--json and -p/--pretty cannot be used together"
   conflict_json_graph: "--json and -g/--graph cannot be used together"
   conflict_json_histogram: "--json and -H/--histogram cannot be used together"
+  pkt_json_summary_conflict: "--json and --summary cannot be used together (--summary prints human-readable text, breaking the JSONL contract)"
   receive_requires_latency_bandwidth: "-r requires -b (bandwidth) or -l (latency) with HOST:PORT"
   capture_all_requires_verbose: "--capture-all requires --verbose"
   filter_requires_capture_all: "--filter requires --capture-all"
@@ -195,7 +207,10 @@ help:
     global: >-
       Recipe globals injected into the global store (k=v,k2=v2; read via global("name") in the
       script; with a .pktl recipe this seeds global: declarations, -g overrides init)
-    wait: Wait up to SECS for a matching reply (like scapy sr1), print RTT and dissect it (with --pkt)
+    pkt_count: send each packet N times (overridden by a recipe step `count:`; not with bare --wait)
+    wait: >-
+      Wait/match mode: `--wait SECS` sends then waits for one matching reply (like scapy sr1), prints RTT and dissects it;
+      bare `--wait` or a negative value (e.g. `--wait=-2`) waits forever / listens continuously (server side: echo/reply on match, Ctrl+C to stop)
     fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkt)
     out: Save built packets to a pcap file (like scapy wrpcap, with --pkt)
     summary: 'Summary mode: print a single result line (packet count, target, sent/failed); suppress per-packet detail'
@@ -223,7 +238,7 @@ help:
     capture_all: "Capture and show all visible frames (ARP/ICMP/broadcast/outgoing), not just traffic to the listening port (requires -v)"
     capture_filter: "Show only frames matching this tcpdump-style expression (requires -a): arp/icmp/tcp/udp/ip/ip6, port N, host IP, and/or/not, parentheses — plus eng_lib dissectable protocols (e.g. dns/http/quic_initial). Examples: \"arp or icmp\", \"tcp port 53\", \"dns\""
     version: Show version
-    help_pkg: Full manual (paged); --help-pkg SECTION jumps to a chapter (number or title)
+    help_pkg: Full manual (paged); document SECTION jumps to a chapter (number or title)
   usage_ping: 'prping ping [OPTIONS] <HOST[:PORT]>'
   usage_latency: 'prping latency [OPTIONS] <HOST:PORT>'
   usage_bandwidth: 'prping bandwidth [OPTIONS] <HOST:PORT>'

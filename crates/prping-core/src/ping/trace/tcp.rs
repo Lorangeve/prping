@@ -13,7 +13,7 @@ use super::{Hop, PingConfig};
 
 // 以下仅 Unix raw socket 路径使用（Windows 委托 tcpwin）
 #[cfg(unix)]
-use super::{PROBE_TIMEOUT, PROBES_PER_HOP, finish_hop};
+use super::{PROBE_TIMEOUT, PROBES_PER_HOP};
 #[cfg(unix)]
 use crate::util;
 #[cfg(unix)]
@@ -45,7 +45,13 @@ pub(crate) fn trace_tcp(
     max_hops: u32,
     w: &mut StandardStream,
 ) -> anyhow::Result<(Vec<Hop>, bool)> {
-    let local = local_ip_for(target_ip).ok_or_else(|| anyhow::anyhow!("无法获取本机路由地址"))?;
+    // -s 显式源绑定优先（与 Windows Npcap 路径 tcpwin.rs 一致）；否则用路由
+    // 探测的本机地址（bind 与伪头校验和源均用同一地址）
+    let local = match cfg.source {
+        Some(s) => s,
+        None => local_ip_for(target_ip)
+            .ok_or_else(|| anyhow::anyhow!(rust_i18n::t!("errors.trace_no_local_addr")))?,
+    };
     let (sock, target_sa) = crate::util::create_tcp_socket(target_ip, local)?;
     // 中间路由回 ICMP Time Exceeded——raw TCP socket 只收 TCP 包（proto 过滤），
     // 必须另开 raw ICMP socket 收；两个 socket 都先于发送打开（回环下回包可能在
@@ -53,181 +59,178 @@ pub(crate) fn trace_tcp(
     let (icmp_sock, _) = crate::util::create_icmp_socket(target_ip, cfg.source)?;
     let dport = cfg.port;
 
-    let mut hops: Vec<Hop> = Vec::new();
     let mut sport_counter: u16 = TCP_SPORT_MIN;
-    let mut reached = false;
+    // 逐跳骨架（渲染上一跳/interrupted/PendingHop 收尾共用），本路径只提供
+    // hop_body：set_ttl + 发送 SYN + poll 双 socket 收集
+    super::trace_loop_skeleton(
+        cfg,
+        max_hops,
+        |hop_no| {
+            crate::util::set_ttl(&sock, hop_no, target_ip.is_ipv6())?;
 
-    for hop_no in 1..=max_hops {
-        if util::interrupted() {
-            break;
-        }
-        crate::util::set_ttl(&sock, hop_no, target_ip.is_ipv6())?;
+            // 发送本跳全部探测（背靠背，不逐包等待）
+            let mut probes: Vec<(u16, Instant)> = Vec::with_capacity(PROBES_PER_HOP);
+            for _ in 0..PROBES_PER_HOP {
+                let sport = sport_counter;
+                sport_counter = sport_counter.wrapping_add(1);
+                if sport_counter > TCP_SPORT_MAX {
+                    sport_counter = TCP_SPORT_MIN;
+                }
+                let pkt = build_tcp_syn(target_ip, local, sport, dport);
+                let sent = Instant::now();
+                if sock.send_to(&pkt, &target_sa).is_ok() {
+                    probes.push((sport, sent));
+                }
+            }
+            if probes.is_empty() {
+                return Ok(super::HopCollect::default());
+            }
 
-        // 发送本跳全部探测（背靠背，不逐包等待）
-        let mut probes: Vec<(u16, Instant)> = Vec::with_capacity(PROBES_PER_HOP);
-        for _ in 0..PROBES_PER_HOP {
-            let sport = sport_counter;
-            sport_counter = sport_counter.wrapping_add(1);
-            if sport_counter > TCP_SPORT_MAX {
-                sport_counter = TCP_SPORT_MIN;
-            }
-            let pkt = build_tcp_syn(target_ip, local, sport, dport);
-            let sent = Instant::now();
-            if sock.send_to(&pkt, &target_sa).is_ok() {
-                probes.push((sport, sent));
-            }
-        }
-        if probes.is_empty() {
-            break;
-        }
-
-        // 收集回复直到全部匹配或超时：raw TCP（SYN-ACK/RST）+ raw ICMP（Time Exceeded）
-        let want: Vec<u16> = probes.iter().map(|&(s, _)| s).collect();
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
-        let mut src: Option<IpAddr> = None;
-        let mut dest_hit = false;
-        let mut remaining = probes.len();
-        let mut tcp_buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
-        let mut icmp_buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
-        let mut pfds = [
-            libc::pollfd {
-                fd: sock.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: icmp_sock.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        while remaining > 0 {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            let rc = unsafe {
-                libc::poll(
-                    pfds.as_mut_ptr(),
-                    2,
-                    deadline.saturating_duration_since(now).as_millis() as libc::c_int,
-                )
-            };
-            if rc <= 0 {
-                break;
-            }
-            // raw TCP：SYN-ACK / RST（目标到达）
-            if pfds[0].revents & libc::POLLIN != 0 {
-                let Ok((n, addr)) = sock.recv_from(&mut tcp_buf) else {
-                    continue;
+            // 收集回复直到全部匹配或超时：raw TCP（SYN-ACK/RST）+ raw ICMP（Time Exceeded）
+            let want: Vec<u16> = probes.iter().map(|&(s, _)| s).collect();
+            let deadline = Instant::now() + PROBE_TIMEOUT;
+            let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
+            let mut src: Option<IpAddr> = None;
+            let mut dest_hit = false;
+            let mut remaining = probes.len();
+            let mut tcp_buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
+            let mut icmp_buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
+            let mut pfds = [
+                libc::pollfd {
+                    fd: sock.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: icmp_sock.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            while remaining > 0 {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let rc = unsafe {
+                    libc::poll(
+                        pfds.as_mut_ptr(),
+                        2,
+                        deadline.saturating_duration_since(now).as_millis() as libc::c_int,
+                    )
                 };
-                let data: &[u8] =
-                    unsafe { std::slice::from_raw_parts(tcp_buf.as_ptr() as *const u8, n) };
-                let peer: IpAddr = addr
-                    .as_socket()
-                    .map(|s| s.ip())
-                    .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                let sport = if target_ip.is_ipv6() {
-                    match match_tcp_reply_v6(data, target_ip, dport, &want) {
-                        Some(s) => s,
-                        None => {
-                            super::trace_dump("tcp-v6", data, false);
-                            continue;
-                        }
-                    }
-                } else {
-                    match match_tcp_reply_v4(data, target_ip, dport, &want) {
-                        Some(s) => s,
-                        None => {
-                            super::trace_dump("tcp-v4", data, false);
-                            continue;
-                        }
-                    }
-                };
-                super::trace_dump(
-                    if target_ip.is_ipv6() {
-                        "tcp-v6"
+                if rc <= 0 {
+                    break;
+                }
+                // raw TCP：SYN-ACK / RST（目标到达）
+                if pfds[0].revents & libc::POLLIN != 0 {
+                    let Ok((n, addr)) = sock.recv_from(&mut tcp_buf) else {
+                        continue;
+                    };
+                    let data: &[u8] = util::init_slice(&tcp_buf, n);
+                    let peer: IpAddr = addr
+                        .as_socket()
+                        .map(|s| s.ip())
+                        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                    let (sport, reply_is_dest) = if target_ip.is_ipv6() {
+                        // v6 无共享 is_dest：SYN-ACK/RST 判定仍解析 flags
+                        let s = match match_tcp_reply_v6(data, target_ip, dport, &want) {
+                            Some(s) => s,
+                            None => {
+                                super::trace_dump("tcp-v6", data, false);
+                                continue;
+                            }
+                        };
+                        let d = tcp_flags(data, target_ip)
+                            .is_some_and(|f| f & 0x12 == 0x12 || f & 0x04 == 0x04);
+                        (s, d)
                     } else {
-                        "tcp-v4"
-                    },
-                    data,
-                    true,
-                );
-                // SYN-ACK/RST 即到达
-                if tcp_flags(data, target_ip.is_ipv6())
-                    .is_some_and(|f| f & 0x12 == 0x12 || f & 0x04 == 0x04)
-                {
-                    dest_hit = true;
-                }
-                // 记录 RTT
-                if let Some(idx) = probes.iter().position(|&(s, _)| s == sport)
-                    && rtts[idx].is_none()
-                {
-                    let rtt = probes[idx].1.elapsed();
-                    rtts[idx] = Some(rtt);
-                    remaining -= 1;
-                }
-                src = Some(peer);
-            }
-            // raw ICMP：Time Exceeded（中间路由）
-            if pfds[1].revents & libc::POLLIN != 0 {
-                let Ok((n, addr)) = icmp_sock.recv_from(&mut icmp_buf) else {
-                    continue;
-                };
-                let data: &[u8] =
-                    unsafe { std::slice::from_raw_parts(icmp_buf.as_ptr() as *const u8, n) };
-                let peer: IpAddr = addr
-                    .as_socket()
-                    .map(|s| s.ip())
-                    .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                let sport = if target_ip.is_ipv6() {
-                    match parse_ttl_exceeded_v6(data, target_ip, dport, &want) {
-                        Some(s) => s,
-                        None => {
-                            super::trace_dump("tcp-icmp-v6", data, false);
-                            continue;
+                        match match_tcp_reply_v4(data, target_ip, dport, &want) {
+                            Some(sd) => sd,
+                            None => {
+                                super::trace_dump("tcp-v4", data, false);
+                                continue;
+                            }
                         }
+                    };
+                    super::trace_dump(
+                        if target_ip.is_ipv6() {
+                            "tcp-v6"
+                        } else {
+                            "tcp-v4"
+                        },
+                        data,
+                        true,
+                    );
+                    // SYN-ACK/RST 即到达（v4 由共享函数一次判定）
+                    if reply_is_dest {
+                        dest_hit = true;
                     }
-                } else {
-                    match parse_ttl_exceeded_v4(data, target_ip, dport, &want) {
-                        Some(s) => s,
-                        None => {
-                            super::trace_dump("tcp-icmp-v4", data, false);
-                            continue;
+                    // 记录 RTT
+                    if let Some(idx) = probes.iter().position(|&(s, _)| s == sport)
+                        && rtts[idx].is_none()
+                    {
+                        let rtt = probes[idx].1.elapsed();
+                        rtts[idx] = Some(rtt);
+                        remaining -= 1;
+                    }
+                    src = Some(peer);
+                }
+                // raw ICMP：Time Exceeded（中间路由）
+                if pfds[1].revents & libc::POLLIN != 0 {
+                    let Ok((n, addr)) = icmp_sock.recv_from(&mut icmp_buf) else {
+                        continue;
+                    };
+                    let data: &[u8] = util::init_slice(&icmp_buf, n);
+                    let peer: IpAddr = addr
+                        .as_socket()
+                        .map(|s| s.ip())
+                        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                    let sport = if target_ip.is_ipv6() {
+                        match parse_ttl_exceeded_v6(data, target_ip, dport, &want) {
+                            Some(s) => s,
+                            None => {
+                                super::trace_dump("tcp-icmp-v6", data, false);
+                                continue;
+                            }
                         }
-                    }
-                };
-                super::trace_dump(
-                    if target_ip.is_ipv6() {
-                        "tcp-icmp-v6"
                     } else {
-                        "tcp-icmp-v4"
-                    },
-                    data,
-                    true,
-                );
-                // 记录 RTT（Time Exceeded 只算中间跳，不算到达）
-                if let Some(idx) = probes.iter().position(|&(s, _)| s == sport)
-                    && rtts[idx].is_none()
-                {
-                    let rtt = probes[idx].1.elapsed();
-                    rtts[idx] = Some(rtt);
-                    remaining -= 1;
+                        match parse_ttl_exceeded_v4(data, target_ip, dport, &want) {
+                            Some(s) => s,
+                            None => {
+                                super::trace_dump("tcp-icmp-v4", data, false);
+                                continue;
+                            }
+                        }
+                    };
+                    super::trace_dump(
+                        if target_ip.is_ipv6() {
+                            "tcp-icmp-v6"
+                        } else {
+                            "tcp-icmp-v4"
+                        },
+                        data,
+                        true,
+                    );
+                    // 记录 RTT（Time Exceeded 只算中间跳，不算到达）
+                    if let Some(idx) = probes.iter().position(|&(s, _)| s == sport)
+                        && rtts[idx].is_none()
+                    {
+                        let rtt = probes[idx].1.elapsed();
+                        rtts[idx] = Some(rtt);
+                        remaining -= 1;
+                    }
+                    src = Some(peer);
                 }
-                src = Some(peer);
             }
-        }
-
-        let hop = finish_hop(hop_no, cfg, src, rtts, w)?;
-        hops.push(hop);
-        if dest_hit {
-            reached = true;
-            break;
-        }
-    }
-
-    Ok((hops, reached))
+            Ok(super::HopCollect {
+                src,
+                rtts,
+                dest_hit,
+            })
+        },
+        w,
+    )
 }
 
 /// Windows：委托 Npcap 路径（`tcpwin.rs`）。
@@ -308,30 +311,43 @@ fn tcp_checksum(tcp: &[u8], src: IpAddr, dst: IpAddr) -> u16 {
 ///
 /// 回复端口镜像请求：(src port, dst port) = (dport, 我们的源端口)——源端口必须是
 /// 目标端口、目的端口必须在我们发出的源端口列表里；源 IP 必须为目标（防伪造/杂包）。
-/// 返回该回复对应的探测源端口（= 回复目的端口）。
+/// 返回 (探测源端口, 是否到达目标)——is_dest 由共享函数一次算好，调用方不再
+/// 用 tcp_flags 二次解析同一包（此前把 is_dest 丢掉后重算，浪费且易漂移）。
 #[cfg(unix)]
-fn match_tcp_reply_v4(buf: &[u8], target: IpAddr, dport: u16, want: &[u16]) -> Option<u16> {
-    super::match_tcp_syn_reply_v4(buf, target, dport, want).map(|(port, _)| port)
+fn match_tcp_reply_v4(buf: &[u8], target: IpAddr, dport: u16, want: &[u16]) -> Option<(u16, bool)> {
+    super::match_tcp_syn_reply_v4(buf, target, dport, want)
 }
 
-/// 匹配 IPv6 TCP 回包（框架探测：首字节 version nibble == 6 且长度足够 → 含 40B
-/// IPv6 头；Linux 惯例是 raw v6 socket 收到不含 IPv6 头的载荷）。
+/// IPv6 TCP 回复的框架判定：带头（version=6 且 next header=TCP 且 src==target）
+/// 时跳 40B，否则按无头解析。
+///
+/// 仅凭「首字节 version nibble==6」不够：无头 TCP 数据的首字节是回复源端口高位，
+/// 目标端口落在 0x6000-0x6FFF（24576-28671）时会误判为带头导致解析错位。追加
+/// next header 与 src==target 双校验后，无头数据的 seq/ack 字节几乎不可能恰好
+/// 等于目标地址（2^-128），误判被消除。
 #[cfg(unix)]
-fn match_tcp_reply_v6(buf: &[u8], target: IpAddr, dport: u16, want: &[u16]) -> Option<u16> {
-    // 框架探测：首字节 version nibble == 6 且长度足够 → 含 40B IPv6 头
-    let ip = util::ipv6_frame_skip(buf);
-    let tcp = if ip.len() != buf.len() {
-        // 带头：顺带校验源地址
-        if IpAddr::V6(std::net::Ipv6Addr::from(
-            <[u8; 16]>::try_from(&buf[8..24]).ok()?,
-        )) != target
-        {
-            return None;
-        }
-        ip
+fn tcp_frame_v6(buf: &[u8], target: IpAddr) -> &[u8] {
+    const ZERO: [u8; 16] = [0; 16];
+    // 先按长度守卫再切片：raw v6 socket 可能收到 <24B 的无头 TCP 段
+    // （回环自读 20B SYN / 目标回裸 20B RST），此前 &buf[8..24] 无条件
+    // 求值会 index out of bounds panic；长度不足按无头解析（返回原 buf）。
+    let src = buf
+        .get(8..24)
+        .and_then(|s| <[u8; 16]>::try_from(s).ok())
+        .map(|oct| IpAddr::V6(std::net::Ipv6Addr::from(oct)))
+        .unwrap_or(IpAddr::V6(std::net::Ipv6Addr::from(ZERO)));
+    if buf.len() >= 48 && buf[0] >> 4 == 6 && buf[6] == 6 && src == target {
+        &buf[40..]
     } else {
         buf
-    };
+    }
+}
+
+/// 匹配 IPv6 TCP 回包（框架探测见 `tcp_frame_v6`；Linux 惯例是 raw v6 socket
+/// 收到不含 IPv6 头的载荷）。
+#[cfg(unix)]
+fn match_tcp_reply_v6(buf: &[u8], target: IpAddr, dport: u16, want: &[u16]) -> Option<u16> {
+    let tcp = tcp_frame_v6(buf, target);
     if tcp.len() < 20 {
         return None;
     }
@@ -416,9 +432,9 @@ fn parse_ttl_exceeded_v6(buf: &[u8], target: IpAddr, dport: u16, want: &[u16]) -
 
 /// 取 TCP flags（data offset 5 的标准 20B 头；v4 恒含 IP 头，v6 按框架探测）。
 #[cfg(unix)]
-fn tcp_flags(buf: &[u8], is_v6: bool) -> Option<u8> {
-    let tcp = if is_v6 {
-        util::ipv6_frame_skip(buf)
+fn tcp_flags(buf: &[u8], target: IpAddr) -> Option<u8> {
+    let tcp = if target.is_ipv6() {
+        tcp_frame_v6(buf, target)
     } else {
         let ihl = util::ipv4_ihl(buf);
         buf.get(ihl..)?
@@ -446,17 +462,17 @@ mod tests {
     #[test]
     fn match_tcp_reply_accepts_synack_and_rst() {
         let want = [0x4000u16, 0x4001, 0x4002];
-        // SYN-ACK：源端口 = 目标端口 80，目的端口 = 我们的源端口
+        // SYN-ACK：源端口 = 目标端口 80，目的端口 = 我们的源端口；is_dest=true
         let synack = syn_reply(80, 0x4001, [10, 0, 0, 2], 0x12);
         assert_eq!(
             match_tcp_reply_v4(&synack, "10.0.0.2".parse().unwrap(), 80, &want),
-            Some(0x4001)
+            Some((0x4001, true))
         );
         // RST
         let rst = syn_reply(80, 0x4002, [10, 0, 0, 2], 0x04);
         assert_eq!(
             match_tcp_reply_v4(&rst, "10.0.0.2".parse().unwrap(), 80, &want),
-            Some(0x4002)
+            Some((0x4002, true))
         );
     }
 
@@ -515,7 +531,8 @@ mod tests {
     #[test]
     fn tcp_flags_from_ip_and_tcp() {
         let b = syn_reply(80, 0x4000, [10, 0, 0, 2], 0x14);
-        assert_eq!(tcp_flags(&b, false), Some(0x14));
-        assert_eq!(tcp_flags(&[], false), None);
+        let target: IpAddr = "10.0.0.2".parse().unwrap();
+        assert_eq!(tcp_flags(&b, target), Some(0x14));
+        assert_eq!(tcp_flags(&[], target), None);
     }
 }

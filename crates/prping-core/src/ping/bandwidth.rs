@@ -2,7 +2,7 @@
 
 use crate::output;
 use crate::stats::{self, HistogramSpec};
-use crate::util::{self, PingConfig, TCP_RECEIVE_TRIGGER, RECV_BUF_SIZE};
+use crate::util::{self, PingConfig, RECV_BUF_SIZE, TCP_RECEIVE_TRIGGER};
 use rust_i18n::t;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use std::io::{IsTerminal, Write};
@@ -284,7 +284,11 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         stream.get_ref().set_nodelay(true)?;
         stream.write_all(&[TCP_RECEIVE_TRIGGER]).await?;
         let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
-        let target_bytes = deadline.map(|_| u64::MAX).unwrap_or(count * size as u64);
+        // count × size 用 checked_mul：此前直接相乘在超大 count 时 debug panic、
+        // release 回绕（目标错误提前结束）
+        let target_bytes = deadline
+            .map(|_| u64::MAX)
+            .unwrap_or(count.saturating_mul(size as u64));
         let mut buf = vec![0u8; RECV_BUF_SIZE];
         let mut total: u64 = 0;
         let start = Instant::now();
@@ -346,7 +350,16 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                 break;
             }
             let t0 = Instant::now();
-            stream.write_all(&payload).await?;
+            // 发送错误（连接被对端关闭等）优雅结束并提示，而非 ? 中止
+            if let Err(e) = stream.write_all(&payload).await {
+                if !cfg.quiet && !stats::json() {
+                    let _ = output::writeln_red(
+                        &mut output::stderr(),
+                        format!("{}: {e}", t!("bandwidth.conn_error")),
+                    );
+                }
+                break;
+            }
             if cfg.histogram.is_some() {
                 times.push(t0.elapsed());
             }
@@ -459,14 +472,35 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         let start = Instant::now();
         let mut total_sent: u64 = 0;
         let mut all_times: Vec<Duration> = Vec::new();
+        // 任一连接失败不再 ? 中止整个测试：记录并继续，其余任务照常发送
+        //（此前第一个任务报错即丢全部测量，且进度条任务被遗留）
+        let mut conn_failures = 0usize;
         for t in tasks {
-            let (sent, times) = t.await?;
-            total_sent += sent;
-            all_times.extend(times);
+            match t.await {
+                Ok((sent, times)) => {
+                    total_sent += sent;
+                    all_times.extend(times);
+                }
+                Err(e) => {
+                    conn_failures += 1;
+                    if !cfg.quiet && !stats::json() {
+                        let _ = output::writeln_red(
+                            &mut output::stderr(),
+                            format!("{}: {e}", t!("bandwidth.conn_error")),
+                        );
+                    }
+                }
+            }
         }
         stop.store(true, Ordering::Relaxed);
         if let Some(t) = prog_task {
             let _ = t.await;
+        }
+        if conn_failures > 0 && !cfg.quiet && !stats::json() {
+            let _ = output::writeln_red(
+                &mut output::stderr(),
+                format!("{}", t!("bandwidth.conn_failures", n = conn_failures)),
+            );
         }
         prog.lock()
             .unwrap()
@@ -480,7 +514,7 @@ async fn run_tcp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             quiet: cfg.quiet,
             target: format!("{}:{}", cfg.host, cfg.port),
             received: cfg.receive,
-            parallel: parallel as u16,
+            parallel,
             throughput_timeline: &[],
             graph: cfg.graph,
         })
@@ -495,7 +529,11 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
         cfg.warmup,
         cfg.duration,
     );
-    let sock = util::bind_udp(util::local_bind(addr.is_ipv4(), cfg.source))?;
+    // Arc 共享：发送循环与并行 drain 任务并发读写同一 UDP socket
+    let sock = Arc::new(util::bind_udp(util::local_bind(
+        addr.is_ipv4(),
+        cfg.source,
+    ))?);
     let deadline = duration.map(|d| Instant::now() + Duration::from_secs_f64(d));
 
     if warmup > 0 && !receive {
@@ -522,7 +560,9 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
             },
         );
         util::udp_send(&sock, &trigger, &addr).await?;
-        let target = deadline.map(|_| u64::MAX).unwrap_or(count * size as u64);
+        let target = deadline
+            .map(|_| u64::MAX)
+            .unwrap_or(count.saturating_mul(size as u64));
         let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); RECV_BUF_SIZE];
         let mut total: u64 = 0;
         let start = Instant::now();
@@ -554,6 +594,9 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
                 Err(_) => break,
             }
         }
+        // 收尾采样点（与 TCP receive 一致：此前漏调 sampler.finish，
+        // 最后一个未满 100ms 窗口的吞吐样本丢失）
+        sampler.finish(total);
         prog.finish(0, total);
         return report(ReportArgs {
             label: t!("bandwidth.udp_test").to_string(),
@@ -575,18 +618,56 @@ async fn run_udp(addr: SocketAddr, cfg: &PingConfig) -> anyhow::Result<crate::Ba
     let mut sent: u64 = 0;
     let start = Instant::now();
     let mut prog = make_progress(duration, count, size as u64, false, cfg.quiet);
+    // 并行排空回显：服务端对每个数据报原样回送，客户端若不读，接收缓冲（4MB）
+    // 打满后服务端回显阻塞、本端发送被本地缓冲排空速率拖住——测到的是本机速率
+    // 而非链路吞吐。起一个独立读任务持续丢弃回包（与服务端回显配合），
+    // 发送完成后停止（最多 100ms 轮询延迟）。
+    let drain_done = Arc::new(AtomicBool::new(false));
+    let drain = {
+        let sock = sock.clone();
+        let drain_done = drain_done.clone();
+        smol::spawn(async move {
+            let mut buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); RECV_BUF_SIZE];
+            loop {
+                if drain_done.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = smol::future::or(
+                    async { util::udp_recv(&sock, &mut buf).await.map(|_| ()) },
+                    async {
+                        smol::Timer::after(Duration::from_millis(100)).await;
+                        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "poll"))
+                    },
+                )
+                .await;
+                // 读失败（超时/暂时无包）就继续轮询 drain_done
+            }
+        })
+    };
     loop {
         if should_stop(deadline, count, sent) {
             break;
         }
         let t0 = Instant::now();
-        util::udp_send(&sock, &payload, &addr).await?;
+        // 发送错误（如端口不可达后 ECONNREFUSED）优雅结束并提示，而非 ? 中止
+        // 整个测试（瞬态错误不应丢弃已测数据）
+        if let Err(e) = util::udp_send(&sock, &payload, &addr).await {
+            if !cfg.quiet && !stats::json() {
+                let _ = output::writeln_red(
+                    &mut output::stderr(),
+                    format!("{}: {e}", t!("bandwidth.udp_send_error")),
+                );
+            }
+            break;
+        }
         if cfg.histogram.is_some() {
             times.push(t0.elapsed());
         }
         sent += 1;
         prog.update(sent, sent * size as u64);
     }
+    drain_done.store(true, Ordering::Relaxed);
+    let _ = drain.await;
     prog.finish(sent, sent * size as u64);
     report(ReportArgs {
         label: t!("bandwidth.udp_test").to_string(),
@@ -613,8 +694,8 @@ pub(crate) struct ReportArgs<'a> {
     pub quiet: bool,
     pub target: String,
     pub received: bool,
-    /// 并发连接数（仅并行 TCP 模式 >1 时有意义）。
-    pub parallel: u16,
+    /// 并发连接数（仅并行 TCP 模式 >1 时有意义；此前 u16 在 >65535 时截断回绕）。
+    pub parallel: u32,
     /// 吞吐量时间线采样：(elapsed_secs, window_mbps)。
     pub throughput_timeline: &'a [(f64, f64)],
     /// 是否渲染时间线图（`-g`）。
@@ -647,8 +728,8 @@ fn report(args: ReportArgs<'_>) -> anyhow::Result<crate::BandwidthReport> {
     let mut w = output::stdout();
     if stats::json() {
         // label 可能含引号/反斜杠，做最小转义保证 JSON 合法
-        let escaped = label.replace('\\', "\\\\").replace('"', "\\\"");
-        let target = target.replace('"', "\\\"");
+        let escaped = crate::util::json_escape(&label);
+        let target = crate::util::json_escape(&target);
         let ts = crate::util::unix_ts();
         writeln!(
             &mut w,

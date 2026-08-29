@@ -179,8 +179,8 @@ effective for that mode (structurally exclusive — no cross-argument conflict c
 | `bandwidth` | `HOST:PORT` (required) | `-l SIZE` (default 8k), `-u/-r/--parallel N` + test/network options | Needs `prping server` on the peer |
 | `server` | `ADDR:PORT` (required) | No client options | Serves latency/bandwidth/receive modes |
 | `trace` | `HOST` (no port) | `-m N/-d/-s/-4/-6/--json` | ICMP echo + increasing TTL |
-| `engine` | `FILE.pkt/.pktl` (optional) | `--lsp/--ls/--hex/--pcap` (exclusive, no file), `--to-pkt DIR/--structured/--skip/--limit` (with `--pcap`), `--lib/-p/-g` | Analyze/LSP/overview/convert |
-| `packet` | `FILE.pkt/.pktl` (required) + `[HOST:PORT]` (optional) | `--raw/--iface/--wait/--fuzz/--out/--lib/-p/-g` | Build/send, recipes |
+| `engine` | `FILE.pkt/.pktl` (optional) | `--lsp/--ls/--hex/--pcap` (exclusive, no file), `--to-pkt DIR/--structured/--skip/--limit` (with `--pcap`), `--lib/-p/-g`, `--json` (analyze mode) | Analyze/LSP/overview/convert |
+| `packet` | `FILE.pkt/.pktl` (required) + `[HOST:PORT]` (optional) | `--raw/--iface/--wait/--fuzz/--out/--lib/-p/-g`, `--json` (send/recipe mode) | Build/send, recipes |
 
 Measurement subcommands share the "test control", "output", and "network" option groups (Chapters 12/13/15/19).
 
@@ -505,6 +505,8 @@ Every test prints a summary of statistics when it finishes:
 ## 15. JSON Output
 
 `--json` outputs JSONL (one record per line; you can `tail -f` it live; the last line is the summary).
+
+Beyond measurement, `engine` and `packet` support `--json` structured output: `engine FILE.pkt/.pktl --json` emits a **single JSON document** (`.pkt` structured analysis: sources → packets → layer fields/hex/warnings/raw_only; `.pktl` recipe overview: globals/params/steps/extract) — valid only in analyze mode, not combinable with `--ls/--hex/--pcap/--lsp`; `packet FILE.pkt/.pktl --json` emits JSONL (one `{"type":"packet",...}` line per packet + a summary line; recipe mode adds `step`/`extract` lines) — not combinable with bare `--wait` (continuous listen).
 
 ### Per-sample lines
 
@@ -958,17 +960,48 @@ A1 mode is I/O-bound, so threads mainly help `--structured` on large pcaps.
 first step; chunked sleep responds to Ctrl+C) — the converted recipes use it to
 reproduce capture pacing; hand-written recipes can use it too.
 
-**sniffer block** (reply validation): with `--wait`, replies are matched against the
-`sniffer` declaration in the `.pkt` file; a match prints `✓ reply matched: field=value (rtt)`,
-a timeout prints `✗ no matching reply`:
+**sniffer block** (reply validation / listen rule): with `--wait`, replies are matched
+against the `sniffer` declaration in the `.pkt` file; a match prints
+`✓ reply matched: field=value (rtt)`, a timeout prints `✗ no matching reply`.
+With a bare `--wait` the same declaration becomes the **listen rule** (match incoming
+datagrams and echo them):
 
 ```pkt
 sniffer:
   - match icmp(type=0, id=id, seq=seq)   # reply must be an echo reply with the same id/seq as sent
   # - match dns(id=id)                    # DNS reply id matches the query (replaces the default DNS id match)
   # right-hand literals = constants (type=0); bare idents = same-named field of the sent packet (id=id)
-  # multiple clauses: any match wins (list style, like export:)
+  # top-level list: any match wins (list style, like export:); predicates compose:
+  # - and(match udp(dport=53), not(match dns(flags=0x8180)))  # cross-layer AND / negation
+  # - or(match icmp(type=0), match dns(id=id))
+  # in-clause conditions: ne(field, value); mask(0xc0) first-byte bitmask of the layer raw bytes;
+  #                      startswith/endswith/contains("...") prefix/suffix/substring of layer raw bytes
+  # listen rules cannot reference sent fields (no sent packet — build-time error)
 ```
+
+**bare `--wait` mode** (server side of a pktlang conversation): `packet --wait FILE.pkt [HOST:PORT]`
+sends the file's send section first if any (a reply template with `reply()` leaves is not sendable and is skipped), then binds a UDP address and keeps receiving datagrams (address derived from the outermost
+udp/tcp dport when omitted), dissects each one and matches the `.pkt` sniffer rule —
+a hit **echoes the datagram back** to the sender (`✓ matched ... from peer` + dissect),
+misses are ignored, Ctrl+C exits and prints match statistics. Pair it with a client
+`--wait` (send + match the reply with the same rule) and two processes can simulate a
+conversation with export + sniffer (demo & walkthrough → `examples/sniffer_chat/`:
+server `packet --wait server.pkt`, client recipe `packet client.pktl`, covering
+`sent.`/`reply.` extract end to end).
+
+**`--wait --raw` link-layer listen** (full frames): `packet --wait --raw FILE.pkt [--iface NIC]`
+keeps receiving **full frames** (Linux AF_PACKET; macOS/Windows via libpcap/Npcap;
+root/admin required), matches the sniffer rule (listen has no sent packet — use
+literals/predicates), and on a hit builds the **reply template** — the `.pkt` default
+export, reading fields of the received frame via `reply("layer","field")` (e.g.
+`icmp(type=0, id=reply("icmp","id"))`) — and raw-injects it; a **bare-IP outer
+template (no eth layer) is injected through the kernel IP stack** (Linux
+IPPROTO_RAW+IP_HDRINCL / macOS protocol raw socket — loopback and LAN need no MAC
+resolution, so macOS lo0 bare-IP frames work too), eth-outer templates still use
+link-layer injection; Ctrl+C stops and prints
+match stats. Demo → `examples/icmp_echo_server/`: `sudo prping packet --wait --raw
+server.pkt`, then `prping ping 127.0.0.1` gets answered by it (a pure-pktlang ICMP
+echo server).
 
 Example:
 
@@ -1079,19 +1112,20 @@ global:
   init: 0x4321
 
 recipe:
-- pkg: recipe_query.pkt   # send recipe_query.pkt, wait for the reply, extract dns.id → global.tid
+- packet: recipe_query.pkt # send recipe_query.pkt, wait for the reply, extract dns.id → global.tid
   wait: 1
   extract:
   - name: tid
     from: reply.dns.id    # dissected reply field (layer.field, same field set as sniffer)
     as: hex               # default int; also hex / str / bytes
-- pkg: recipe_query.pkt   # bare filename = no extra options
+- packet: recipe_query.pkt # bare filename = no extra options
 ```
 
 - **Syntax**: `global:` / `recipe:` section headers and step items (`- `) start at
-  column 0; step option lines are indented. A step item is `- pkg: FILE` (followed
-  by `wait:` / `raw:` / `params:` / `extract:` / `on_error:`) or a bare `- FILE`;
-  `#` comments;
+  column 0; step option lines are indented. A step item is `- packet: FILE`
+  (followed by `wait:` / `raw:` / `params:` / `extract:` / `on_error:`;
+  the old key `pkg:` was renamed — writing `pkg:` errors with a hint) or a bare
+  `- FILE`; `#` comments;
   paths resolve relative to the `.pktl` directory. A global item has three forms:
   `- name: NAME` (optionally followed by an indented `init:`), a bare `- NAME`
   (declared but unset), or `- NAME=VALUE` (inline init; `VALUE` uses the same
@@ -1104,10 +1138,19 @@ recipe:
   spell it inline as `- NAME=VALUE`), step `extract`
   (from replies; multiple replies apply in order, last write wins), CLI
   `-g k=v` (`--global`, overrides `init`).
-- **extract** needs a reply for that step (`wait:` or `--wait`). `from:` has two forms:
-  - `reply.<layer>.<field>` picks the dissected reply field (same layer/field set as
-    sniffer), `as:` controls the form — `int` (numeric fields, default) / `hex` /
+- **extract**: `from:` has three forms:
+  - `reply.<layer>.<field>` picks the dissected **reply** field (needs a reply for
+    that step: `wait:` or `--wait`; same layer/field set as sniffer), `as:` controls
+    the form — `int` (numeric fields, default) / `hex` /
     `str` (formatted IP/MAC strings) / `bytes` (raw field bytes, network order);
+  - `sent.<layer>.<field>` picks the dissected **sent** packet's field for this step
+    (**no wait needed** — reads the packet that was actually sent, e.g. the
+    serialized dns.id / tcp.seq), `as:` as above;
+  - `reply.peer.ip` / `reply.peer.port` — the **peer address** of a **`wait:`
+    no-value (continuous listen) step** (UDP listen): the datagram payload has no
+    UDP header, so the peer comes
+    from the socket — use it to reply from a later step
+    (e.g. `udp(dport=global("cport"))`);
   - **value expression** (functions / primitives / `+` arithmetic, with embedded
     `reply.<layer>.<field>` leaves): `from: reply.tcp.seq + 1`,
     `from: be16(reply.dns.id)`, `from: cksum(reply.icmp.payload)` — the expression
@@ -1117,6 +1160,33 @@ recipe:
     `global(...)`; `as:` is optional (default = the expression's natural type; an
     explicit `as:` converts to int / hex / str / bytes). TCP echo bodies are kept
     in the reply too, so extract works there as well.
+- **Wait / listen (`wait:`)**: the step option `wait:` shares the CLI `--wait`
+  semantics — **no value or a negative number = wait forever** (no value =
+  continuous listen, equivalent to a bare `--wait` / a negative `--wait`): the step
+  does **not send**; it
+  matches incoming packets with the `.pkt`'s `sniffer:` rule, and **on a hit the
+  recipe continues** (triggering later steps to send), with the matched packet
+  available to `extract` (`reply.` sources, including `reply.peer.ip/port`);
+  `wait: SECONDS` = send then wait for one matching reply (equivalent to
+  `--wait SECS`); absent = plain send. **The listen mode is chosen automatically**:
+  a packet with a udp/tcp transport layer → UDP datagram listen (bind address =
+  CLI `HOST:PORT` or derived from the packet's outermost udp/tcp dport); without
+  (ICMP/ARP etc.) → **link-layer listen** (full frames matched); `raw: true` /
+  `raw: NIC` overrides explicitly.
+  A whole server can be a recipe: demo → `examples/dns_trigger/` (wait listens for
+  a DNS query → extract id / peer port → a later step sends the reply).
+- **Wait timeout handling (`on_timeout: retry [N] | FILE`)**: when `wait: SECONDS`
+  times out with no matching reply — `on_timeout: retry [N]` **resends the step's
+  packets N times** (each resend waits again; the first reply received succeeds the
+  step, default 1), or `on_timeout: FILE` **prints the timeout notice and sends
+  that `.pkt`** (send other packets); the step continues — for retry / fallback /
+  degraded notifications (demo → `examples/wait_timeout/`). The fallback packet
+  gets the current global/params; its send failure follows `on_error`. `wait:`
+  no-value / a negative number (infinite wait) has no timeout concept.
+- **Send count (`count:`)**: a step option `count: N` sends **each packet of the
+  step N times** (send several packets at once; overrides the CLI `--count`,
+  default 1). E.g. fire an ICMP mock request 5 times: `count: 5` (with `wait:`
+  to await each reply).
 - **Failure handling**: a failing step (send error / extract with no reply or
   missing field) **stops** the whole recipe by default (exit code 1);
   `on_error: continue` records the failure and keeps going (final exit code
@@ -1149,5 +1219,37 @@ recipe:
   sniffer + extract id/seq reuse, bare IP through kernel routing; `--raw` needs
   root), `examples/app_http/` (HTTP GET/POST over TCP, `-p port=` injection),
   `examples/link_arp/` (ARP request/reply), `examples/quic_initial/`
-  (QUIC Initial/Short headers).
+  (QUIC Initial/Short headers), `examples/icmp_mock/` (a recipe **pair simulating
+  ICMP**: server.pktl link-layer listen-trigger + client.pktl multi-step flow with
+  extract reuse; reply seq offset +1000 as a recipe marker to rule out the kernel's
+  own echo reply on loopback).
   Run e.g. `prping packet examples/dns_recipe 127.0.0.1:5353 --wait 1`.
+
+### Loopback kernel echo vs. recipe replies
+
+**The trap**: ICMP echo requests sent to `127.0.0.1` are answered **by the kernel
+itself** (macOS/Linux both reply type=0 and echo id/seq/payload — `ping 127.0.0.1`
+needs no server). If the recipe reply is a pure echo it is **byte-identical** to
+the kernel's reply: the client's `wait:` matches the faster kernel reply (RTT
+~0.03 ms) and the recipe path is never actually verified. The
+`IPv4 header checksum mismatch` / `IPv4 total length exceeds actual bytes` notes
+printed by `prping packet` are also macOS loopback raw-socket artifacts (the
+loopback path does not compute the IP header checksum), unrelated to the recipe.
+
+**Fix 1 — recipe marker**: give the reply a feature the kernel never produces and
+match only that in the sniffer. E.g. `examples/icmp_mock/reply.pkt` offsets the
+reply `seq` to `global("r_seq") + 1000` (the kernel always echoes the original
+seq, never 1001/1002), so the client's `match icmp(type=0, id=..., seq=1001)` can
+only match the recipe reply.
+
+**Fix 2 — step pacing**: the server reopens its capture for every listen step
+(pcap device enumeration + BPF, millisecond scale), while on loopback the client
+finishes in <1 ms — without a gap it misses later requests (in
+`examples/icmp_mock` this shows as "only 3 matches": server 1 + client 2).
+Add `delay: SECS` to the client steps (e.g. `delay: 0.5`) so the server has time
+to reopen its listener.
+
+**What does not dodge the kernel**: targeting another local address (e.g. the en0
+LAN IP of the same machine) is still a local address and is still answered by the
+kernel. To truly avoid it, send to **another machine**, or use a non-ICMP mock
+(e.g. DNS/UDP — the kernel does not answer those).

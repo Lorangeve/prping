@@ -1,5 +1,11 @@
 # prping 代码重合分析与重构建议报告
 
+> ⚠️ **状态注记（2025-08 审计后）**：本报告为早期「代码重合」分析。后续多轮审计
+> 已修复其中的大量重复（如 capture.rs 的 ip_meta/ip_summary 已共享 parse_ip_base、
+> serve 抓包 keep 过滤已收敛为 frame_keep/bare_ip_keep、TraceSocket 逐跳骨架三路径
+> 共用等），并落地 72 项逻辑修复与重构——**最新修复清单以 AUDIT_REPORT.md 为准**，
+> 本报告的 §4 清单在核对时请以当前代码为准（部分条目已过时）。
+
 > 生成方式：分 9 个分析 agent（8 条子命令各一个 + 1 个全库交叉扫描），
 > 主控对关键发现逐条 grep/read 交叉验证后汇总。
 
@@ -202,6 +208,11 @@ prping 是一个跨平台 psping 复刻（Rust，workspace 双 crate：`prping-c
     对称提取 `parse_udp_receive_trigger(data) -> Option<(usize,u32)>` 与现有 `udp_receive_trigger` 配套（serve/mod.rs 与 bandwidth 解析侧复用）。
 21. **AF_PACKET 打开收敛（cross-cutting R6）**：`util::socket::open_af_packet(ifindex)` 供 capture.rs（全接口）与 pkg/raw.rs（指定接口）共用。
 - [x] 22. **display.rs 颜色副本删除（cross-cutting R8）**：`print_red_plain`/`print_bold_plain` 直接改调 `output::print_red`/`print_bold`（Rust 自动解引用兼容 &str）。
+- [x] 24. **sniffer/rule 统一谓词内核（E-4/E-10/E-11 收敛）**：字段取值器下沉 packet-dsl `matchpred`
+    （`layer_field`/`layer_field_bytes`/`field_names`——原 sniffer.rs 的 `sniffer_extract`/`field_bytes`/
+    `sniffer_field_names`），sniffer 匹配、配方 `extract`（`reply.`/`sent.`）、`reply()` 表达式、
+    `--eng` 概览校验共用同一字段表与取值器；`layer_kind` 经 `matchpred::layer_name` 单一来源；
+    sniffer 文法扩展 `and/or/not` + `ne` + `mask/startswith/endswith/contains`（与 `#[rule]` 同构）。
 23. **TCP SYN 构建 + 校验和收敛（M-18 / M-12，cross-cutting R9）**：TCP 头字段填充提取 `fn fill_tcp_header(buf, sport, dport, seq, flags, window)` 供 Unix/Windows 两条路径共用；校验和提取 `inet_checksum(data)` + `pseudo_checksum(proto, src, dst, payload)`，icmp_cksum / tcp_checksum / IP 头校验和统一调用。涉及：`ping/icmp.rs`、`ping/trace/{tcp,tcpwin}.rs`。
 
 ### P2 —— 架构级调整，高风险（需设计讨论）

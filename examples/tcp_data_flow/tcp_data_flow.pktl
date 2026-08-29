@@ -38,5 +38,5 @@ global:
   init: 0x2000
 
 recipe:
-- pkg: tcp_data.pkt   # 步骤 1：TCP 数据发送（PSH|ACK）
-- pkg: tcp_ack.pkt    # 步骤 2：TCP 数据确认（ACK）
+- packet: tcp_data.pkt   # 步骤 1：TCP 数据发送（PSH|ACK）
+- packet: tcp_ack.pkt    # 步骤 2：TCP 数据确认（ACK）

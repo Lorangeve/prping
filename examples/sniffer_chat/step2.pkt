@@ -1,0 +1,10 @@
+# 客户端步骤 2：复用 global.tid 发查询；sniffer 匹配回显（id 与发包一致，
+# `id=id` 引用发包同层同名字段；flags=0x0100 限定查询——回显由服务端原样送回）。
+q = dns(id=global("tid"), questions=["example.com"])
+full = use(q) |> udp(dport=53) |> ipv4(dst="127.0.0.1") |> eth()
+
+export:
+- full
+
+sniffer:
+  - match dns(id=id, flags=0x0100)

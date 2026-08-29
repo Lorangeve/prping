@@ -1,0 +1,7 @@
+# 客户端步骤 1：固定 id 的 DNS 查询——配方用 sent extract 把实际发出的 dns.id
+# 提取进 global.tid（sent.<层>.<字段> 取本步发包字段，无需 wait）。
+q = dns(id=0x4242, questions=["example.com"])
+full = use(q) |> udp(dport=53) |> ipv4(dst="127.0.0.1") |> eth()
+
+export:
+- full

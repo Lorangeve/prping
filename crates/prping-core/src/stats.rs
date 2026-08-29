@@ -120,7 +120,10 @@ impl Histogram {
 }
 
 /// 保留的采样窗口上限（无限 ping 时内存有界）。
-const MAX_SAMPLES: usize = 10000;
+///
+/// 窗口满后 min/max/avg/stddev 仍按全历史累计（record 不重置），只有
+/// percentile/直方图/时间线按最近 MAX_SAMPLES 个样本计算；摘要里会标注。
+const MAX_SAMPLES: usize = 100_000;
 
 #[derive(Debug, Default)]
 pub struct Stats {
@@ -130,9 +133,13 @@ pub struct Stats {
     pub max: Option<Duration>,
     pub total: Duration,
     pub sum_sq: f64,
-    times: Vec<Duration>,
-    timeline: Vec<(f64, f64)>, // (seconds from start, latency ms)
+    /// 采样窗口（VecDeque：窗口满后 pop_front 为 O(1)，此前 Vec::remove(0)
+    /// 每次 O(n) 搬移——无限 ping 高频率长跑退化为 O(n²) memmove）
+    times: std::collections::VecDeque<Duration>,
+    timeline: std::collections::VecDeque<(f64, f64)>, // (seconds from start, latency ms)
     t0: Option<Instant>,
+    /// 采样窗口是否丢弃过最旧样本（超长运行；percentile/直方图仅反映最近窗口）。
+    window_dropped: bool,
     // 抖动：相邻接收样本 RTT 差的绝对值；丢包打断连续链（prev 重置）
     prev_rtt: Option<Duration>,
     jitter_sum: f64, // 秒
@@ -146,14 +153,14 @@ impl Stats {
             self.t0 = Some(Instant::now());
         }
         let t = self.t0.unwrap().elapsed().as_secs_f64();
-        self.timeline.push((t, rtt.as_secs_f64() * 1000.0));
+        self.timeline.push_back((t, rtt.as_secs_f64() * 1000.0));
         self.sent += 1;
         self.received += 1;
         self.total += rtt;
         self.sum_sq += rtt.as_secs_f64().powi(2);
         self.min = Some(self.min.map_or(rtt, |m| m.min(rtt)));
         self.max = Some(self.max.map_or(rtt, |m| m.max(rtt)));
-        self.times.push(rtt);
+        self.times.push_back(rtt);
         if let Some(prev) = self.prev_rtt {
             let d = rtt.abs_diff(prev);
             self.jitter_sum += d.as_secs_f64();
@@ -161,10 +168,11 @@ impl Stats {
             self.jitter_pairs += 1;
         }
         self.prev_rtt = Some(rtt);
-        // 无限 ping 时内存有界：窗口上限 10000，超出丢弃最旧（min/max/loss 仍累计）
+        // 无限 ping 时内存有界：窗口满后丢弃最旧（min/max/avg/stddev 仍按全历史累计）
         if self.times.len() > MAX_SAMPLES {
-            self.times.remove(0);
-            self.timeline.remove(0);
+            self.times.pop_front();
+            self.timeline.pop_front();
+            self.window_dropped = true;
         }
     }
 
@@ -189,7 +197,10 @@ impl Stats {
         if self.received == 0 {
             return None;
         }
-        Some(self.total / self.received as u32)
+        // 用 f64 除法：此前 received as u32 在 >4G 样本时除数截断（数学错误）
+        Some(Duration::from_secs_f64(
+            self.total.as_secs_f64() / self.received as f64,
+        ))
     }
 
     /// 抖动：相邻接收样本 RTT 差的平均绝对值（丢包链被重置）。
@@ -223,20 +234,24 @@ impl Stats {
         if self.times.is_empty() {
             return None;
         }
-        let mut sorted = self.times.clone();
+        // p 越界（<0 或 >100）时越界索引会 panic，公开 API 需防御
+        if !(0.0..=100.0).contains(&p) {
+            return None;
+        }
+        let mut sorted: Vec<Duration> = self.times.iter().copied().collect();
         sorted.sort_unstable();
         let idx = ((self.times.len() - 1) as f64 * p / 100.0).round() as usize;
         Some(sorted[idx])
     }
 
     pub fn sorted_times(&self) -> Vec<Duration> {
-        let mut v = self.times.clone();
+        let mut v: Vec<Duration> = self.times.iter().copied().collect();
         v.sort_unstable();
         v
     }
 
     /// 原始采样（供直方图等只读消费，避免克隆）。
-    pub(crate) fn samples(&self) -> &[Duration] {
+    pub(crate) fn samples(&self) -> &std::collections::VecDeque<Duration> {
         &self.times
     }
 }
@@ -254,7 +269,7 @@ pub fn json_sample(
     err: Option<&str>,
 ) -> Result<()> {
     let ts = crate::util::unix_ts();
-    let target = target.replace('"', "\\\"");
+    let target = crate::util::json_escape(target);
     if ok {
         let ms = rtt.map(|r| r.as_secs_f64() * 1000.0).unwrap_or(0.0);
         writeln!(
@@ -262,7 +277,7 @@ pub fn json_sample(
             "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"seq\":{seq},\"ok\":true,\"rtt_ms\":{ms:.2}}}"
         )
     } else {
-        let err = err.unwrap_or("error").replace('"', "\\\"");
+        let err = crate::util::json_escape(err.unwrap_or("error"));
         writeln!(
             w,
             "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"seq\":{seq},\"ok\":false,\"error\":\"{err}\"}}"
@@ -280,7 +295,7 @@ pub fn print_summary(
     if json() {
         let loss = stats.loss_pct();
         let ts = crate::util::unix_ts();
-        let target = target.replace('"', "\\\"");
+        let target = crate::util::json_escape(target);
         let mut line = format!(
             "{{\"type\":\"{mode}\",\"target\":\"{target}\",\"ts\":{ts},\"summary\":true,\"sent\":{},\"received\":{},\"lost\":{},\"loss_pct\":{:.1}",
             stats.sent,
@@ -309,6 +324,9 @@ pub fn print_summary(
                 let p95 = stats.percentile(95.0).unwrap().as_secs_f64() * 1000.0;
                 let p99 = stats.percentile(99.0).unwrap().as_secs_f64() * 1000.0;
                 line += &format!(",\"p50_ms\":{p50:.2},\"p95_ms\":{p95:.2},\"p99_ms\":{p99:.2}");
+                if stats.window_dropped {
+                    line += &format!(",\"windowed\":true,\"window\":{MAX_SAMPLES}");
+                }
             }
         }
         line.push('}');
@@ -375,6 +393,17 @@ pub fn print_summary(
                 output::indent(1),
                 t!("stats.percentiles", p50 = p50, p95 = p95, p99 = p99)
             )?;
+            if stats.window_dropped {
+                output::print_dim(
+                    w,
+                    format!(
+                        "{}{}",
+                        output::indent(1),
+                        t!("stats.percentile_window_note", n = MAX_SAMPLES)
+                    ),
+                )?;
+                writeln!(w)?;
+            }
         }
         if let (Some(j), Some(jm)) = (stats.jitter(), stats.jitter_max()) {
             writeln!(
@@ -507,7 +536,8 @@ pub fn print_timeline(w: &mut StandardStream, stats: &Stats) -> Result<()> {
     if stats.timeline.len() < 2 {
         return Ok(());
     }
-    let pts = &stats.timeline;
+    // VecDeque 无连续切片（下方 pts[i..end] 需要）：复制一份（每轮渲染一次）
+    let pts: Vec<(f64, f64)> = stats.timeline.iter().copied().collect();
     let max_y = pts.iter().map(|&(_, y)| y).fold(0.0f64, f64::max);
     let min_y = pts.iter().map(|&(_, y)| y).fold(f64::MAX, f64::min);
     let max_x = pts.last().unwrap().0;
@@ -817,7 +847,8 @@ mod tests {
         let spec = HistogramSpec::Thresholds(vec![1.0, 5.0, 10.0]);
         // 桶: (0,1] (1,5] (5,10] (10,∞] → 0.5→0, 1.0→0, 5.0→1, 10.0→2, 50.0→3
         let mut w = termcolor::StandardStream::stdout(termcolor::ColorChoice::Never);
-        print_histogram(&mut w, s.samples(), &spec).unwrap();
+        let samples: Vec<Duration> = s.samples().iter().copied().collect();
+        print_histogram(&mut w, &samples, &spec).unwrap();
     }
 
     #[test]

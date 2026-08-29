@@ -6,7 +6,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use packet_dsl::DefaultSerializer;
 use packet_dsl::ir::{Layer, MacAddr, PacketSpec};
@@ -16,8 +16,8 @@ use termcolor::WriteColor;
 
 use crate::engine::eng::{libs_display, value_display};
 use crate::output::{
-    print_bold, print_cyan, print_dim, print_green, print_magenta, print_red, print_yellow,
-    spaces, writeln_orange,
+    print_bold, print_cyan, print_dim, print_green, print_magenta, print_orange, print_red,
+    print_yellow, spaces, writeln_orange,
 };
 use crate::util::hex_str;
 
@@ -181,28 +181,52 @@ fn render_layers_ref<W: WriteColor>(w: &mut W, layers: &[&Layer], header: &str) 
 /// 对标 scapy `Ether(bytes)`）；语义层（无 raw）用 IR 字段 + auto 标注。
 /// `ser` 由调用方传入（`--pkt` 传实际发送用的序列化器，fuzz 与发送一致）。
 /// 返回完整包字节（供调用方决定是否 hexdump）。
+/// 逐层描述（层名, 字段描述, 是否字节反解）。
+pub(crate) type LayerDesc = (String, String, bool);
+
+/// 逐层字段描述（文本渲染与 --json 复用）。
+///
+/// 每层字段：字节直喂层从「该层序列化后的字节」解析（len/checksum/proto 真实值，
+/// 对标 scapy `Ether(bytes)`）；语义层（无 raw）用 IR 字段 + auto 标注。
+/// `ser` 由调用方传入（`--pkt` 传实际发送用的序列化器，fuzz 与发送一致）。
+/// 返回 (层名, 字段描述, 是否字节反解) 列表 + 完整序列化字节。
+pub(crate) fn describe_packet_layers(
+    pkt: &PacketSpec,
+    ser: &DefaultSerializer,
+) -> io::Result<(Vec<LayerDesc>, Vec<u8>)> {
+    let (bytes, parts) = ser.serialize_parts(pkt).map_err(io::Error::other)?;
+    let mut out = Vec::with_capacity(pkt.layers.len());
+    for (i, layer) in pkt.layers.iter().enumerate() {
+        let (desc, raw) = if layer_raw(layer).is_some() {
+            // 该层在序列化结果中的区间（内→外）；外层包含内层，取自身头部分
+            let seg = parts.get(i).map(|&(s, e)| &bytes[s..e]);
+            match seg {
+                Some(seg) => (describe_raw_bytes(layer, seg), true),
+                None => (describe_layer(layer), false),
+            }
+        } else {
+            (describe_layer(layer), false)
+        };
+        out.push((layer_name(layer).to_string(), desc, raw));
+    }
+    Ok((out, bytes))
+}
+
+/// 层字段渲染（无 hexdump）：`--eng` 与 `--pkt` 复用。
+///
+/// 返回完整包字节（供调用方决定是否 hexdump）。
 pub fn render_packet_fields<W: WriteColor>(
     w: &mut W,
     pkt: &PacketSpec,
     header: &str,
     ser: &DefaultSerializer,
 ) -> io::Result<Vec<u8>> {
-    let (bytes, parts) = ser.serialize_parts(pkt).map_err(io::Error::other)?;
+    let (layers, bytes) = describe_packet_layers(pkt, ser)?;
     print_cyan(w, header)?;
     writeln!(w)?;
     let width = term_width();
-    for (i, layer) in pkt.layers.iter().enumerate() {
-        let desc = if layer_raw(layer).is_some() {
-            // 该层在序列化结果中的区间（内→外）；外层包含内层，取自身头部分
-            let seg = parts.get(i).map(|&(s, e)| &bytes[s..e]);
-            match seg {
-                Some(seg) => describe_raw_bytes(layer, seg),
-                None => describe_layer(layer),
-            }
-        } else {
-            describe_layer(layer)
-        };
-        render_layer_line(w, i, layer_name(layer), &desc, width)?;
+    for (i, (name, desc, _)) in layers.iter().enumerate() {
+        render_layer_line(w, i, name, desc, width)?;
     }
     print_dim(w, format!("{}bytes: {} B", spaces(2), bytes.len()))?;
     writeln!(w)?;
@@ -218,47 +242,56 @@ pub fn render_packet<W: WriteColor>(w: &mut W, pkt: &PacketSpec, header: &str) -
     Ok(())
 }
 
-/// 层序咨询性警告（只提示不阻断）：`--eng` 展示与 `--pkt` 发送共用。
-/// 无警告时静默；每条一行橙色 `note:`，风格与 fake-ip 等运行期提示一致。
-pub fn print_stack_warnings<W: WriteColor>(w: &mut W, pkt: &PacketSpec) -> io::Result<()> {
-    for warn in packet_dsl::stack_warnings(pkt) {
-        let msg = match warn.kind {
-            packet_dsl::StackWarningKind::ReversedOrder => {
-                t!(
-                    "engine.note_stack_reversed",
-                    inner = warn.inner,
-                    outer = warn.outer
-                )
-            }
+/// 层序咨询性警告消息（本地化文本）：`--eng` 展示 / `--pkt` 发送 / `--json` 复用。
+pub(crate) fn stack_warning_messages(pkt: &PacketSpec) -> Vec<String> {
+    packet_dsl::stack_warnings(pkt)
+        .iter()
+        .map(|warn| match warn.kind {
+            packet_dsl::StackWarningKind::ReversedOrder => t!(
+                "engine.note_stack_reversed",
+                inner = warn.inner,
+                outer = warn.outer
+            )
+            .to_string(),
             packet_dsl::StackWarningKind::TransportInTransport => t!(
                 "engine.note_stack_transport_in_transport",
                 inner = warn.inner,
                 outer = warn.outer
-            ),
+            )
+            .to_string(),
             packet_dsl::StackWarningKind::MissingNetwork => t!(
                 "engine.note_stack_missing_network",
                 inner = warn.inner,
                 outer = warn.outer
-            ),
-            packet_dsl::StackWarningKind::PayloadOnly => {
-                t!(
-                    "engine.note_stack_payload_only",
-                    inner = warn.inner,
-                    outer = warn.outer
-                )
-            }
+            )
+            .to_string(),
+            packet_dsl::StackWarningKind::PayloadOnly => t!(
+                "engine.note_stack_payload_only",
+                inner = warn.inner,
+                outer = warn.outer
+            )
+            .to_string(),
             packet_dsl::StackWarningKind::UninferrableProto => t!(
                 "engine.note_stack_uninferrable_proto",
                 inner = warn.inner,
                 outer = warn.outer
-            ),
+            )
+            .to_string(),
             packet_dsl::StackWarningKind::WrongCarrier => t!(
                 "engine.note_stack_wrong_carrier",
                 inner = warn.inner,
                 outer = warn.outer,
                 carriers = warn.carriers.join("/")
-            ),
-        };
+            )
+            .to_string(),
+        })
+        .collect()
+}
+
+/// 层序咨询性警告（只提示不阻断）：`--eng` 展示与 `--pkt` 发送共用。
+/// 无警告时静默；每条一行橙色 `note:`，风格与 fake-ip 等运行期提示一致。
+pub fn print_stack_warnings<W: WriteColor>(w: &mut W, pkt: &PacketSpec) -> io::Result<()> {
+    for msg in stack_warning_messages(pkt) {
         writeln_orange(w, format!("{}{msg}", spaces(2)))?;
     }
     Ok(())
@@ -869,36 +902,126 @@ pub(crate) fn render_module_header<W: WriteColor>(
     if let Some(sn) = &module.sniffer {
         print_dim(w, "sniffer:")?;
         writeln!(w)?;
-        for clause in &sn.clauses {
-            let fields: Vec<String> = clause
-                .fields
-                .iter()
-                .map(|(name, v)| match v {
-                    packet_dsl::SnifferValue::Literal(l) => {
-                        format!("{name}={}", value_display(l))
-                    }
-                    packet_dsl::SnifferValue::SentField(f) => format!("{name}={f}"),
-                    packet_dsl::SnifferValue::Expr(e) => {
-                        format!("{name}={}", value_display(e))
-                    }
-                })
-                .collect();
-            print_dim(
-                w,
-                format!(
-                    "{}- match {}({})",
-                    spaces(2),
-                    clause.layer,
-                    fields.join(", ")
-                ),
-            )?;
-            writeln!(w)?;
+        for pred in &sn.clauses {
+            render_sniffer_pred(w, pred, 2)?;
         }
     }
     print_dim(w, format!("libs: {}", libs_display(libs)))?;
     writeln!(w)?;
     writeln!(w)?;
     Ok(())
+}
+
+/// 渲染一个 sniffer 谓词（`- match 层(...)` / `- and(...)` / `- or(...)` / `- not(...)`）。
+fn render_sniffer_pred<W: WriteColor>(
+    w: &mut W,
+    pred: &packet_dsl::ast::SnifferPred,
+    level: usize,
+) -> io::Result<()> {
+    use packet_dsl::ast::{SnifferItem, SnifferPred};
+    match pred {
+        SnifferPred::Clause(c) => {
+            let items: Vec<String> = c
+                .items
+                .iter()
+                .map(|item| match item {
+                    SnifferItem::FieldEq { name, val } => {
+                        format!("{name}={}", sniffer_value_display(val))
+                    }
+                    SnifferItem::FieldNe { name, val } => {
+                        format!("ne({name}, {})", sniffer_value_display(val))
+                    }
+                    SnifferItem::Mask(v) => format!("mask({})", value_display(v)),
+                    SnifferItem::StartsWith(s) => format!("startswith({s:?})"),
+                    SnifferItem::EndsWith(s) => format!("endswith({s:?})"),
+                    SnifferItem::Contains(s) => format!("contains({s:?})"),
+                })
+                .collect();
+            print_dim(
+                w,
+                format!("{}- match {}({})", spaces(level), c.layer, items.join(", ")),
+            )?;
+            writeln!(w)?;
+        }
+        SnifferPred::And(ps) => {
+            print_dim(w, format!("{}- and(", spaces(level)))?;
+            writeln!(w)?;
+            for p in ps {
+                render_sniffer_pred(w, p, level + 2)?;
+            }
+            print_dim(w, format!("{}),", spaces(level)))?;
+            writeln!(w)?;
+        }
+        SnifferPred::Or(ps) => {
+            print_dim(w, format!("{}- or(", spaces(level)))?;
+            writeln!(w)?;
+            for p in ps {
+                render_sniffer_pred(w, p, level + 2)?;
+            }
+            print_dim(w, format!("{}),", spaces(level)))?;
+            writeln!(w)?;
+        }
+        SnifferPred::Not(p) => {
+            print_dim(w, format!("{}- not(", spaces(level)))?;
+            writeln!(w)?;
+            render_sniffer_pred(w, p, level + 2)?;
+            print_dim(w, format!("{}),", spaces(level)))?;
+            writeln!(w)?;
+        }
+    }
+    Ok(())
+}
+
+/// 监听应答模板文件的解析展示（`engine` 只做解析、不发包）：`reply(层,字段)`
+/// 需 `--wait --raw` 监听上下文才能求值，此处不展开包，只展示模块结构
+/// （defs / sniffer / params / libs）并说明原因。
+pub(crate) fn render_listen_template<W: WriteColor>(
+    w: &mut W,
+    path: &Path,
+    module: &Module,
+    libs: &[PathBuf],
+    params: &[(String, String)],
+) -> io::Result<()> {
+    print_magenta(w, "prping engine")?;
+    writeln!(w)?;
+    print_cyan(w, "module: ")?;
+    print_bold(w, &module.name)?;
+    print_dim(w, format!("{}default: yes (应答模板，未展开)", spaces(2)))?;
+    writeln!(w)?;
+    print_dim(w, format!("file: {}", path.display()))?;
+    writeln!(w)?;
+    if !module.defs.is_empty() {
+        let names: Vec<&str> = module.defs.iter().map(|d| d.name.as_str()).collect();
+        print_dim(w, format!("defs: {}", names.join(", ")))?;
+        writeln!(w)?;
+    }
+    if let Some(sn) = &module.sniffer {
+        print_dim(w, "sniffer:")?;
+        writeln!(w)?;
+        for pred in &sn.clauses {
+            render_sniffer_pred(w, pred, 2)?;
+        }
+    }
+    if !params.is_empty() {
+        let p_str: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        print_dim(w, format!("params: {}", p_str.join(", ")))?;
+        writeln!(w)?;
+    }
+    print_dim(w, format!("libs: {}", libs_display(libs)))?;
+    writeln!(w)?;
+    print_orange(w, t!("engine.listen_template_note"))?;
+    writeln!(w)?;
+    Ok(())
+}
+
+/// sniffer 匹配值的展示（字面量按值展示；Ident = 发包字段引用；表达式按值展示）。
+pub(crate) fn sniffer_value_display(v: &packet_dsl::SnifferValue) -> String {
+    use packet_dsl::SnifferValue;
+    match v {
+        SnifferValue::Literal(l) => value_display(l),
+        SnifferValue::SentField(f) => f.clone(),
+        SnifferValue::Expr(e) => value_display(e),
+    }
 }
 
 #[cfg(test)]

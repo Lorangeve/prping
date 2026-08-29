@@ -37,6 +37,27 @@ pub fn hex_str(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// JSON 字符串转义（手写 JSON 输出的共用转义）：`\\`、`"` 与全部控制字符。
+///
+/// 此前各处只转义 `"`，目标/错误串含反斜杠或换行时产出非法 JSON。
+pub fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// 字节数格式化为人类可读字符串（B / KiB / MiB / GiB / TiB）。
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
@@ -73,6 +94,12 @@ pub fn parse_udp_receive_trigger(data: &[u8]) -> Option<(usize, u32)> {
     if data.len() == 8 && data[0] == 0xFF && data[1] == 0xFF {
         let size = u16::from_be_bytes([data[2], data[3]]) as usize;
         let count = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+        // size 须在 1..=MAX_UDP（协议对称）：UDP ping 的 8 字节载荷前 4 字节是
+        // seq，恰为 0xFFFF0000 时构成 [FF FF 00 00 ...] 的假触发（size=0）——
+        // 这里拒绝后按普通回显处理
+        if !(1..=crate::MAX_UDP).contains(&size) {
+            return None;
+        }
         Some((size, count))
     } else {
         None

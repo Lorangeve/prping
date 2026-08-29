@@ -11,5 +11,5 @@
 #     应答帧提取，Linux raw 回包 socket 只收 ICMP 收不到 ARP，故用参数注入）
 #   - arp 层字段：op=request()/reply() 位常量 + sha/spa/tha/tpa
 recipe:
-- pkg: arp_request.pkt
-- pkg: arp_reply.pkt
+- packet: arp_request.pkt
+- packet: arp_reply.pkt

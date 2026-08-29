@@ -22,8 +22,12 @@ pub enum SerializeError {
     EmptyPacket,
     #[error("DNS 域名标签超过 63 字节：`{0}`")]
     DnsLabelTooLong(String),
+    #[error("DNS 域名总长超过 255 字节（RFC 1035）：{0}")]
+    DnsNameTooLong(usize),
     #[error("无法确定以太网 ethertype（载荷无法推导，请显式指定 ethertype）")]
     UnknownEthertype,
+    #[error("包长 {0} 超过 65535 字节（长度字段 u16 溢出，协议不允许）")]
+    PacketTooLong(usize),
 }
 
 /// 序列化结果：最终字节 + 每层头字节区间（供逐层反解展示）。
@@ -310,6 +314,7 @@ impl DefaultSerializer {
         let op = match f.op.unwrap_or(ArpOp::Request) {
             ArpOp::Request => 1u16,
             ArpOp::Reply => 2u16,
+            ArpOp::Other(n) => n,
         };
         let sha = f.sha.unwrap_or_default();
         let tha = f.tha.unwrap_or_default();
@@ -343,7 +348,11 @@ impl DefaultSerializer {
             // checksum（依赖载荷长度，函数内无法算）。proto 字节仍是默认占位 0 而
             // 内层是 TCP/UDP/ICMP 时按内层推导（headers.ipv4 默认 proto=0）。
             let mut hdr = raw.clone();
-            let total = (hdr.len() + payload.len()) as u16;
+            let total_len = hdr.len() + payload.len();
+            if total_len > u16::MAX as usize {
+                return Err(SerializeError::PacketTooLong(total_len));
+            }
+            let total = total_len as u16;
             if hdr.len() >= 4 {
                 hdr[2] = (total >> 8) as u8;
                 hdr[3] = total as u8;
@@ -393,6 +402,9 @@ impl DefaultSerializer {
         let id = f.id.unwrap_or_else(|| self.rng().u16());
         let flags = f.flags.unwrap_or_default();
         let total_len = 20 + payload.len();
+        if total_len > u16::MAX as usize {
+            return Err(SerializeError::PacketTooLong(total_len));
+        }
         let mut header = Vec::with_capacity(20);
         header.push(0x45);
         header.push(tos);
@@ -427,6 +439,9 @@ impl DefaultSerializer {
             // next_header 字节仍是默认占位 59（No Next Header）而内层是
             // TCP/UDP/ICMPv6 时按内层推导（headers.ipv6 默认 next_header=59）。
             let mut hdr = raw.clone();
+            if payload.len() > u16::MAX as usize {
+                return Err(SerializeError::PacketTooLong(payload.len()));
+            }
             let plen = payload.len() as u16;
             if hdr.len() >= 6 {
                 hdr[4] = (plen >> 8) as u8;
@@ -466,6 +481,9 @@ impl DefaultSerializer {
             Field::Value(h) => h,
             _ => 64,
         };
+        if payload.len() > u16::MAX as usize {
+            return Err(SerializeError::PacketTooLong(payload.len()));
+        }
         let mut out = Vec::with_capacity(40 + payload.len());
         out.extend_from_slice(&0x6000_0000u32.to_be_bytes()); // ver 6, tc 0, flow 0
         out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
@@ -538,6 +556,10 @@ impl DefaultSerializer {
                 hdr[17] = 0;
                 let mut seg = hdr.clone();
                 seg.extend_from_slice(payload);
+                // 伪头部长度字段是 u16：段长 > 65535 时校验和会错
+                if seg.len() > u16::MAX as usize {
+                    return Err(SerializeError::PacketTooLong(seg.len()));
+                }
                 let c = transport_checksum(layers, i, 6, &seg);
                 hdr[16] = (c >> 8) as u8;
                 hdr[17] = c as u8;
@@ -567,6 +589,11 @@ impl DefaultSerializer {
         while options.len() % 4 != 0 {
             options.push(0);
         }
+        // data_offset 只有 4 位（最大 15 → options 最多 40 字节）；超限此前
+        // 静默截断头部损坏
+        if options.len() > 40 {
+            return Err(SerializeError::PacketTooLong(20 + options.len()));
+        }
         let data_offset = 5 + options.len() / 4;
         let mut seg = Vec::with_capacity(20 + options.len() + payload.len());
         seg.extend_from_slice(&sport.to_be_bytes());
@@ -580,6 +607,10 @@ impl DefaultSerializer {
         seg.extend_from_slice(&0u16.to_be_bytes()); // urgent pointer
         seg.extend_from_slice(&options);
         seg.extend_from_slice(payload);
+        // 伪头部长度字段是 u16：段长 > 65535 时校验和会错（且 TCP 段本身不允许）
+        if seg.len() > u16::MAX as usize {
+            return Err(SerializeError::PacketTooLong(seg.len()));
+        }
         if f.auto_checksum {
             let sum = transport_checksum(layers, i, 6, &seg);
             seg[16] = (sum >> 8) as u8;
@@ -598,7 +629,11 @@ impl DefaultSerializer {
         if let Some(raw) = &f.raw {
             // bytes= 直喂：自动补 UDP length（offset 4-5）与 checksum（offset 6-7 伪头部）
             let mut hdr = raw.clone();
-            let len = (hdr.len() + payload.len()) as u16;
+            let total = hdr.len() + payload.len();
+            if total > u16::MAX as usize {
+                return Err(SerializeError::PacketTooLong(total));
+            }
+            let len = total as u16;
             if hdr.len() >= 6 {
                 hdr[4] = (len >> 8) as u8;
                 hdr[5] = len as u8;
@@ -619,6 +654,9 @@ impl DefaultSerializer {
         let sport = f.src_port.unwrap_or_else(|| self.rng().u16().max(1));
         let dport = f.dst_port.unwrap_or(0);
         let len = 8 + payload.len();
+        if len > u16::MAX as usize {
+            return Err(SerializeError::PacketTooLong(len));
+        }
         let mut datagram = Vec::with_capacity(len);
         datagram.extend_from_slice(&sport.to_be_bytes());
         datagram.extend_from_slice(&dport.to_be_bytes());
@@ -798,12 +836,19 @@ fn encode_dns_name(out: &mut Vec<u8>, name: &str) -> Result<(), SerializeError> 
         out.push(0);
         return Ok(());
     }
+    // 总长（含末尾 0 与各标签长度字节）须 ≤ 255（RFC 1035 §3.1）——
+    // 此前只校验单标签 ≤63，多标签长名字产出非法 DNS 报文（tpl %L 已有此检查）
+    let mut total = 1usize; // 末尾 0x00
     for label in name.split('.') {
         if label.is_empty() {
             continue;
         }
         if label.len() > 63 {
             return Err(SerializeError::DnsLabelTooLong(label.to_string()));
+        }
+        total += 1 + label.len();
+        if total > 255 {
+            return Err(SerializeError::DnsNameTooLong(total - 1));
         }
         out.push(label.len() as u8);
         out.extend_from_slice(label.as_bytes());

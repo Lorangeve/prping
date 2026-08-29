@@ -9,5 +9,5 @@
 #   - headers.http 是 proto：start_line/headers/body 三参数（method/path 为反解字段）
 #   - 步骤 1：GET；步骤 2：POST（带 JSON body 与中文头）——同一端口两个变体
 recipe:
-- pkg: http_get.pkt
-- pkg: http_post.pkt
+- packet: http_get.pkt
+- packet: http_post.pkt

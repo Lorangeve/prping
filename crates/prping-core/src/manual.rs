@@ -1,8 +1,9 @@
-//! 使用手册（`--help-pkg`）：内嵌双语 markdown、章节解析与跳转匹配、pager 自动分页。
+//! 使用手册（`document` 子命令）：内嵌双语 markdown、章节解析与跳转匹配、pager 自动分页。
 //!
 //! - 手册源：`docs/manual-zh.md` / `docs/manual-en.md`（`#` 文档标题 + `## N. 标题` 章节）。
-//! - `--help-pkg`（无参数）→ 全文，tty 时经 pager（`$PAGER`，默认 `less -R`）自动分页；
-//!   `--help-pkg 目录标题` → 按编号 / 标题前缀 / 标题包含匹配章节，单命中打印、多命中列候选。
+//! - `document`（无参数）→ 全文，tty 时经 pager（`$PAGER`，默认 `less -R`）自动分页；
+//!   `document SECTION` → 按编号 / 标题前缀 / 标题包含匹配章节，单命中打印、多命中列候选。
+//!   顶层 `--help-pkg` 已废弃（CLI 直接报错），手册统一走 document 子命令。
 
 #[cfg(unix)]
 use std::io::IsTerminal;
@@ -70,7 +71,7 @@ pub fn sections(manual: &str) -> Vec<Section> {
     out
 }
 
-/// 目录：`N. 标题` 列表（供 `--help-pkg` 空查询提示 / 跳转无命中时展示）。
+/// 目录：`N. 标题` 列表（供 `document` 空查询提示 / 跳转无命中时展示）。
 pub fn toc(manual: &str) -> String {
     sections(manual)
         .iter()
@@ -118,7 +119,9 @@ pub fn print_paged(text: &str) -> std::io::Result<()> {
             .spawn()
         {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(text.as_bytes())?;
+                // pager 提前退出（如 head -c 100）会触发 EPIPE——用户关掉
+                // 分页器不是错误；无论成败都 wait 回收子进程
+                let _ = stdin.write_all(text.as_bytes());
             }
             let _ = child.wait();
             return Ok(());

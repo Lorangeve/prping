@@ -33,7 +33,7 @@
 #   55     | Parameter List    | 客户端请求的参数列表
 
 recipe:
-- pkg: dhcp_discover.pkt   # 步骤 1：DHCP Discover（客户端广播发现）
-- pkg: dhcp_offer.pkt      # 步骤 2：DHCP Offer（服务端提供 IP）
-- pkg: dhcp_request.pkt    # 步骤 3：DHCP Request（客户端确认请求）
-- pkg: dhcp_ack.pkt        # 步骤 4：DHCP Ack（服务端确认分配）
+- packet: dhcp_discover.pkt   # 步骤 1：DHCP Discover（客户端广播发现）
+- packet: dhcp_offer.pkt      # 步骤 2：DHCP Offer（服务端提供 IP）
+- packet: dhcp_request.pkt    # 步骤 3：DHCP Request（客户端确认请求）
+- packet: dhcp_ack.pkt        # 步骤 4：DHCP Ack（服务端确认分配）

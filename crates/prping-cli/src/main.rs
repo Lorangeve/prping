@@ -1,10 +1,10 @@
-rust_i18n::i18n!("locales");
+rust_i18n::i18n!("locales", fallback = "en-US");
 
 use bpaf::*;
 use prping_core::{
-    OutcomeKind, PingConfig, PrpingError, PrpingWarning,
-    configure_executor_threads, find_sections, manual_for, parse_histogram, print_paged,
-    resolve_source, run, serve, set_json, set_pretty, stderr, toc, writeln_orange, writeln_red,
+    OutcomeKind, PingConfig, PrpingError, PrpingWarning, configure_executor_threads, find_sections,
+    manual_for, parse_histogram, print_paged, resolve_source, run, serve, set_json, set_pretty,
+    stderr, toc, writeln_orange, writeln_red,
 };
 use rust_i18n::t;
 use std::io::Write;
@@ -33,11 +33,15 @@ fn parse_target(input: &str) -> anyhow::Result<(String, Option<u16>)> {
         }
         anyhow::bail!(t!("errors.invalid_ipv6"));
     }
-    if let Some((host, port)) = input.rsplit_once(':')
-        && port.chars().all(|c| c.is_ascii_digit())
-        && !host.contains(':')
-    {
-        return Ok((host.to_string(), Some(port.parse()?)));
+    if let Some((host, port)) = input.rsplit_once(':') {
+        // host:port 形态（host 不再含 ':'，即非裸 IPv6）
+        if !host.contains(':') {
+            if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+                // 形似 host:badport：明确报错，而不是把整串当主机名给出迷惑的解析失败
+                anyhow::bail!(t!("errors.invalid_port", value = port));
+            }
+            return Ok((host.to_string(), Some(port.parse()?)));
+        }
     }
     Ok((input.to_string(), None))
 }
@@ -238,20 +242,24 @@ struct EngineArgs {
     lib: Vec<String>,
     params: Vec<String>,
     global: Vec<String>,
+    json: bool,
     lang: Option<String>,
 }
 
-/// packet 子命令（构建 .pkt 并发送；.pktl 配方执行）
+/// packet 子命令（构建 .pkt 并发送；.pktl 配方执行；--wait 无值 = 持续监听回显）
+#[derive(Clone)]
 struct PacketArgs {
     raw: bool,
     iface: Option<String>,
-    wait: Option<f64>,
+    wait: prping_core::WaitMode,
+    count: usize,
     fuzz: bool,
     out: Option<String>,
     summary: bool,
     lib: Vec<String>,
     params: Vec<String>,
     global: Vec<String>,
+    json: bool,
     lang: Option<String>,
     file: String,
     target: Option<String>,
@@ -430,6 +438,7 @@ fn engine_cmd() -> impl Parser<Command> {
             .help(t!("help.options.global").as_ref())
             .many()),
         lang(opt_lang()),
+        json(opt_json()),
         file(positional::<String>("FILE.pkt").optional()),
     })
     .to_options()
@@ -447,16 +456,54 @@ fn packet_cmd() -> impl Parser<Command> {
             .argument::<String>("IFACE")
             .help(t!("help.options.iface").as_ref())
             .optional()),
-        wait(long("wait")
-            .argument::<f64>("SECS")
-            .help(t!("help.options.wait").as_ref())
-            .optional()),
+        // --wait：无值 = 持续监听（服务端，命中回显/应答）；--wait SECS = 发送后
+        // 等一个匹配应答（对标 scapy sr1）；负数 = 无限等待（= 无值）
+        wait({
+            let bare = long("wait")
+                .help(t!("help.options.wait").as_ref())
+                .req_flag(())
+                .map(|_| Some(prping_core::WaitMode::Continuous));
+            let with = long("wait")
+                .help(t!("help.options.wait").as_ref())
+                .argument::<f64>("SECS")
+                // 负数 = 无限等待（等价裸 --wait）
+                .optional()
+                // NaN/±inf 会在 Duration::from_secs_f64 处 panic，解析期拒绝
+                // bpaf guard 消息要求 &'static str（无法走 i18n）；NaN/±inf/过大值
+                // 会在 Duration::from_secs_f64 处 panic，解析期直接拒绝
+                // （注：守卫失败时 bpaf 会回溯到裸 --wait，把该值当文件报错——
+                // 仍是优雅错误，优于 panic）
+                .guard(
+                    |o: &Option<f64>| {
+                        o.is_none_or(|s| s.is_finite() && s <= prping_core::MAX_DURATION_SECS)
+                    },
+                    "--wait needs a finite number of seconds (not NaN/infinity)",
+                )
+                .map(|o: Option<f64>| {
+                    o.map(|s| {
+                        if s < 0.0 {
+                            prping_core::WaitMode::Continuous
+                        } else {
+                            prping_core::WaitMode::OneShot(s)
+                        }
+                    })
+                });
+            construct!([bare, with])
+                .map(|w: Option<prping_core::WaitMode>| w.unwrap_or(prping_core::WaitMode::Off))
+        }),
+        // --count N：每个包重复发送 N 次（配方步骤 `count:` 覆盖）
+        count(long("count")
+            .help(t!("help.options.pkt_count").as_ref())
+            .argument::<usize>("N")
+            .optional()
+            .map(|c| c.unwrap_or(1))),
         fuzz(long("fuzz").switch().help(t!("help.options.fuzz").as_ref())),
         out(long("out")
             .argument::<String>("FILE.pcap")
             .help(t!("help.options.out").as_ref())
             .optional()),
         summary(long("summary").switch().help(t!("help.options.summary").as_ref())),
+        json(opt_json()),
         lib(long("lib")
             .argument::<String>("PATH")
             .help(t!("help.options.lib").as_ref())
@@ -567,7 +614,13 @@ fn validate_latency(a: &MeasureArgs) -> Option<String> {
     json_conflicts(a.json, a.pretty, a.graph, a.histogram.is_some())
 }
 
-fn validate_bandwidth(_a: &BandwidthArgs) -> Option<String> {
+fn validate_bandwidth(a: &BandwidthArgs) -> Option<String> {
+    if a.parallel == Some(0) {
+        return Some(t!("errors.parallel_zero").to_string());
+    }
+    if a.measure.count.as_deref() == Some("0") {
+        return Some(t!("errors.count_zero_bandwidth").to_string());
+    }
     None
 }
 
@@ -643,10 +696,14 @@ fn dispatch_run(cfg: PingConfig, ctrl_echo: Option<CtrlCEchoGuard>) -> anyhow::R
 fn cli_error_message(e: &PrpingError) -> Option<String> {
     match e {
         PrpingError::UdpRequiresPort => Some(t!("errors.udp_requires_port").to_string()),
-        PrpingError::BandwidthRequiresPort => Some(t!("errors.bandwidth_requires_port").to_string()),
+        PrpingError::BandwidthRequiresPort => {
+            Some(t!("errors.bandwidth_requires_port").to_string())
+        }
         PrpingError::ConflictV4V6 => Some(t!("errors.conflict_v4_v6").to_string()),
         PrpingError::MtuRequiresNoPort => Some(t!("errors.mtu_requires_no_port").to_string()),
-        PrpingError::TracerouteRequiresNoPort => Some(t!("errors.trace_requires_no_port").to_string()),
+        PrpingError::TracerouteRequiresNoPort => {
+            Some(t!("errors.trace_requires_no_port").to_string())
+        }
         PrpingError::TcpTraceRequiresPort => Some(t!("errors.tcp_trace_requires_port").to_string()),
         PrpingError::TraceProtoConflict => Some(t!("errors.trace_udp_tcp_conflict").to_string()),
         _ => None,
@@ -705,7 +762,13 @@ fn run_ping(a: PingArgs) -> anyhow::Result<()> {
         }
         if !bad.is_empty() {
             let mut w = stderr();
-            let _ = writeln_red(&mut w, format!("Error: {}", t!("errors.conflict_mtu_mode", opts = bad.join(" "))));
+            let _ = writeln_red(
+                &mut w,
+                format!(
+                    "Error: {}",
+                    t!("errors.conflict_mtu_mode", opts = bad.join(" "))
+                ),
+            );
             std::process::exit(1);
         }
     }
@@ -715,6 +778,23 @@ fn run_ping(a: PingArgs) -> anyhow::Result<()> {
     set_json(a.measure.json);
 
     let (host, port) = parse_target(&a.measure.target)?;
+    // 旧功能残留：ping HOST:PORT -l N 曾静默派发到 latency（echo 协议），目标不是
+    // prping server 时全部超时、极难排查。现在明确报错：-l 只对 ICMP ping（无端口）
+    // 有意义（TCP ping 无负载概念；UDP ping 的负载大小请用 latency 子命令）。
+    if port.is_some() && a.measure.size.is_some() {
+        let mut w = stderr();
+        let _ = writeln_red(
+            &mut w,
+            format!(
+                "Error: {}",
+                t!(
+                    "errors.ping_port_no_size",
+                    target = a.measure.target.as_str()
+                )
+            ),
+        );
+        std::process::exit(1);
+    }
     let (cnt, dur) = match a.measure.count.as_deref() {
         Some(s) => parse_count(s)?,
         None => (0, None),
@@ -729,7 +809,12 @@ fn run_ping(a: PingArgs) -> anyhow::Result<()> {
         histogram: a.measure.histogram.as_deref().and_then(parse_histogram),
         v4: a.measure.v4,
         v6: a.measure.v6,
-        source: a.measure.source.as_deref().map(resolve_source).transpose()?,
+        source: a
+            .measure
+            .source
+            .as_deref()
+            .map(resolve_source)
+            .transpose()?,
         udp: a.measure.udp,
         mtu: a.mtu,
         graph: a.measure.graph,
@@ -761,7 +846,9 @@ fn run_latency(a: LatencyArgs) -> anyhow::Result<()> {
     let port = port.ok_or_else(|| anyhow::anyhow!(t!("errors.latency_requires_port")))?;
     let (cnt, dur) = match a.measure.count.as_deref() {
         Some(s) => parse_count(s)?,
-        None => (0, None),
+        // 缺省 10 次有效探测：此前 count=0 被 lib 的 max(1) 吞成 1 次，
+        // 单样本的均值/百分位/jitter 统计毫无意义（-n 0 显式给出 = 无限）
+        None => (10, None),
     };
     // 子命令已明确延迟模式：-l 缺省 64（与 psping 默认一致）
     let cfg = PingConfig {
@@ -774,7 +861,12 @@ fn run_latency(a: LatencyArgs) -> anyhow::Result<()> {
         histogram: a.measure.histogram.as_deref().and_then(parse_histogram),
         v4: a.measure.v4,
         v6: a.measure.v6,
-        source: a.measure.source.as_deref().map(resolve_source).transpose()?,
+        source: a
+            .measure
+            .source
+            .as_deref()
+            .map(resolve_source)
+            .transpose()?,
         udp: a.measure.udp,
         receive: a.receive,
         graph: a.measure.graph,
@@ -792,6 +884,11 @@ fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
         let _ = writeln_red(&mut w, format!("Error: {msg}"));
         std::process::exit(1);
     }
+    if let Some(msg) = bad_histogram(&a.measure.histogram) {
+        let mut w = stderr();
+        let _ = writeln_red(&mut w, format!("Error: {msg}"));
+        std::process::exit(1);
+    }
 
     let _ctrl_echo = suppress_ctrl_c_echo(a.measure.json);
     set_json(a.measure.json);
@@ -799,9 +896,11 @@ fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
 
     let (host, port) = parse_target(&a.measure.target)?;
     let port = port.ok_or_else(|| anyhow::anyhow!(t!("errors.bandwidth_requires_port")))?;
+    // 缺省 1000 次（对齐 psping 的 -n 默认 1000）；count==0 在带宽循环里表示
+    // 「立即停止」，与 ping 的「0=无限」语义不同，必须在 CLI 层给默认值。
     let (cnt, dur) = match a.measure.count.as_deref() {
         Some(s) => parse_count(s)?,
-        None => (0, None),
+        None => (1000, None),
     };
     let cfg = PingConfig {
         host,
@@ -813,7 +912,12 @@ fn run_bandwidth(a: BandwidthArgs) -> anyhow::Result<()> {
         histogram: a.measure.histogram.as_deref().and_then(parse_histogram),
         v4: a.measure.v4,
         v6: a.measure.v6,
-        source: a.measure.source.as_deref().map(resolve_source).transpose()?,
+        source: a
+            .measure
+            .source
+            .as_deref()
+            .map(resolve_source)
+            .transpose()?,
         parallel: a.parallel.unwrap_or(1),
         udp: a.measure.udp,
         receive: a.receive,
@@ -837,7 +941,7 @@ fn run_server(a: ServerArgs) -> anyhow::Result<()> {
         .addr
         .parse()
         .map_err(|_| anyhow::anyhow!(t!("errors.invalid_bind", addr = a.addr.as_str())))?;
-    println!("{}", t!("server.bandwidth_listening", addr = addr));
+    // 监听行由 serve() 在绑定后打印（显示实际地址，'ADDR:0' 时给出真实端口）
     // 依赖链由 validate_server 保证（-a 需 -v、--filter 需 -a），
     // 三个标志原样传给 serve，不再隐含开启。
     let report = smol::block_on(serve(addr, a.verbose, a.capture_all, a.filter.as_deref()))?;
@@ -889,6 +993,10 @@ fn validate_engine(a: &EngineArgs) -> anyhow::Result<()> {
     if sub && a.lsp {
         anyhow::bail!(t!("errors.eng_sub_conflict_lsp"));
     }
+    // --json 仅对 FILE.pkt/.pktl 分析模式定义（--ls/--hex/--pcap/--lsp 走各自输出）
+    if a.json && (sub || a.lsp) {
+        anyhow::bail!(t!("errors.eng_json_sub_conflict"));
+    }
     if sub && a.file.is_some() {
         anyhow::bail!(t!("errors.eng_sub_no_file"));
     }
@@ -910,10 +1018,26 @@ fn validate_engine(a: &EngineArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// packet 子命令校验：--iface 仅配合 --raw。
+/// packet 子命令校验：--iface 仅配合 --raw；持续监听（--wait 无值）与发送类选项互斥。
 fn validate_packet(a: &PacketArgs) -> anyhow::Result<()> {
     if a.iface.is_some() && !a.raw {
         anyhow::bail!(t!("errors.iface_requires_raw"));
+    }
+    if a.count == 0 {
+        anyhow::bail!(t!("errors.pkt_count_zero"));
+    }
+    if a.wait == prping_core::WaitMode::Continuous && (a.fuzz || a.out.is_some()) {
+        anyhow::bail!(t!("errors.listen_conflict"));
+    }
+    if a.wait == prping_core::WaitMode::Continuous && a.count > 1 {
+        anyhow::bail!(t!("errors.listen_count_conflict"));
+    }
+    if a.json && a.wait == prping_core::WaitMode::Continuous {
+        anyhow::bail!(t!("errors.pkt_json_listen_conflict"));
+    }
+    // --json 抑制人读输出，--summary 却强制打印紧凑层栈行 → 冲突（JSONL 契约）
+    if a.json && a.summary {
+        anyhow::bail!(t!("errors.pkt_json_summary_conflict"));
     }
     Ok(())
 }
@@ -922,6 +1046,8 @@ fn validate_packet(a: &PacketArgs) -> anyhow::Result<()> {
 fn run_engine(a: EngineArgs) -> anyhow::Result<()> {
     apply_lang(&a.lang);
     validate_engine(&a)?;
+    let _ctrl_echo = suppress_ctrl_c_echo(a.json);
+    set_json(a.json);
     let libs = resolve_libs(&a.lib);
 
     if a.lsp {
@@ -967,10 +1093,64 @@ fn run_engine(a: EngineArgs) -> anyhow::Result<()> {
 fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
     apply_lang(&a.lang);
     validate_packet(&a)?;
+    let _ctrl_echo = suppress_ctrl_c_echo(a.json);
+    set_json(a.json);
 
     // 先解析文件路径（后续预检和发送都需要）
     let path = resolve_pktl_arg(std::path::Path::new(&a.file))?;
 
+    // --wait 无值 = 持续监听（服务端）——--raw 为链路层监听（帧内 MAC/IP 决定去向，
+    // 不需要 ADDR:PORT）；否则 UDP 监听（目标 = 监听地址，显式或包内 dport 推导）
+    if a.wait == prping_core::WaitMode::Continuous {
+        if a.raw {
+            if a.target.is_some() {
+                return Err(anyhow::anyhow!(t!("errors.listen_raw_no_target")));
+            }
+            let opts = prping_core::PkgOptions {
+                target: None,
+                mode: prping_core::SendMode::Raw {
+                    iface: a.iface.clone(),
+                },
+                params: parse_params(&a.params)?,
+                globals: parse_globals(&a.global)?,
+                wait: prping_core::WaitMode::Continuous,
+                count: a.count,
+                fuzz: false,
+                out: None,
+                summary: a.summary,
+                libs: resolve_libs(&a.lib),
+            };
+            return prping_core::listen_raw_packets(&path, &opts);
+        }
+        let target = match a.target.as_deref() {
+            Some(t) => {
+                let (host, port) = parse_target(t)?;
+                let port = match port {
+                    Some(p) => p,
+                    None => return Err(anyhow::anyhow!(t!("errors.pkg_requires_port"))),
+                };
+                Some(resolve_target(&host, port)?)
+            }
+            None => None,
+        };
+        let opts = prping_core::PkgOptions {
+            target,
+            mode: prping_core::SendMode::Payload,
+            params: parse_params(&a.params)?,
+            globals: parse_globals(&a.global)?,
+            wait: prping_core::WaitMode::Continuous,
+            count: a.count,
+            fuzz: false,
+            out: None,
+            summary: a.summary,
+            libs: resolve_libs(&a.lib),
+        };
+        return prping_core::listen_packets(&path, &opts);
+    }
+
+    // 预检只解析一次文件（此前 up to 3 次重复解析同一文件）；显式 --raw 时
+    // 无需预检（结果只在 !raw 分支用到）
+    let raw_only = !a.raw && all_exports_raw_only(&path, &a);
     let target = match a.target.as_deref() {
         Some(t) => {
             let (host, port) = parse_target(t)?;
@@ -982,7 +1162,7 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
                 None => {
                     // 预检：如果所有导出包都是 raw-only（无 TCP/UDP 传输层），自动升级
                     // 为 raw 模式并给提示，而不是报"需要端口"的误导性错误
-                    if all_exports_raw_only(&path, &a) {
+                    if raw_only {
                         let mut w = prping_core::stderr();
                         let _ = writeln_orange(&mut w, t!("engine.auto_raw_upgrade"));
                         let _ = writeln!(&mut w);
@@ -996,7 +1176,7 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
         }
         None => {
             // 未给目标：如果所有导出包都是 raw-only，提前提示需要 root 权限
-            if !a.raw && all_exports_raw_only(&path, &a) {
+            if raw_only {
                 let mut w = prping_core::stderr();
                 let _ = writeln_orange(&mut w, t!("engine.auto_raw_upgrade"));
                 let _ = writeln!(&mut w);
@@ -1005,7 +1185,7 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
         }
     };
     let raw_mode = a.raw
-        || (all_exports_raw_only(&path, &a)
+        || (raw_only
             && target
                 .as_ref()
                 .is_none_or(|t: &std::net::SocketAddr| t.port() == 0));
@@ -1021,6 +1201,7 @@ fn run_packet(a: PacketArgs) -> anyhow::Result<()> {
         params: parse_params(&a.params)?,
         globals: parse_globals(&a.global)?,
         wait: a.wait,
+        count: a.count,
         fuzz: a.fuzz,
         out: a.out.as_ref().map(std::path::PathBuf::from),
         summary: a.summary,
@@ -1098,7 +1279,55 @@ fn normalize_locale(s: &str) -> String {
     }
 }
 
-/// Auto-detect locale from --lang / env vars / 系统 UI 语言（Windows）。
+/// macOS 系统 UI 语言（系统设置 → 语言与地区 的首选语言）。
+///
+/// 通过 CoreFoundation 的 `CFLocaleCopyCurrent` 查询，返回形如
+/// `zh-Hans-CN` / `en_US` 的 locale 标识；查询失败返回 None（调用方兜底 LANG）。
+#[cfg(target_os = "macos")]
+fn macos_system_locale() -> Option<String> {
+    use std::ffi::{CStr, c_char};
+    use std::os::raw::c_void;
+
+    /// kCFStringEncodingUTF8
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFLocaleCopyCurrent() -> *const c_void;
+        fn CFLocaleGetIdentifier(locale: *const c_void) -> *const c_void;
+        fn CFStringGetCString(
+            the_string: *const c_void,
+            buffer: *mut c_char,
+            buffer_size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    // SAFETY: CFLocaleCopyCurrent 返回 retain 的对象，用完必须 CFRelease；
+    // CFLocaleGetIdentifier 返回的 CFStringRef 由 locale 对象持有，不释放。
+    unsafe {
+        let locale = CFLocaleCopyCurrent();
+        if locale.is_null() {
+            return None;
+        }
+        let ident = CFLocaleGetIdentifier(locale);
+        let mut buf = [0; 64];
+        let ok = CFStringGetCString(
+            ident,
+            buf.as_mut_ptr(),
+            buf.len() as isize,
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        CFRelease(locale);
+        if ok == 0 {
+            return None;
+        }
+        Some(CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+    }
+}
+
+/// Auto-detect locale from --lang / env vars / 系统 UI 语言（macOS/Windows）。
 fn detect_locale() {
     // Check raw args for --lang before parser construction (for --help i18n)
     let args: Vec<String> = std::env::args().collect();
@@ -1116,9 +1345,19 @@ fn detect_locale() {
     }
     if let Ok(loc) = std::env::var("RUST_I18N_LOCALE") {
         rust_i18n::set_locale(&normalize_locale(&loc));
-    } else if let Ok(loc) = std::env::var("LANG") {
+    } else if let Some(loc) = std::env::var("LANG").ok().filter(|s| !s.trim().is_empty()) {
+        // 所有平台（含 macOS）一致：LANG 优先（如 en_US.UTF-8 → en-US）；
+        // macOS 终端不设 LANG 或 LANG 为空串时用系统 UI 语言兜底。
         let loc = loc.split('.').next().unwrap_or("en-US");
         rust_i18n::set_locale(&normalize_locale(loc));
+    } else if cfg!(target_os = "macos") {
+        // macOS：终端未设 LANG 时以系统 UI 语言为准（系统设置 → 语言与地区）。
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(loc) = macos_system_locale() {
+                rust_i18n::set_locale(&normalize_locale(&loc));
+            }
+        }
     } else if cfg!(windows) {
         // Windows：无 LANG 环境变量，用系统 UI 语言
         #[cfg(windows)]
@@ -1138,9 +1377,15 @@ fn detect_locale() {
             rust_i18n::set_locale(&normalize_locale(loc));
         }
     }
+    // 兜底：若检测结果不在项目实际 locale（en-US/zh-CN）内——rust-i18n 默认
+    // locale 是 "en"，t! 会原样返回 key（如 "cmd.ping"）——强制回退英文。
+    let cur: &str = &rust_i18n::locale();
+    if !matches!(cur, "en-US" | "zh-CN") {
+        rust_i18n::set_locale("en-US");
+    }
 }
-/// 预处理裸 `--help-pkg`（不带值）→ `--help-pkg=`（空标题 = 全文）；
-/// 顶层 `--help-pkg` 处理（全文分页 / 章节跳转），与子命令解析互斥。
+/// document 子命令：手册全文（空 section）/ 章节跳转（编号 / 标题前缀 / 包含匹配）。
+/// 顶层 `--help-pkg` 已废弃（与子命令解析互斥，直接报错）——手册统一走 document。
 fn handle_help_pkg(section: &str) -> anyhow::Result<()> {
     let manual = manual_for(&rust_i18n::locale());
     match section {
@@ -1194,7 +1439,12 @@ fn main() -> anyhow::Result<()> {
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--lang" {
-            if let Some(v) = args.get(i + 1) {
+            // 仅当下一 token 是合法 locale 形态才当作值消费：忘带值（如
+            // engine --lang）时不再把文件名/子命令吞掉
+            let next_is_value = args
+                .get(i + 1)
+                .is_some_and(|v| !v.starts_with('-') && !SUBCOMMANDS.contains(&v.as_str()));
+            if next_is_value && let Some(v) = args.get(i + 1) {
                 lang = Some(v.clone());
                 args.remove(i + 1);
             }
@@ -1569,6 +1819,121 @@ fn print_summary_help() {
 mod tests {
     use super::*;
 
+    /// packet 校验：持续监听（--wait 无值）允许 --raw/--iface；拒绝 --fuzz/--out；
+    /// --json 与持续监听互斥；--iface 需 --raw。
+    #[test]
+    fn validate_packet_wait_modes() {
+        use prping_core::WaitMode;
+        let base = PacketArgs {
+            raw: false,
+            iface: None,
+            wait: WaitMode::Off,
+            count: 1,
+            fuzz: false,
+            out: None,
+            summary: false,
+            lib: Vec::new(),
+            params: Vec::new(),
+            global: Vec::new(),
+            json: false,
+            lang: None,
+            file: "a.pkt".into(),
+            target: None,
+        };
+        // 普通发送 / 一次性 wait / 持续监听都合法
+        assert!(validate_packet(&base).is_ok());
+        let one_shot = PacketArgs {
+            wait: WaitMode::OneShot(1.0),
+            ..base.clone()
+        };
+        assert!(validate_packet(&one_shot).is_ok());
+        let mut continuous = PacketArgs {
+            wait: WaitMode::Continuous,
+            ..base.clone()
+        };
+        assert!(
+            validate_packet(&continuous).is_ok(),
+            "--wait 无值（持续监听）合法"
+        );
+        // 持续监听 + --raw（链路层监听）合法；--raw --iface lo 合法
+        continuous.raw = true;
+        assert!(validate_packet(&continuous).is_ok(), "--wait --raw 合法");
+        continuous.iface = Some("lo".into());
+        assert!(
+            validate_packet(&continuous).is_ok(),
+            "--wait --raw --iface 合法"
+        );
+        // 持续监听 + --fuzz/--out 拒绝
+        let bad = PacketArgs {
+            wait: WaitMode::Continuous,
+            fuzz: true,
+            ..base.clone()
+        };
+        assert!(validate_packet(&bad).is_err(), "持续监听 + --fuzz 拒绝");
+        let bad = PacketArgs {
+            wait: WaitMode::Continuous,
+            out: Some("x.pcap".into()),
+            ..base.clone()
+        };
+        assert!(validate_packet(&bad).is_err(), "持续监听 + --out 拒绝");
+        // --iface 无 --raw 拒绝
+        let bad = PacketArgs {
+            iface: Some("lo".into()),
+            ..base.clone()
+        };
+        assert!(validate_packet(&bad).is_err(), "--iface 需 --raw");
+        // --count：0 拒绝；>1 与持续监听拒绝
+        let bad = PacketArgs {
+            count: 0,
+            ..base.clone()
+        };
+        assert!(validate_packet(&bad).is_err(), "--count 0 拒绝");
+        let ok = PacketArgs {
+            count: 3,
+            ..base.clone()
+        };
+        assert!(validate_packet(&ok).is_ok(), "--count 3 合法");
+        let bad = PacketArgs {
+            count: 3,
+            wait: WaitMode::Continuous,
+            ..base.clone()
+        };
+        assert!(validate_packet(&bad).is_err(), "持续监听 + --count>1 拒绝");
+    }
+
+    /// normalize_locale 映射：BCP-47 全形态 → rust-i18n 实际 locale。
+    #[test]
+    fn normalize_locale_mapping() {
+        for (input, expected) in [
+            ("en-US", "en-US"),
+            ("en_US", "en-US"),
+            ("en", "en-US"),
+            ("en_GB", "en-US"),
+            ("fr-FR", "en-US"),
+            ("C", "en-US"),
+            ("zh-CN", "zh-CN"),
+            ("zh_CN", "zh-CN"),
+            ("zh", "zh-CN"),
+            ("zh-Hans-CN", "zh-CN"),
+            ("zh_TW", "zh-CN"),
+            ("  zh-CN.UTF-8  ", "zh-CN"),
+        ] {
+            assert_eq!(normalize_locale(input), expected, "input: {input}");
+        }
+    }
+
+    /// macOS：系统 UI 语言查询（仅 macOS 编译/运行；CI macOS job 上执行）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_locale_detects() {
+        let loc = macos_system_locale();
+        assert!(loc.is_some(), "CFLocaleCopyCurrent 应始终可用");
+        let l = loc.unwrap();
+        assert!(!l.is_empty());
+        // 结果应能规范化为本项目支持的 locale 之一
+        assert!(matches!(normalize_locale(&l).as_str(), "en-US" | "zh-CN"));
+    }
+
     /// 唯一前缀展开表驱动测试。
     #[test]
     fn expand_prefix_exact() {
@@ -1652,6 +2017,7 @@ mod tests {
             lib: Vec::new(),
             params: Vec::new(),
             global: Vec::new(),
+            json: false,
             lang: None,
         };
         // 合法组合：--pcap + --to-pkt（± structured/skip/limit）
@@ -1720,13 +2086,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // 1. 直接文件：<arg>.pktl 存在 → 命中
-        std::fs::write(dir.join("direct.pktl"), "recipe:\n- pkg: x.pkt\n").unwrap();
+        std::fs::write(dir.join("direct.pktl"), "recipe:\n- packet: x.pkt\n").unwrap();
         let got = resolve_pktl_arg(&dir.join("direct")).unwrap();
         assert_eq!(got, dir.join("direct.pktl"));
 
         // 2. 同名文件夹：<arg>.pktl 不存在，<arg>/<basename>.pktl 存在 → 命中
         std::fs::create_dir_all(dir.join("folded")).unwrap();
-        std::fs::write(dir.join("folded/folded.pktl"), "recipe:\n- pkg: y.pkt\n").unwrap();
+        std::fs::write(dir.join("folded/folded.pktl"), "recipe:\n- packet: y.pkt\n").unwrap();
         let got = resolve_pktl_arg(&dir.join("folded")).unwrap();
         assert_eq!(got, dir.join("folded/folded.pktl"));
 

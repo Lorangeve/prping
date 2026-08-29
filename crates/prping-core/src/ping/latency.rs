@@ -14,7 +14,12 @@ use termcolor::StandardStream;
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
 pub fn run_client(cfg: &PingConfig) -> anyhow::Result<Stats> {
     let addrs = util::resolve_vec(&cfg.host, cfg.port, cfg.v4, cfg.v6)?;
-    util::print_resolving(&cfg.host, addrs[0].ip());
+    // resolve_vec 对主机名在 -4/-6 过滤后可能返回空 Vec 且不报错——
+    // 此处必须兜底（icmp/tcp 路径均有显式空列表检查，latency 是唯一裸下标）
+    let first = addrs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!(t!("errors.cannot_resolve", host = cfg.host)))?;
+    util::print_resolving(&cfg.host, first.ip());
     smol::block_on(run_client_async(addrs, cfg))
 }
 
@@ -195,23 +200,37 @@ impl Probe for LatencyUdpProbe<'_> {
             return Ok(ProbeOutcome::Skip);
         }
 
-        match smol::future::or(
-            async { Some(util::udp_recv(self.sock, &mut self.buf).await) },
-            async {
-                smol::Timer::after(Duration::from_secs(10)).await;
-                None
-            },
-        )
-        .await
-        {
-            Some(Ok((n, _))) => {
-                let rtt = start.elapsed();
+        // 等待回包：校验来源地址 == 目标（杂包/其它来源忽略继续等，与 UDP ping
+        // 的 seq 过滤语义对齐）。此前不校验 src——上一轮超时后迟到的回显会被下一轮
+        // 消费成虚假的极小 RTT，任意源杂包也被当作成功。
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break Err(());
+            }
+            let recv = smol::future::or(
+                async { Some(util::udp_recv(self.sock, &mut self.buf).await) },
+                async {
+                    smol::Timer::after(remaining).await;
+                    None
+                },
+            )
+            .await;
+            match recv {
+                Some(Ok((_, src))) if src.ip() != self.addr.ip() => continue,
+                Some(Ok((n, _))) => break Ok((start.elapsed(), n)),
+                _ => break Err(()),
+            }
+        };
+        match result {
+            Ok((rtt, n)) => {
                 if !self.cfg.quiet && !stats::json() {
                     print_latency(w, self.addr, rtt, n, is_warmup)?;
                 }
                 Ok(ProbeOutcome::Ok { rtt })
             }
-            _ => {
+            Err(_) => {
                 if !self.cfg.quiet && !stats::json() {
                     output::writeln_red(w, t!("common.timeout"))?;
                 }

@@ -99,6 +99,8 @@ impl std::str::FromStr for MacAddr {
 pub enum ArpOp {
     Request,
     Reply,
+    /// 其它 opcode（RARP=3 等）：保留原始值，roundtrip 不再静默改写成 request。
+    Other(u16),
 }
 
 impl fmt::Display for ArpOp {
@@ -109,6 +111,7 @@ impl fmt::Display for ArpOp {
             match self {
                 ArpOp::Request => "request",
                 ArpOp::Reply => "reply",
+                ArpOp::Other(n) => return write!(f, "op={n}"),
             }
         )
     }

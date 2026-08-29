@@ -203,27 +203,37 @@ use(p) |> net4(dst="1.1.1.1")        # 一条调用给出 ipv4+eth 两层
   + auto），LSP 悬停同样展示。
 - 详情与设计取舍见 [`DESIGN.md`](DESIGN.md) §5.2。
 
-## sniffer（回包校验）
+## sniffer（回包校验 / 监听规则）
 
-`--pkt --wait` 时按声明匹配应答（替代默认 DNS/ICMP 硬编码匹配）：
+`--pkt --wait` 时按声明匹配应答（替代默认 DNS/ICMP 硬编码匹配）；
+`--listen` 时同一声明即**监听规则**（匹配收到的数据报并回显）：
 
 ```
 sniffer:
   - match icmp(type=0, id=id, seq=seq)   # 回包必须是 echo reply，id/seq 与发包一致
+  - and(match udp(dport=53), not(match dns(flags=0x8180)))  # and/or/not 组合
 ```
 
-- `sniffer:` + `- match 层(字段=值, ...)` 列表（与 `export:` 同风格）：回包反解后
-  必须满足某子句全部等式（多子句 = 任一命中）；右值有三种：
+- `sniffer:` + `- 谓词` 列表（与 `export:` 同风格；**顶层列表 = 隐式 OR**）；谓词：
+  - `match 层(条件, ...)`：反解后必须满足全部条件（层内 AND）；
+  - `and(...)`/`or(...)`/`not(...)`：组合（支持跨层 AND、取反——与 `#[rule]` 同构）；
+  - 层内条件：`字段=值`、`ne(字段, 值)`（不等）、`mask(0xc0)`（层原始字节首字节
+    位掩码）、`startswith/endswith/contains("...")`（层原始字节前缀/后缀/子串）。
+- `字段=值` 右值有三种：
   - 字面量 = 常量（`type=0`：回包 icmp.type == 0）；
-  - 裸 Ident = 引用**发包同层同名字段**（`id=id` = 回包 id 等于发出去的 id）；
+  - 裸 Ident = 引用**发包同层同名字段**（`id=id` = 回包 id 等于发出去的 id；
+    **监听模式无发包，构建期报错**）；
   - 值表达式 = **字节级比较**（`id=be16(0x1234)` / `seq=[0x00, 0x01]` / 用户值函数
     `myid()` / `be16(params("id", "0x4242"))`）——与「值函数最终算出的是字节」一致，
     求值为字节后与回包字段字节比较；可在同文件定义 `func ... -> bytes` 复用。
+- 字段集 = 反解层实际解析字段（`matchpred::field_names`，与 `--eng` 展示 / 配方
+  `extract` 的 `reply.<层>.<字段>` 共用）。
 - 匹配成功宿主显示 `✓ reply matched: 字段=值 (rtt)`，超时 `✗ no matching reply`。
-- 只携带声明（`Module.sniffer` / AST `SnifferSpec`），匹配由宿主实现
-  （prping 的 `pkg.rs::SnifferMatcher`，公开 API `sniffer_match(spec, reply, sent)`
-  仅内置原语；`sniffer_match_with(spec, module, params, reply, sent)` 支持用户
-  值函数与 `params(...)`）。
+- 只携带声明（`Module.sniffer` / AST `SnifferSpec`），匹配由 `matchpred::Matcher`
+  实现（`build(spec, module, params, globals, allow_sent)` + `matches(reply, sent)`；
+  公开 API `sniffer_match(spec, reply, sent)` 仅内置原语；
+  `sniffer_match_with(spec, module, params, reply, sent)` 支持用户值函数与
+  `params(...)`）。
 
 ## 库结构
 

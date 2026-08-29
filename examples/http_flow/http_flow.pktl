@@ -33,5 +33,5 @@ global:
   init: 0x2000
 
 recipe:
-- pkg: http_request.pkt   # 步骤 1：HTTP GET 请求
-- pkg: http_response.pkt  # 步骤 2：HTTP 200 OK 响应
+- packet: http_request.pkt   # 步骤 1：HTTP GET 请求
+- packet: http_response.pkt  # 步骤 2：HTTP 200 OK 响应

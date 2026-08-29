@@ -50,12 +50,19 @@ impl TraceSocket for IcmpSocket {
         Ok(())
     }
 
-    fn recv_from(&self, buf: &mut [MaybeUninit<u8>]) -> std::io::Result<(usize, socket2::SockAddr)> {
+    fn recv_from(
+        &self,
+        buf: &mut [MaybeUninit<u8>],
+    ) -> std::io::Result<(usize, socket2::SockAddr)> {
         self.sock.recv_from(buf)
     }
 
     fn dump_label(&self) -> &str {
-        if self.target_ip.is_ipv6() { "icmp-v6" } else { "icmp-v4" }
+        if self.target_ip.is_ipv6() {
+            "icmp-v6"
+        } else {
+            "icmp-v4"
+        }
     }
 
     fn ttl_socket(&self) -> &socket2::Socket {
@@ -123,9 +130,6 @@ pub(crate) fn parse_reply_v4(
                 return None;
             }
             let inner_ihl = util::ipv4_ihl(body);
-            if body.len() < inner_ihl + 8 {
-                return None;
-            }
             // 内嵌 dst（偏移 16..20）
             let inner_dst = IpAddr::V4(std::net::Ipv4Addr::new(
                 body[16], body[17], body[18], body[19],
@@ -133,18 +137,17 @@ pub(crate) fn parse_reply_v4(
             if inner_dst != target {
                 return None;
             }
-            let eicmp = &body[inner_ihl..];
+            // 内嵌 ICMP 头完整（≥8B）时按 id/seq 精确归属；截断（不少路由只引
+            // 用 IP 头前 8 字节）时按 dst == 目标归属首个探测——与 v6 路径一致。
+            let Some(eicmp) = body.get(inner_ihl..)?.get(..8) else {
+                return want.first().copied().map(|s| (s, false));
+            };
             let id = u16::from_be_bytes([eicmp[4], eicmp[5]]);
             let seq = u16::from_be_bytes([eicmp[6], eicmp[7]]);
             if id == ident && want.contains(&seq) {
                 Some((seq, false))
             } else {
-                // 截断时按 dst 归属
-                if !want.is_empty() {
-                    Some((want[0], false))
-                } else {
-                    None
-                }
+                None
             }
         }
         _ => None,

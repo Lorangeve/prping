@@ -55,12 +55,19 @@ impl TraceSocket for UdpTraceSocket {
         Ok(())
     }
 
-    fn recv_from(&self, buf: &mut [MaybeUninit<u8>]) -> std::io::Result<(usize, socket2::SockAddr)> {
+    fn recv_from(
+        &self,
+        buf: &mut [MaybeUninit<u8>],
+    ) -> std::io::Result<(usize, socket2::SockAddr)> {
         self.icmp_sock.recv_from(buf)
     }
 
     fn dump_label(&self) -> &str {
-        if self.target_ip.is_ipv6() { "udp-v6" } else { "udp-v4" }
+        if self.target_ip.is_ipv6() {
+            "udp-v6"
+        } else {
+            "udp-v4"
+        }
     }
 
     fn ttl_socket(&self) -> &socket2::Socket {
@@ -110,6 +117,11 @@ fn parse_udp_icmp_v4(buf: &[u8], target: IpAddr, want: &[u16]) -> Option<u16> {
         return None;
     }
     let inner_ihl = util::ipv4_ihl(body);
+    // 内嵌报文须是 IPv4（与 TCP/tcpwin 路径一致）：畸形数据时 ipv4_ihl 返回 0，
+    // 会把任意字节当 UDP 头读 dst_port 误配
+    if (body[0] >> 4) != 4 {
+        return None;
+    }
     if body.len() < inner_ihl + 8 {
         return None;
     }

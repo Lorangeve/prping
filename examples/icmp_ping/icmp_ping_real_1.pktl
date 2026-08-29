@@ -18,7 +18,7 @@ global:
 - name: seq1      # 步骤 1 的序列号
 
 recipe:
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id1

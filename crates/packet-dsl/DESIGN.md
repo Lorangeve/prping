@@ -64,11 +64,18 @@ value         := STRING | INT | HEX | BOOL | value_list
 ident_list    := IDENT ("," IDENT)*
 comment       := "#" ... EOL
 
-# 回包校验（--pkt --wait 用；求值期语义，宿主负责匹配；多子句任一命中）
-sniffer_stmt  := "sniffer" ":" sniffer_match+
-sniffer_match := "-" "match" IDENT "(" sniffer_field_list? ")"
-sniffer_field := IDENT "=" value      # 值 = 字面量（常量）| 裸 IDENT（发包同层同名字段）
-                                      #     | 值表达式（原语/值函数/params → 字节级比较）
+# 回包/监听匹配（--pkt --wait 校验应答、--listen 监听规则；求值期语义，宿主
+# 负责匹配；顶层列表任一命中 = 隐式 OR；谓词组合与 #[rule] 同构）
+sniffer_stmt  := "sniffer" ":" sniffer_pred+
+sniffer_pred  := "-" sniffer_match | "-" "and" "(" sniffer_pred_list ")"
+               | "-" "or" "(" sniffer_pred_list ")" | "-" "not" "(" sniffer_pred ")"
+sniffer_match := "match" IDENT "(" sniffer_item_list? ")"
+sniffer_item  := sniffer_field | "ne" "(" IDENT "," value ")"
+               | "mask" "(" num ")" | "startswith" "(" STRING ")"
+               | "endswith" "(" STRING ")" | "contains" "(" STRING ")"
+sniffer_field := IDENT "=" value      # 值 = 字面量（常量）| 裸 IDENT（发包同层同名字段，
+                                      #     监听模式无发包报错）| 值表达式（原语/值函数/
+                                      #     params → 字节级比较）
 ```
 
 > 实现注记：

@@ -1,0 +1,17 @@
+# TCP 三次握手·客户端（packet --raw --wait SECS）
+#
+# 运行：sudo prping packet --raw --wait 2 client.pkt 127.0.0.1
+# 流程：发 SYN（seq=0x1000）→ 服务端回 SYN-ACK（seq=0x2000, ack=0x1001）→
+#       sniffer 校验应答（flags=bor(syn(),ack()) 字节比较，且 ack=0x1001=发送 seq+1）→ 发最终 ACK。
+# 说明：为演示 seq/ack 关系用固定值；真实场景应把 ACK 提取服务端 seq 后动态构造
+#      （配方 extract：见 README 的 recipe 变体）。
+payload = raw(bytes="")
+syn_pkt = use(payload) |> tcp(sport=12345, dport=80, seq=0x1000, flags=syn(), window=65535) |> ipv4(dst=params("ip", "127.0.0.1")) |> eth()
+ack_pkt = use(payload) |> tcp(sport=12345, dport=80, seq=0x1001, ack=0x2001, flags=ack(), window=65535) |> ipv4(dst=params("ip", "127.0.0.1")) |> eth()
+
+export:
+- syn_pkt
+- ack_pkt
+
+sniffer:
+  - match tcp(flags=bor(syn(), ack()), ack=0x1001)

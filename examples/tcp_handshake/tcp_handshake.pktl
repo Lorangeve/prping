@@ -22,6 +22,6 @@ global:
   init: 0x2000
 
 recipe:
-- pkg: tcp_syn.pkt   # 步骤 1：SYN
-- pkg: tcp_ack.pkt   # 步骤 2：ACK（seq=cseq+1, ack=sseq+1）——握手完成
-- pkg: tcp_data.pkt  # 步骤 3：HTTP GET（PSH|ACK，seq/ack 沿用）
+- packet: tcp_syn.pkt   # 步骤 1：SYN
+- packet: tcp_ack.pkt   # 步骤 2：ACK（seq=cseq+1, ack=sseq+1）——握手完成
+- packet: tcp_data.pkt  # 步骤 3：HTTP GET（PSH|ACK，seq/ack 沿用）

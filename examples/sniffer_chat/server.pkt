@@ -1,0 +1,16 @@
+# 服务端监听规则（prping packet --wait，无值 = 持续监听）：
+# 收到的数据报反解为 DNS 查询（flags=0x0100 且不是应答 0x8180）即回显。
+# 注意：sniffer 字段集只含 proto 实际解析的字段（dns: id/flags——opcode 不
+# 在线格式中独立解析，用 flags 位即可）。
+#
+# 运行：prping packet --wait server.pkt 127.0.0.1:55353
+# （Ctrl+C 停止；省略 127.0.0.1:55353 时按包内 udp dport=55353 推导监听端口）
+#
+# 这里的包定义仅用于推导监听端口（最外层 udp dport）与文档说明；
+# 实际匹配完全由 sniffer 规则决定。sniffer 支持 and/or/not 组合与
+# mask/startswith/endswith/contains 字节谓词——监听规则用字面量（不能引用发包字段）。
+p = raw(bytes="DNS query placeholder")
+use(p) |> udp(dport=55353) |> ipv4(dst="127.0.0.1") |> eth()
+
+sniffer:
+  - and(match dns(flags=0x0100), not(match dns(flags=0x8180)))

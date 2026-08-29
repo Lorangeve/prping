@@ -419,52 +419,160 @@ pub fn parser<'src>() -> impl Parser<'src, ParserInput, AstFile, Extra<'src>> {
             expr: e,
         });
 
-    // sniffer 字段：`IDENT = 值`（值须给出；Ident → 发包同层同名字段引用）
-    let sniffer_field = ident
+    // ── sniffer 段：`sniffer:` + `- match 层(条件, ...)`（顶层列表 = 隐式 OR）──
+    // 条件项：`字段=值`（Ident → 发包同层同名字段引用）/ `ne(字段, 值)` /
+    // `mask(0xc0)` / `startswith("...")` / `endswith("...")` / `contains("...")`；
+    // 谓词组合：`and(...)` / `or(...)` / `not(...)`（与 `#[rule]` 同构）。
+    let field_item = ident
         .clone()
-        .then(just(Tok::Equals).ignore_then(value.clone()))
-        .map_with(|((name, _), v), _| (name, v));
-    let sniffer_fields = sniffer_field
-        .separated_by(comma_nl.clone())
-        .allow_trailing()
-        .collect::<Vec<_>>();
-    // 单个匹配子句：`match 层(字段=值, ...)`
-    let sniffer_match = kw("match")
+        .then(
+            just(Tok::Equals)
+                .then_ignore(nl0.clone())
+                .ignore_then(value.clone()),
+        )
+        .map_with(|((name, _), v), _| {
+            let val = match v {
+                Value::Ident { name: f, .. } => SnifferValue::SentField(f),
+                // 字面量按字段类型强转（常量比较）；其余（原语/值函数调用、
+                // params、数字加法、字节列表）是值表达式 → 求值为字节后
+                // 与回包字段字节比较（与「值函数最终算出字节」一致）
+                Value::Str(_) | Value::Int(_) | Value::Hex(_) => SnifferValue::Literal(v),
+                other => SnifferValue::Expr(other),
+            };
+            SnifferItem::FieldEq { name, val }
+        });
+    let ne_item = kw("ne")
+        .then_ignore(nl0.clone())
+        .ignore_then(
+            just(Tok::LParen)
+                .then_ignore(nl0.clone())
+                .ignore_then(ident.clone())
+                .then(
+                    just(Tok::Comma)
+                        .then_ignore(nl0.clone())
+                        .ignore_then(value.clone()),
+                )
+                .then_ignore(nl0.clone())
+                .then_ignore(just(Tok::RParen)),
+        )
+        .map_with(|((name, _), v), _| {
+            let val = match v {
+                Value::Ident { name: f, .. } => SnifferValue::SentField(f),
+                Value::Str(_) | Value::Int(_) | Value::Hex(_) => SnifferValue::Literal(v),
+                other => SnifferValue::Expr(other),
+            };
+            SnifferItem::FieldNe { name, val }
+        });
+    let mask_item = kw("mask")
+        .then_ignore(nl0.clone())
+        .ignore_then(
+            just(Tok::LParen)
+                .then_ignore(nl0.clone())
+                .ignore_then(value.clone())
+                .then_ignore(nl0.clone())
+                .then_ignore(just(Tok::RParen)),
+        )
+        .map_with(|v, _| SnifferItem::Mask(v));
+    // 字节模式：`startswith/endswith/contains("...")`（字符串参数）
+    let str_tok = any::<ParserInput, Extra<'src>>()
+        .filter(|t: &Tok| matches!(t, Tok::Str(_)))
+        .map_with(|t, _| match t {
+            Tok::Str(s) => s,
+            _ => unreachable!("filter 已保证为 Str"),
+        });
+    let pat_item = |kw_name: &'static str| {
+        kw(kw_name).then_ignore(nl0.clone()).ignore_then(
+            just(Tok::LParen)
+                .then_ignore(nl0.clone())
+                .ignore_then(str_tok)
+                .then_ignore(nl0.clone())
+                .then_ignore(just(Tok::RParen)),
+        )
+    };
+    let startswith_item = pat_item("startswith").map(SnifferItem::StartsWith);
+    let endswith_item = pat_item("endswith").map(SnifferItem::EndsWith);
+    let contains_item = pat_item("contains").map(SnifferItem::Contains);
+    let sniffer_items = choice((
+        ne_item,
+        mask_item,
+        startswith_item,
+        endswith_item,
+        contains_item,
+        field_item,
+    ))
+    .separated_by(comma_nl.clone())
+    .allow_trailing()
+    .collect::<Vec<_>>();
+    // 单个匹配子句：`match 层(条件, ...)`
+    let sniffer_clause = kw("match")
         .then_ignore(nl0.clone())
         .ignore_then(ident.clone())
         .then(
             just(Tok::LParen)
                 .then_ignore(nl0.clone())
-                .ignore_then(sniffer_fields)
+                .ignore_then(sniffer_items)
                 .then_ignore(nl0.clone())
                 .then_ignore(just(Tok::RParen)),
         )
-        .map_with(|((layer, _), fields), e| SnifferClause {
-            layer,
-            fields: fields
-                .into_iter()
-                .map(|(name, v)| {
-                    let val = match v {
-                        Value::Ident { name: f, .. } => SnifferValue::SentField(f),
-                        // 字面量按字段类型强转（常量比较）；其余（原语/值函数调用、
-                        // params、数字加法、字节列表）是值表达式 → 求值为字节后
-                        // 与回包字段字节比较（与「值函数最终算出字节」一致）
-                        Value::Str(_) | Value::Int(_) | Value::Hex(_) => SnifferValue::Literal(v),
-                        other => SnifferValue::Expr(other),
-                    };
-                    (name, val)
-                })
-                .collect(),
-            span: conv(e),
+        .map_with(|((layer, _), items), e| {
+            SnifferPred::Clause(SnifferClause {
+                layer,
+                items,
+                span: conv(e),
+            })
         });
-    // sniffer 块：`sniffer:` 后跟 `- match 层(...)` 列表（与 export: 同风格）
+    // 谓词：match 子句 / and / or / not（递归）
+    let sniffer_pred = recursive::<ParserInput, SnifferPred, Extra<'src>, _, _>(|pred| {
+        let and_pred = kw("and")
+            .then_ignore(nl0.clone())
+            .ignore_then(
+                just(Tok::LParen)
+                    .then_ignore(nl0.clone())
+                    .ignore_then(
+                        pred.clone()
+                            .separated_by(comma_nl.clone())
+                            .allow_trailing()
+                            .collect::<Vec<_>>(),
+                    )
+                    .then_ignore(nl0.clone())
+                    .then_ignore(just(Tok::RParen)),
+            )
+            .map_with(|v, _| SnifferPred::And(v));
+        let or_pred = kw("or")
+            .then_ignore(nl0.clone())
+            .ignore_then(
+                just(Tok::LParen)
+                    .then_ignore(nl0.clone())
+                    .ignore_then(
+                        pred.clone()
+                            .separated_by(comma_nl.clone())
+                            .allow_trailing()
+                            .collect::<Vec<_>>(),
+                    )
+                    .then_ignore(nl0.clone())
+                    .then_ignore(just(Tok::RParen)),
+            )
+            .map_with(|v, _| SnifferPred::Or(v));
+        let not_pred = kw("not")
+            .then_ignore(nl0.clone())
+            .ignore_then(
+                just(Tok::LParen)
+                    .then_ignore(nl0.clone())
+                    .ignore_then(pred.clone())
+                    .then_ignore(nl0.clone())
+                    .then_ignore(just(Tok::RParen)),
+            )
+            .map_with(|p, _| SnifferPred::Not(Box::new(p)));
+        choice((sniffer_clause.clone(), and_pred, or_pred, not_pred))
+    });
+    // sniffer 块：`sniffer:` 后跟 `- 谓词` 列表（与 export: 同风格；顶层隐式 OR）
     let sniffer_stmt = kw("sniffer")
         .then(just(Tok::Colon))
         .then_ignore(nl0.clone())
         .ignore_then(
             (just(Tok::Dash)
                 .ignore_then(nl0.clone())
-                .ignore_then(sniffer_match))
+                .ignore_then(sniffer_pred))
             .separated_by(nl1.clone().or_not())
             .allow_trailing()
             .at_least(1)
@@ -740,6 +848,7 @@ pub fn parse_ast(src: &str) -> crate::diag::PktResult<AstFile> {
             message: e.message.clone(),
             file: None,
             span: Some(crate::diag::SourceSpan::from_ast(e.span, e.offset, 1)),
+            kind: crate::diag::DiagnosticKind::General,
         });
     }
     // 旧 `proto 关键字` 语法的迁移诊断：语句起始的裸 `proto IDENT {`（proto 已不再是
@@ -768,6 +877,7 @@ pub fn parse_ast(src: &str) -> crate::diag::PktResult<AstFile> {
                 tok.offset,
                 tok.len,
             )),
+            kind: crate::diag::DiagnosticKind::General,
         });
     }
     let mut state = SimpleState(tokens.clone());
@@ -1549,6 +1659,7 @@ pub fn parse_value_expr<'src>(src: &'src str) -> crate::diag::PktResult<Value> {
             message: e.message.clone(),
             file: None,
             span: Some(crate::diag::SourceSpan::from_ast(e.span, e.offset, 1)),
+            kind: crate::diag::DiagnosticKind::General,
         });
     }
     let mut state = SimpleState(tokens.clone());
@@ -1587,6 +1698,7 @@ fn render_parse_err<'a, T>(
             message,
             file: None,
             span: Some(SourceSpan::from_ast(span, 0, 0)),
+            kind: crate::diag::DiagnosticKind::General,
         });
     }
     Ok(result)

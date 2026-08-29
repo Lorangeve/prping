@@ -1,0 +1,6 @@
+# 主步骤：发 DNS 查询到无人监听的端口（必然超时）→ 触发 on_timeout 备选包。
+q = dns(id=0x4242, questions=["example.com"])
+full = use(q) |> udp(dport=params("qport")) |> ipv4(dst="127.0.0.1") |> eth()
+
+export:
+- full

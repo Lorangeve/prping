@@ -27,5 +27,5 @@ global:
   init: 0
 
 recipe:
-- pkg: icmp_request.pkt   # 步骤 1：ICMP Echo Request
-- pkg: icmp_reply.pkt     # 步骤 2：ICMP Echo Reply（模拟应答）
+- packet: icmp_request.pkt   # 步骤 1：ICMP Echo Request
+- packet: icmp_reply.pkt     # 步骤 2：ICMP Echo Reply（模拟应答）

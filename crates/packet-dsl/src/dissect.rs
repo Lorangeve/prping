@@ -124,9 +124,23 @@ fn dissect_eth(bytes: &[u8], protos: &mut Vec<crate::proto::ProtoHit>) -> Dissec
         }
         layers.push(layer);
         match ethertype {
-            Some(0x0806) => parse_arp(&mut c, &mut layers, protos),
-            Some(0x0800) => parse_ipv4(&mut c, &mut layers, &mut notes, protos),
-            Some(0x86DD) => parse_ipv6(&mut c, &mut layers, &mut notes, protos),
+            Some(0x0806) => {
+                // ARP：proto 注册表（pkt 声明即解析：28B 定宽；htype 等常量校验
+                // ≡ 旧硬编码参数校验，非以太网 ARP 解析失败）；失败 → 字节留 remaining
+                if let Some((layer, _)) = try_proto_layer("arp", &mut c, protos) {
+                    layers.push(layer);
+                }
+            }
+            Some(0x0800) | Some(0x86DD) => {
+                // 以太网载荷即裸 IP：委托裸 IP 路径（ipv4/ipv6 反解逻辑内联在
+                // dissect_bare_ip，单处实现不重复）；内层字节留 inner.remaining，
+                // proto 命中被 dissect_bare_ip 的 take 收进 inner.proto，须合并回
+                let inner = dissect_bare_ip(c.remaining(), protos);
+                layers.extend(inner.layers);
+                notes.extend(inner.notes);
+                protos.extend(inner.proto);
+                c.pos = bytes.len() - inner.remaining.len();
+            }
             _ => {
                 notes.push(format!(
                     "未识别的 ethertype 0x{:04x}，剩余按 raw 处理",
@@ -173,8 +187,46 @@ fn dissect_bare_ip(bytes: &[u8], protos: &mut Vec<crate::proto::ProtoHit>) -> Di
             let total = bytes
                 .get(2..4)
                 .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize);
-            if ihl >= 5 && total.is_some_and(|t| t >= 20 && t <= bytes.len()) {
-                parse_ipv4(&mut c, &mut layers, &mut notes, protos);
+            // total 字段合理（>= 20）即解析；total 超出实际字节（如 macOS raw
+            // socket 收包的 total 异常）由下方载荷兜底剩余全量，不跳过解析
+            if ihl >= 5 && total.is_some_and(|t| t >= 20) {
+                // IPv4：proto 注册表（version/ihl 位字段、options 宽度按 ihl
+                // 回算、total_length 读出、checksum 校验）；失败 → 字节留 remaining
+                if let Some((layer, consumed)) = try_proto_layer("ipv4", &mut c, protos) {
+                    let hit = protos.last().expect("try_proto_layer 成功已 push hit");
+                    let total = proto_field_int(hit, "total").map(|n| n as usize);
+                    let proto = proto_field_int(hit, "proto").map(|n| n as u8);
+                    // checksum 校验（raw = 头字节含 options）
+                    if let Some(raw) = layer_raw_bytes(&layer)
+                        && crate::serialize::checksum(raw) != 0
+                    {
+                        notes.push("IPv4 header checksum 不匹配".to_string());
+                    }
+                    layers.push(layer);
+                    // 载荷 = total_length - 头字节（total 缺失/过小时按剩余全量兜底；
+                    // total 超出实际字节（如 macOS raw socket 收包的 total 字段
+                    // 异常）同样兜底用剩余全量——不因头字段异常中止解析，
+                    // ICMP 等上层照常反解）
+                    let payload = match total {
+                        Some(t) if t >= consumed => match c.take(t - consumed) {
+                            Some(p) => p.to_vec(),
+                            None => {
+                                notes.push("IPv4 total length 超出实际字节".to_string());
+                                c.remaining().to_vec()
+                            }
+                        },
+                        _ => c.remaining().to_vec(),
+                    };
+                    dispatch_ip_payload(
+                        &payload,
+                        proto,
+                        "IPv4 协议",
+                        crate::proto::RuleCond::Ipv4 { proto },
+                        &mut layers,
+                        &mut notes,
+                        protos,
+                    );
+                }
             }
         }
         Some(6) => {
@@ -183,7 +235,35 @@ fn dissect_bare_ip(bytes: &[u8], protos: &mut Vec<crate::proto::ProtoHit>) -> Di
                 .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize);
             // payload 长度 + 40 应 <= 总长（允许差一点）
             if bytes.len() >= 40 && plen.is_some_and(|p| p + 40 <= bytes.len() + 40) {
-                parse_ipv6(&mut c, &mut layers, &mut notes, protos);
+                // IPv6：proto 注册表（40B 定长头，payload_length 读出；
+                // first4 常量校验挡 TC/flow label≠0 的包）；失败 → 字节留 remaining
+                'ipv6: {
+                    if let Some((layer, _)) = try_proto_layer("ipv6", &mut c, protos) {
+                        let hit = protos.last().expect("try_proto_layer 成功已 push hit");
+                        let plen = proto_field_int(hit, "plen").map(|n| n as usize);
+                        let next_header = proto_field_int(hit, "next_header").map(|n| n as u8);
+                        layers.push(layer);
+                        let payload = match plen {
+                            Some(p) => match c.take(p) {
+                                Some(p) => p.to_vec(),
+                                None => {
+                                    notes.push("IPv6 payload length 超出实际字节".to_string());
+                                    break 'ipv6;
+                                }
+                            },
+                            None => c.remaining().to_vec(),
+                        };
+                        dispatch_ip_payload(
+                            &payload,
+                            next_header,
+                            "IPv6 next header",
+                            crate::proto::RuleCond::Ipv6 { next_header },
+                            &mut layers,
+                            &mut notes,
+                            protos,
+                        );
+                    }
+                }
             }
         }
         _ => {}
@@ -254,102 +334,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-// ── 链路层 ──────────────────────────────────────────────────
-
-fn parse_arp(
-    c: &mut Cursor<'_>,
-    layers: &mut Vec<Layer>,
-    protos: &mut Vec<crate::proto::ProtoHit>,
-) {
-    // proto 注册表优先且唯一（pkt 声明即解析：28B 定宽；htype 等常量校验 ≡ 旧
-    // 硬编码参数校验，非以太网 ARP 解析失败）；失败 → 字节留 remaining
-    // （硬编码 parse_arp 已退役）。
-    if let Some((layer, _)) = try_proto_layer("arp", c, protos) {
-        layers.push(layer);
-    }
-}
-
-// ── 网络层 ──────────────────────────────────────────────────
-
-fn parse_ipv4(
-    c: &mut Cursor<'_>,
-    layers: &mut Vec<Layer>,
-    notes: &mut Vec<String>,
-    protos: &mut Vec<crate::proto::ProtoHit>,
-) {
-    // proto 注册表优先且唯一（pkt 声明即解析：version/ihl 位字段、options 宽度
-    // 按 ihl 回算、total_length 读出、checksum 校验）；失败 → 字节留 remaining
-    // （硬编码 parse_ipv4 已退役）。
-    if let Some((layer, consumed)) = try_proto_layer("ipv4", c, protos) {
-        let hit = protos.last().expect("try_proto_layer 成功已 push hit");
-        let total = proto_field_int(hit, "total").map(|n| n as usize);
-        let proto = proto_field_int(hit, "proto").map(|n| n as u8);
-        // checksum 校验（raw = 头字节含 options）
-        if let Some(raw) = layer_raw_bytes(&layer)
-            && crate::serialize::checksum(raw) != 0
-        {
-            notes.push("IPv4 header checksum 不匹配".to_string());
-        }
-        layers.push(layer);
-        // 载荷 = total_length - 头字节（total 缺失/过小时按剩余全量兜底）
-        let payload = match total {
-            Some(t) if t >= consumed => match c.take(t - consumed) {
-                Some(p) => p.to_vec(),
-                None => {
-                    notes.push("IPv4 total length 超出实际字节".to_string());
-                    return;
-                }
-            },
-            _ => c.remaining().to_vec(),
-        };
-        dispatch_ip_payload(
-            &payload,
-            proto,
-            "IPv4 协议",
-            crate::proto::RuleCond::Ipv4 { proto },
-            layers,
-            notes,
-            protos,
-        );
-    }
-}
-
-fn parse_ipv6(
-    c: &mut Cursor<'_>,
-    layers: &mut Vec<Layer>,
-    notes: &mut Vec<String>,
-    protos: &mut Vec<crate::proto::ProtoHit>,
-) {
-    // proto 注册表优先且唯一（pkt 声明即解析：40B 定长头，payload_length 读出；
-    // first4 常量校验挡 TC/flow label≠0 的包）；失败 → 字节留 remaining
-    // （硬编码 parse_ipv6 已退役）。
-    if let Some((layer, _)) = try_proto_layer("ipv6", c, protos) {
-        let hit = protos.last().expect("try_proto_layer 成功已 push hit");
-        let plen = proto_field_int(hit, "plen").map(|n| n as usize);
-        let next_header = proto_field_int(hit, "next_header").map(|n| n as u8);
-        layers.push(layer);
-        let payload = match plen {
-            Some(p) => match c.take(p) {
-                Some(p) => p.to_vec(),
-                None => {
-                    notes.push("IPv6 payload length 超出实际字节".to_string());
-                    return;
-                }
-            },
-            None => c.remaining().to_vec(),
-        };
-        dispatch_ip_payload(
-            &payload,
-            next_header,
-            "IPv6 next header",
-            crate::proto::RuleCond::Ipv6 { next_header },
-            layers,
-            notes,
-            protos,
-        );
-    }
-}
-
 /// 取 proto 命中的整数字段（辅助）。
 fn proto_field_int(hit: &crate::proto::ProtoHit, name: &str) -> Option<i64> {
     hit.fields
@@ -384,9 +368,94 @@ fn dispatch_ip_payload(
 ) {
     let mut pc = Cursor::new(payload);
     match proto {
-        Some(1) | Some(58) => parse_icmp(&mut pc, layers, notes, protos), // 58 = ICMPv6
-        Some(6) => parse_tcp(&mut pc, layers, notes, protos),
-        Some(17) => parse_udp(&mut pc, layers, notes, protos),
+        Some(1) | Some(58) => {
+            // ICMP（58 = ICMPv6）：proto 注册表（8B 头 + rest payload，遇 rest 即
+            // 停）；payload 回填语义字段、头+载荷整体 checksum 校验；失败 →
+            // 整段按 raw 保留（字节不丢）
+            if let Some((mut layer, _)) = try_proto_layer("icmp", &mut pc, protos) {
+                let body = pc.remaining().to_vec();
+                if let Layer::Icmp(f) = &mut layer {
+                    f.payload = if body.is_empty() {
+                        None
+                    } else {
+                        Some(body.clone())
+                    };
+                }
+                let mut msg = match &layer {
+                    Layer::Icmp(f) => f.raw.clone().unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                msg.extend_from_slice(&body);
+                if crate::serialize::checksum(&msg) != 0 {
+                    notes.push("ICMP checksum 不匹配".to_string());
+                }
+                layers.push(layer);
+            } else {
+                notes.push("icmp 层头反解失败（未注册或字节不符），按 raw 处理".to_string());
+                let rest = pc.remaining().to_vec();
+                if !rest.is_empty() {
+                    layers.push(Layer::Raw(RawData {
+                        bytes: rest,
+                        proto: None,
+                    }));
+                }
+            }
+        }
+        Some(6) => {
+            // TCP：proto 注册表（options 宽度按 data_offset 回算）；端口 →
+            // 应用层规则分派；失败 → 整段按 raw 保留（字节不丢）
+            if let Some((layer, _)) = try_proto_layer("tcp", &mut pc, protos) {
+                let (sport, dport, payload) = match &layer {
+                    Layer::Tcp(f) => (f.src_port, f.dst_port, pc.remaining().to_vec()),
+                    _ => (None, None, Vec::new()),
+                };
+                layers.push(layer);
+                if let (Some(s), Some(d)) = (sport, dport) {
+                    try_app_layer(payload, s, d, false, layers, notes, protos);
+                }
+            } else {
+                notes.push("tcp 层头反解失败（未注册或字节不符），按 raw 处理".to_string());
+                let rest = pc.remaining().to_vec();
+                if !rest.is_empty() {
+                    layers.push(Layer::Raw(RawData {
+                        bytes: rest,
+                        proto: None,
+                    }));
+                }
+            }
+        }
+        Some(17) => {
+            // UDP：proto 注册表（length 字段读出，按它截断载荷——length < 实际
+            // 时超长部分不属本数据报）；端口 → 应用层规则分派；失败 → 整段按 raw
+            if let Some((layer, _)) = try_proto_layer("udp", &mut pc, protos) {
+                let (sport, dport, mut body) = match &layer {
+                    Layer::Udp(f) => (f.src_port, f.dst_port, pc.remaining().to_vec()),
+                    _ => (None, None, Vec::new()),
+                };
+                if let Some(hit) = protos.last()
+                    && let Some(len) = proto_field_int(hit, "length").map(|n| n as usize)
+                    && len >= 8
+                {
+                    let declared = len - 8;
+                    if declared < body.len() {
+                        body.truncate(declared);
+                    }
+                }
+                layers.push(layer);
+                if let (Some(s), Some(d)) = (sport, dport) {
+                    try_app_layer(body, s, d, true, layers, notes, protos);
+                }
+            } else {
+                notes.push("udp 层头反解失败（未注册或字节不符），按 raw 处理".to_string());
+                let rest = pc.remaining().to_vec();
+                if !rest.is_empty() {
+                    layers.push(Layer::Raw(RawData {
+                        bytes: rest,
+                        proto: None,
+                    }));
+                }
+            }
+        }
         other => {
             if !payload.is_empty() {
                 notes.push(format!(
@@ -403,116 +472,6 @@ fn dispatch_ip_payload(
                 }));
             }
         }
-    }
-}
-
-// ── 传输层 ──────────────────────────────────────────────────
-
-fn parse_icmp(
-    c: &mut Cursor<'_>,
-    layers: &mut Vec<Layer>,
-    notes: &mut Vec<String>,
-    protos: &mut Vec<crate::proto::ProtoHit>,
-) {
-    // proto 注册表优先（pkt 声明即解析；payload rest 字段遇 rest 即停）
-    if let Some((mut layer, _)) = try_proto_layer("icmp", c, protos) {
-        let body = c.remaining().to_vec();
-        // payload 回填语义字段（与硬编码一致）；头字节在 raw 分支
-        if let Layer::Icmp(f) = &mut layer {
-            f.payload = if body.is_empty() {
-                None
-            } else {
-                Some(body.clone())
-            };
-        }
-        // checksum 校验（与硬编码一致）：头 + 载荷整体
-        let mut msg = match &layer {
-            Layer::Icmp(f) => f.raw.clone().unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        msg.extend_from_slice(&body);
-        if crate::serialize::checksum(&msg) != 0 {
-            notes.push("ICMP checksum 不匹配".to_string());
-        }
-        layers.push(layer);
-        return;
-    }
-    // 硬编码 parse_icmp 已退役：未注册/字节不符 → 整段按 raw 保留（字节不丢）
-    notes.push("icmp 层头反解失败（未注册或字节不符），按 raw 处理".to_string());
-    let rest = c.remaining().to_vec();
-    if !rest.is_empty() {
-        layers.push(Layer::Raw(RawData {
-            bytes: rest,
-            proto: None,
-        }));
-    }
-}
-
-fn parse_tcp(
-    c: &mut Cursor<'_>,
-    layers: &mut Vec<Layer>,
-    notes: &mut Vec<String>,
-    protos: &mut Vec<crate::proto::ProtoHit>,
-) {
-    // proto 注册表优先（pkt 声明即解析；options 宽度按 data_offset 回算）
-    if let Some((layer, _)) = try_proto_layer("tcp", c, protos) {
-        let (sport, dport, payload) = match &layer {
-            Layer::Tcp(f) => (f.src_port, f.dst_port, c.remaining().to_vec()),
-            _ => (None, None, Vec::new()),
-        };
-        layers.push(layer);
-        if let (Some(s), Some(d)) = (sport, dport) {
-            try_app_layer(payload, s, d, false, layers, notes, protos);
-        }
-        return;
-    }
-    // 硬编码 parse_tcp 已退役：未注册/字节不符 → 整段按 raw 保留（字节不丢）
-    notes.push("tcp 层头反解失败（未注册或字节不符），按 raw 处理".to_string());
-    let rest = c.remaining().to_vec();
-    if !rest.is_empty() {
-        layers.push(Layer::Raw(RawData {
-            bytes: rest,
-            proto: None,
-        }));
-    }
-}
-
-fn parse_udp(
-    c: &mut Cursor<'_>,
-    layers: &mut Vec<Layer>,
-    notes: &mut Vec<String>,
-    protos: &mut Vec<crate::proto::ProtoHit>,
-) {
-    // proto 注册表优先（pkt 声明即解析；length 字段读出，按它截断载荷——
-    // 与旧硬编码行为一致，length < 实际时超长部分不属本数据报）
-    if let Some((layer, _)) = try_proto_layer("udp", c, protos) {
-        let (sport, dport, mut body) = match &layer {
-            Layer::Udp(f) => (f.src_port, f.dst_port, c.remaining().to_vec()),
-            _ => (None, None, Vec::new()),
-        };
-        if let Some(hit) = protos.last()
-            && let Some(len) = proto_field_int(hit, "length").map(|n| n as usize)
-            && len >= 8
-        {
-            let declared = len - 8;
-            if declared < body.len() {
-                body.truncate(declared);
-            }
-        }
-        layers.push(layer);
-        if let (Some(s), Some(d)) = (sport, dport) {
-            try_app_layer(body, s, d, true, layers, notes, protos);
-        }
-        return;
-    }
-    // 硬编码 parse_udp 已退役：未注册/字节不符 → 整段按 raw 保留（字节不丢）
-    notes.push("udp 层头反解失败（未注册或字节不符），按 raw 处理".to_string());
-    let rest = c.remaining().to_vec();
-    if !rest.is_empty() {
-        layers.push(Layer::Raw(RawData {
-            bytes: rest,
-            proto: None,
-        }));
     }
 }
 
@@ -611,7 +570,7 @@ fn try_app_layer(
 /// 层头 proto 反解 → IR 语义层（解析侧回填，与构造侧 `typed_layer` 对称）：
 /// 注册表按 kind 匹配（`#[proto(kind="eth")]` 等），parse_proto 反解出字段表，
 /// 按字段名约定回填 IR Layer 语义字段；头字节走 raw 分支（自动 checksum/length
-/// 由序列化器重算）。失败（未注册/字段不符）→ None（调用方回退硬编码解析）。
+/// 由序列化器重算）。失败（未注册/字段不符）→ None（调用方按 raw 保留字节）。
 /// 返回 (层, 层头字节数)——层头长度 = 反解消费长度：rest/payload 类字段消费到
 /// 末尾，其余字段定宽，按字段类型累加。
 fn proto_hit_to_layer(hit: &crate::proto::ProtoHit) -> Option<(Layer, usize)> {
@@ -639,10 +598,11 @@ fn proto_hit_to_layer(hit: &crate::proto::ProtoHit) -> Option<(Layer, usize)> {
             raw: None,
         }),
         "arp" => Layer::Arp(ArpFields {
-            op: int("op").and_then(|n| match n {
-                1 => Some(ArpOp::Request),
-                2 => Some(ArpOp::Reply),
-                _ => None,
+            op: int("op").map(|n| match n {
+                1 => ArpOp::Request,
+                2 => ArpOp::Reply,
+                // RARP(3) 等未知 opcode：保留原始值（此前丢成 None → roundtrip 失真）
+                other => ArpOp::Other(u16::try_from(other).unwrap_or(0)),
             }),
             sha: macv("sha"),
             spa: ip4v("spa"),
@@ -821,8 +781,8 @@ fn proto_hit_to_layer(hit: &crate::proto::ProtoHit) -> Option<(Layer, usize)> {
     Some((layer, 0))
 }
 
-/// 层头解析：先按 kind 查 proto 注册表（`#[proto(kind=...)]`），命中用字段表
-/// 反解回填语义层；失败回退硬编码 parse_*（引擎魔法，逐步退役）。
+/// 层头解析：按 kind 查 proto 注册表（`#[proto(kind=...)]`），命中用字段表
+/// 反解回填语义层；失败 → None（调用方按 raw 保留，不再有硬编码解析兜底）。
 /// 成功返回 Some((层, 消费字节数))；None = 未注册/解析失败。
 fn try_proto_layer(
     kind: &str,

@@ -36,8 +36,9 @@ pub struct MtuReport {
 enum ProbeOutcome {
     /// echo 回复（该尺寸可过）。
     Ok,
-    /// Fragmentation Needed，携带下一跳 MTU。
-    FragNeeded(usize),
+    /// Fragmentation Needed：`Some(mtu)` = 路由器报回的下一跳 MTU /
+    /// 本地接口 MTU（EMSGSIZE 分支）；`None` = 知道太大但无确切 MTU 值。
+    FragNeeded(Option<usize>),
     Timeout,
     /// 不可达 / TTL 超时 / 其他错误。
     Fail(String),
@@ -107,8 +108,14 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
         let (fits, reported) = match outcome {
             ProbeOutcome::Ok => (true, None),
             ProbeOutcome::FragNeeded(m) => {
-                frag_mtu = Some(frag_mtu.map_or(m, |x| x.min(m)));
-                (false, Some(m))
+                // 无确切 MTU 值（EMSGSIZE 且查不到本地 MTU）时只记「不通过」，
+                // 不污染 frag_mtu 的最小值聚合
+                if let Some(m) = m {
+                    frag_mtu = Some(frag_mtu.map_or(m, |x| x.min(m)));
+                    (false, Some(m))
+                } else {
+                    (false, None)
+                }
             }
             ProbeOutcome::Timeout => (false, None),
             ProbeOutcome::Fail(e) => anyhow::bail!(e),
@@ -150,7 +157,7 @@ pub fn probe_mtu(cfg: &PingConfig) -> anyhow::Result<MtuReport> {
         let ts = crate::util::unix_ts();
         let mut line = format!(
             "{{\"type\":\"mtu\",\"target\":\"{}\",\"ts\":{ts},\"summary\":true,\"payload_max\":{},\"mtu\":{}",
-            cfg.host.replace('"', "\\\""),
+            crate::util::json_escape(&cfg.host),
             report.payload_max,
             report.mtu
         );
@@ -194,7 +201,16 @@ fn probe(
     timeout: Duration,
 ) -> anyhow::Result<ProbeOutcome> {
     let pkt = build_echo(ident, seq, payload);
-    sock.send_to(&pkt, &SockAddr::from(target))?;
+    // DF 位下载荷超过**本机接口 MTU** 时 send 立即报 EMSGSIZE——这是「该尺寸
+    // 不可过」的明确信号（不是发送失败），等价 FragNeeded：继续二分而不是上抛。
+    if let Err(e) = sock.send_to(&pkt, &SockAddr::from(target)) {
+        if is_msg_too_big(&e) {
+            return Ok(ProbeOutcome::FragNeeded(crate::util::local_mtu_for(
+                target.ip(),
+            )));
+        }
+        return Err(e.into());
+    }
     let deadline = Instant::now() + timeout;
     let mut buf: [std::mem::MaybeUninit<u8>; 8192] = [std::mem::MaybeUninit::new(0u8); 8192];
     loop {
@@ -248,7 +264,7 @@ fn classify(buf: &[u8], ident: u16, seq: u16) -> Option<ProbeOutcome> {
             // 引用报文里的 id 在第 8+4 字节（ICMP 头 8B + 引用 IP 头偏移 4）
             if icmp.len() >= 14 && u16::from_be_bytes([icmp[12], icmp[13]]) == ident {
                 let mtu = u16::from_be_bytes([icmp[6], icmp[7]]) as usize;
-                Some(ProbeOutcome::FragNeeded(mtu))
+                Some(ProbeOutcome::FragNeeded(Some(mtu)))
             } else {
                 None
             }
@@ -264,6 +280,18 @@ fn classify(buf: &[u8], ident: u16, seq: u16) -> Option<ProbeOutcome> {
 /// 委托给 `icmp::build_v4`，避免重复实现。
 fn build_echo(ident: u16, seq: u16, payload: usize) -> Vec<u8> {
     crate::ping::icmp::build_v4(ident, seq, payload)
+}
+
+/// 发送超 MTU 的 EMSGSIZE 判定（跨平台：Unix EMSGSIZE / Windows WSAEMSGSIZE 10040）。
+fn is_msg_too_big(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::EMSGSIZE)
+    }
+    #[cfg(windows)]
+    {
+        e.raw_os_error() == Some(10040)
+    }
 }
 
 /// 设置 DF（不分片）位。
@@ -395,7 +423,7 @@ mod tests {
         icmp[8 + 5] = 0x34; // 引用报文 id
         let buf = with_ip_header(&icmp);
         match classify(&buf, 0x1234, 0) {
-            Some(ProbeOutcome::FragNeeded(m)) => assert_eq!(m, 1500),
+            Some(ProbeOutcome::FragNeeded(Some(m))) => assert_eq!(m, 1500),
             other => panic!("期望 FragNeeded，得到 {other:?}"),
         }
         // id 不匹配 → 杂包

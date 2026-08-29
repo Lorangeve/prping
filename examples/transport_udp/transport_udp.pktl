@@ -9,5 +9,5 @@
 #   - 步骤 1：DNS 查询（应用层 dns → udp → ipv4 → eth）
 #   - 步骤 2：VNC 握手横幅（raw 字符串载荷，同一协议栈）
 recipe:
-- pkg: udp_dns.pkt
-- pkg: udp_vnc.pkt
+- packet: udp_dns.pkt
+- packet: udp_vnc.pkt

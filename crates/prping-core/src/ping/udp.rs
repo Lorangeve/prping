@@ -46,8 +46,9 @@ pub fn ping(cfg: &PingConfig) -> anyhow::Result<Stats> {
 
 async fn ping_async(target: SocketAddr, cfg: &PingConfig) -> anyhow::Result<Stats> {
     let sock = util::bind_udp(util::local_bind(target.is_ipv4(), cfg.source))?;
-    // 前 2 字节放 seq，用于回包校验（#3：过滤杂包）
-    let payload = vec![0u8; cfg.size.unwrap_or(32).max(2)];
+    // 前 4 字节放 u32 seq，用于回包校验（#3：过滤杂包）。用 4 字节而非 2 字节：
+    // 2 字节 seq 在 >65535 次迭代后回绕，超长运行可能与陈旧回包撞号。
+    let payload = vec![0u8; cfg.size.unwrap_or(32).max(4)];
     let buf: Vec<MaybeUninit<u8>> = vec![MaybeUninit::new(0u8); cfg.size.unwrap_or(32) + 512];
     let mut probe = UdpProbe {
         sock: &sock,
@@ -81,8 +82,8 @@ impl Probe for UdpProbe<'_> {
         seq: u64,
         is_warmup: bool,
     ) -> anyhow::Result<ProbeOutcome> {
-        let seq_num = seq as u16;
-        self.payload[..2].copy_from_slice(&seq_num.to_be_bytes());
+        let seq_num = seq as u32;
+        self.payload[..4].copy_from_slice(&seq_num.to_be_bytes());
         let start = Instant::now();
         if util::udp_send(self.sock, &self.payload, &self.target)
             .await
@@ -109,7 +110,7 @@ impl Probe for UdpProbe<'_> {
             match recv {
                 Some(Ok((n, src))) => {
                     let init = util::init_slice(&self.buf, n);
-                    if n >= 2 && init[..2] == seq_num.to_be_bytes() {
+                    if n >= 4 && init[..4] == seq_num.to_be_bytes() {
                         break Ok((start.elapsed(), src, n));
                     }
                     // 杂包：继续等待

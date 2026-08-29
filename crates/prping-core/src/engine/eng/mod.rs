@@ -10,12 +10,33 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use rust_i18n::t;
+
 use packet_dsl::PacketSource;
+use packet_dsl::{DefaultSerializer, PacketSpec};
+use serde_json::{Map, Value, json};
 use termcolor::{Ansi, ColorChoice, StandardStream};
 
-use crate::output::{indent, print_cyan, print_dim, print_green, print_magenta, print_orange, print_yellow};
+use crate::output::{
+    indent, print_cyan, print_dim, print_green, print_magenta, print_orange, print_yellow,
+};
+use crate::util::hex_str;
 
-use display::render_module_header;
+use display::{
+    describe_packet_layers, render_listen_template, render_module_header, stack_warning_messages,
+};
+
+/// 列表项展示：字节项（0..=255 的 Int/Hex）→ 两位小写十六进制，其余递归 `value_display`。
+///
+/// DSL 里 `[]` 字面量的语义是字节列表，十六进制展示与文档写法一致（`[0x12, 0x34]`），
+/// 也比 extract 出的十进制字节（如 `[104, 101]`）直观。
+fn byte_item_display(v: &packet_dsl::ast::Value) -> String {
+    match v {
+        packet_dsl::ast::Value::Int(i) if (0..=255).contains(i) => format!("0x{i:02x}"),
+        packet_dsl::ast::Value::Hex(h) if *h <= 255 => format!("0x{h:02x}"),
+        other => value_display(other),
+    }
+}
 
 /// DSL 值 → 展示字符串（函数参数默认值渲染 / sniffer 字面量用）。
 pub fn value_display(v: &packet_dsl::ast::Value) -> String {
@@ -34,7 +55,7 @@ pub fn value_display(v: &packet_dsl::ast::Value) -> String {
             format!("0x{h:0width$x}")
         }
         packet_dsl::ast::Value::List(items) => {
-            let inner: Vec<String> = items.iter().map(value_display).collect();
+            let inner: Vec<String> = items.iter().map(byte_item_display).collect();
             format!("[{}]", inner.join(", "))
         }
         packet_dsl::ast::Value::Param { name, default } => match default {
@@ -195,13 +216,25 @@ pub(crate) fn validate_expr_reply_leaves(
             {
                 let names = crate::engine::pkg::reply_field_names(layer).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "配方 {line} 行：未知回包层 `{layer}`（可用：eth/arp/ipv4/ipv6/icmp/tcp/udp/http/dns/raw）"
+                        "{}",
+                        t!(
+                            "engine.recipe_unknown_layer",
+                            line = line,
+                            kind = t!("engine.recipe_src_label_reply"),
+                            layer = layer
+                        )
                     )
                 })?;
                 if !names.contains(&field.as_str()) {
                     anyhow::bail!(
-                        "配方 {line} 行：层 {layer} 没有字段 `{field}`（可用：{}）",
-                        names.join("/")
+                        "{}",
+                        t!(
+                            "engine.recipe_unknown_field",
+                            line = line,
+                            layer = layer,
+                            field = field,
+                            names = names.join("/")
+                        )
                     );
                 }
             }
@@ -326,6 +359,7 @@ pub fn libs_display(libs: &[PathBuf]) -> String {
 
 // ── 渲染（忠实拆分自原 `engine/eng.rs` 的渲染段，见 `display.rs`）──────────
 
+pub(crate) use display::sniffer_value_display;
 pub use display::{
     dns_type_name, layer_name, opt_bytes_len, print_stack_warnings, render_dissected,
     render_hexdump, render_layers, render_packet, render_packet_fields,
@@ -454,6 +488,10 @@ pub fn ls_builtins(libs: &[PathBuf]) -> anyhow::Result<()> {
 pub fn decode_hex(hex: &str) -> anyhow::Result<()> {
     ensure_proto_registry();
     let hex = hex.replace([' ', '\n'], "");
+    // 奇数长度会令 hex[i..i+2] 越界切片 panic，先显式拒绝
+    if !hex.len().is_multiple_of(2) {
+        anyhow::bail!("hex 长度必须为偶数（当前 {} 个字符）", hex.len());
+    }
     let mut bytes = Vec::new();
     for i in (0..hex.len()).step_by(2) {
         let byte = u8::from_str_radix(&hex[i..i + 2], 16)
@@ -497,8 +535,18 @@ pub fn analyze_file(
     let module =
         packet_dsl::parse_file_with_libs(path, libs).map_err(|d| anyhow::anyhow!("{d}"))?;
     let p: packet_dsl::Params = params.iter().cloned().collect();
-    let sources = packet_dsl::resolve_sources_with_globals(&module, &p, globals)
-        .map_err(|d| anyhow::anyhow!("{d}"))?;
+    let sources = match packet_dsl::resolve_sources_with_globals(&module, &p, globals) {
+        Ok(s) => s,
+        // 监听应答模板（`reply(层,字段)` 需 --wait --raw 上下文）：engine 只做解析，
+        // 展示模块结构（defs/sniffer）并说明包未展开；其余求值错误照常报出。
+        // 按诊断类别判别（此前对消息文本做字符串匹配，改文案即静默漂移）。
+        Err(d) if d.kind == packet_dsl::diag::DiagnosticKind::ReplyOutsideRecipe => {
+            let mut w = StandardStream::stdout(ColorChoice::Auto);
+            return render_listen_template(&mut w, path, &module, &effective_libs(libs), params)
+                .map_err(anyhow::Error::from);
+        }
+        Err(d) => return Err(anyhow::anyhow!("{d}")),
+    };
     let total: usize = sources.iter().map(|(_, p)| p.len()).sum();
     if total == 0 {
         anyhow::bail!("没有可求值的包：文件既无默认导出，也无命名导出");
@@ -506,6 +554,9 @@ pub fn analyze_file(
 
     let mut w = StandardStream::stdout(ColorChoice::Auto);
     let libs = effective_libs(libs);
+    if crate::stats::json() {
+        return analyze_file_json(&mut w, path, &sources, total, &libs, params);
+    }
     render_module_header(&mut w, &module, total, &libs, params)?;
     let mut idx = 0usize;
     for (source, pkts) in &sources {
@@ -530,6 +581,65 @@ pub fn analyze_file(
     Ok(())
 }
 
+/// `--json`：.pkt 分析的结构化输出（单个 JSON 文档）。
+///
+/// 结构与文本视图对应：sources（default / export 命名）→ packets（层栈字段、
+/// 字节数、hex、层序警告、raw-only 发送约束）。字段描述字符串与文本视图一致
+/// （字节直喂层从序列化字节解析真实值，语义层用 IR 字段 + auto 标注）。
+fn analyze_file_json(
+    w: &mut StandardStream,
+    path: &Path,
+    sources: &[(PacketSource, Vec<PacketSpec>)],
+    total: usize,
+    libs: &[PathBuf],
+    params: &[(String, String)],
+) -> anyhow::Result<()> {
+    let ser = DefaultSerializer::new();
+    let mut doc = Map::new();
+    doc.insert("tool".into(), json!("prping"));
+    doc.insert("cmd".into(), json!("engine"));
+    doc.insert("mode".into(), json!("analyze"));
+    doc.insert("file".into(), json!(path.display().to_string()));
+    doc.insert("total".into(), json!(total));
+    doc.insert("libs".into(), json!(libs_display(libs)));
+    let pm: Map<String, Value> = params
+        .iter()
+        .map(|(k, v)| (k.clone(), json!(v.clone())))
+        .collect();
+    doc.insert("params".into(), json!(pm));
+    let mut idx = 0usize;
+    let mut srcs = Vec::new();
+    for (source, pkts) in sources {
+        let mut pk_arr = Vec::new();
+        for pkt in pkts {
+            idx += 1;
+            let (layers, bytes) = describe_packet_layers(pkt, &ser)?;
+            let layers_json: Vec<Value> = layers
+                .iter()
+                .map(|(n, d, raw)| json!({ "name": n, "fields": d, "raw": raw }))
+                .collect();
+            pk_arr.push(json!({
+                "idx": idx,
+                "total": total,
+                "layers": layers_json,
+                "bytes": bytes.len(),
+                "hex": hex_str(&bytes),
+                "warnings": stack_warning_messages(pkt),
+                "raw_only": crate::engine::pkg::raw_only(pkt),
+            }));
+        }
+        let (kind, name) = match source {
+            PacketSource::Default => ("default", Value::Null),
+            PacketSource::Export(n) => ("export", json!(n)),
+        };
+        srcs.push(json!({ "kind": kind, "name": name, "packets": pk_arr }));
+    }
+    doc.insert("sources".into(), json!(srcs));
+    serde_json::to_writer(&mut *w, &Value::Object(doc))?;
+    writeln!(w)?;
+    Ok(())
+}
+
 pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
     use crate::engine::recipe::{ExtractAs, FromSpec, OnError};
 
@@ -540,21 +650,46 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
     for step in &recipe.steps {
         for e in &step.extract {
             match &e.from {
-                FromSpec::Field { layer, field } => {
-                    let names = crate::engine::pkg::sniffer_field_names(layer).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "配方 {} 行：未知回包层 `{}`（可用：eth/arp/ipv4/ipv6/icmp/tcp/udp/http/dns）",
-                            e.line,
-                            layer
-                        )
-                    })?;
+                FromSpec::PeerField { field } => {
+                    if !matches!(field.as_str(), "ip" | "port") {
+                        anyhow::bail!(
+                            "{}",
+                            t!(
+                                "engine.recipe_peer_field_only",
+                                line = e.line,
+                                field = field
+                            )
+                        );
+                    }
+                }
+                FromSpec::Field { layer, field } | FromSpec::SentField { layer, field } => {
+                    let kind = if matches!(e.from, FromSpec::SentField { .. }) {
+                        t!("engine.recipe_src_label_sent")
+                    } else {
+                        t!("engine.recipe_src_label_reply")
+                    };
+                    let names =
+                        crate::engine::pkg::sniffer_field_names(layer).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{}",
+                                t!(
+                                    "engine.recipe_unknown_layer",
+                                    line = e.line,
+                                    kind = kind,
+                                    layer = layer
+                                )
+                            )
+                        })?;
                     if !names.contains(&field.as_str()) {
                         anyhow::bail!(
-                            "配方 {} 行：层 {} 没有字段 `{}`（可用：{}）",
-                            e.line,
-                            layer,
-                            field,
-                            names.join("/")
+                            "{}",
+                            t!(
+                                "engine.recipe_unknown_field",
+                                line = e.line,
+                                layer = layer,
+                                field = field,
+                                names = names.join("/")
+                            )
                         );
                     }
                 }
@@ -570,16 +705,24 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
     for (i, step) in recipe.steps.iter().enumerate() {
         let used = collect_pkt_params(&step.pkg).map_err(|e| {
             anyhow::anyhow!(
-                "配方 {}：第 {}/{} 步 {}：{e}",
-                path.display(),
-                i + 1,
-                recipe.steps.len(),
-                step.pkg.display()
+                "{}",
+                t!(
+                    "engine.recipe_collect_params_fail",
+                    file = path.display(),
+                    step = i + 1,
+                    total = recipe.steps.len(),
+                    pkt = step.pkg.display(),
+                    err = e
+                )
             )
         })?;
         per_step.push(used);
     }
     let params_agg = aggregate_pkt_params(&per_step);
+    if crate::stats::json() {
+        let mut w = StandardStream::stdout(ColorChoice::Auto);
+        return analyze_recipe_json(&mut w, path, &recipe, &params_agg);
+    }
     let mut w = StandardStream::stdout(ColorChoice::Auto);
     print_magenta(&mut w, "prping engine recipe")?;
     writeln!(&mut w)?;
@@ -627,15 +770,9 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
             };
             // 无默认值（必需参数）用橙色警告，有默认值用灰色
             if has_default {
-                print_dim(
-                    &mut w,
-                    format!("{}- {name} ({def})", indent(1)),
-                )?;
+                print_dim(&mut w, format!("{}- {name} ({def})", indent(1)))?;
             } else {
-                print_orange(
-                    &mut w,
-                    format!("{}- {name} ({def})", indent(1)),
-                )?;
+                print_orange(&mut w, format!("{}- {name} ({def})", indent(1)))?;
             }
             writeln!(&mut w)?;
         }
@@ -644,8 +781,25 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
     for (i, step) in recipe.steps.iter().enumerate() {
         print_green(&mut w, format!("step {}: {}", i + 1, step.pkg.display()))?;
         writeln!(&mut w)?;
-        if let Some(secs) = step.wait {
-            print_dim(&mut w, format!("{}wait: {secs}s", indent(1)))?;
+        if let Some(mode) = step.wait {
+            let desc = match mode {
+                crate::engine::pkg::WaitMode::Continuous => "infinite (-1 / no value)".to_string(),
+                crate::engine::pkg::WaitMode::OneShot(secs) => format!("{secs}s"),
+                crate::engine::pkg::WaitMode::Off => "off".to_string(),
+            };
+            print_dim(&mut w, format!("{}wait: {desc}", indent(1)))?;
+            writeln!(&mut w)?;
+        }
+        if let Some(ot) = &step.on_timeout {
+            let desc = match ot {
+                crate::engine::recipe::OnTimeout::Retry(n) => format!("retry {n}"),
+                crate::engine::recipe::OnTimeout::Packet(f) => f.display().to_string(),
+            };
+            print_dim(&mut w, format!("{}on_timeout: {desc}", indent(1)))?;
+            writeln!(&mut w)?;
+        }
+        if let Some(n) = step.count {
+            print_dim(&mut w, format!("{}count: {n}", indent(1)))?;
             writeln!(&mut w)?;
         }
         if let Some(secs) = step.delay {
@@ -680,7 +834,9 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                 ExtractAs::Bytes => "bytes",
             };
             let from_desc = match &e.from {
+                FromSpec::PeerField { field } => format!("reply.peer.{field}"),
                 FromSpec::Field { layer, field } => format!("reply.{layer}.{field}"),
+                FromSpec::SentField { layer, field } => format!("sent.{layer}.{field}"),
                 FromSpec::Expr(v) => value_display(v),
             };
             let as_desc = if e.as_given {
@@ -701,6 +857,109 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
         print_dim(&mut w, format!("{}on_error: {on_error}", indent(1)))?;
         writeln!(&mut w)?;
     }
+    Ok(())
+}
+
+/// `--json`：.pktl 配方概览的结构化输出（单个 JSON 文档）。
+///
+/// 结构与文本概览对应：globals（含 init）、params（缺省值 / 必需）、steps（wait /
+/// delay / raw 覆盖 / 静态 params / extract 子句 / on_error）。校验（extract 层字段、
+/// 步骤参数）与文本路径完全一致，先校验后输出。
+fn analyze_recipe_json(
+    w: &mut StandardStream,
+    path: &Path,
+    recipe: &crate::engine::recipe::Recipe,
+    params_agg: &[(String, Vec<packet_dsl::ast::Value>, Vec<usize>)],
+) -> anyhow::Result<()> {
+    use crate::engine::recipe::{ExtractAs, FromSpec, OnError, StepRaw};
+    let mut doc = Map::new();
+    doc.insert("tool".into(), json!("prping"));
+    doc.insert("cmd".into(), json!("engine"));
+    doc.insert("mode".into(), json!("recipe"));
+    doc.insert("file".into(), json!(path.display().to_string()));
+    let globals: Vec<Value> = recipe
+        .globals
+        .iter()
+        .map(|g| json!({ "name": g.name, "init": g.init.as_ref().map(value_display) }))
+        .collect();
+    doc.insert("globals".into(), json!(globals));
+    let params: Vec<Value> = params_agg
+        .iter()
+        .map(|(name, defaults, _)| {
+            let ds: Vec<String> = defaults.iter().map(value_display).collect();
+            json!({ "name": name, "defaults": ds, "required": defaults.is_empty() })
+        })
+        .collect();
+    doc.insert("params".into(), json!(params));
+    let steps: Vec<Value> = recipe
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let raw = s.raw.as_ref().map(|r| match r {
+                StepRaw::On { iface } => match iface {
+                    Some(i) => json!(i),
+                    None => json!("true"),
+                },
+                StepRaw::Off => json!("false"),
+            });
+            let sp: Map<String, Value> = s
+                .params
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v.clone())))
+                .collect();
+            let extract: Vec<Value> = s
+                .extract
+                .iter()
+                .map(|e| {
+                    let from = match &e.from {
+                        FromSpec::PeerField { field } => format!("reply.peer.{field}"),
+                        FromSpec::Field { layer, field } => format!("reply.{layer}.{field}"),
+                        FromSpec::SentField { layer, field } => format!("sent.{layer}.{field}"),
+                        FromSpec::Expr(v) => value_display(v),
+                    };
+                    let as_name = if e.as_given {
+                        Some(match e.as_ {
+                            ExtractAs::Int => "int",
+                            ExtractAs::Hex => "hex",
+                            ExtractAs::Str => "str",
+                            ExtractAs::Bytes => "bytes",
+                        })
+                    } else {
+                        None
+                    };
+                    json!({ "name": e.name, "from": from, "as": as_name })
+                })
+                .collect();
+            json!({
+                "n": i + 1,
+                "pkt": s.pkg.display().to_string(),
+                "wait": match s.wait {
+                    Some(crate::engine::pkg::WaitMode::Continuous) => json!("infinite"),
+                    Some(crate::engine::pkg::WaitMode::OneShot(secs)) => json!(secs),
+                    Some(crate::engine::pkg::WaitMode::Off) | None => json!(null),
+                },
+                "on_timeout": match &s.on_timeout {
+                    Some(crate::engine::recipe::OnTimeout::Retry(n)) => {
+                        json!({"retry": n})
+                    }
+                    Some(crate::engine::recipe::OnTimeout::Packet(f)) => {
+                        json!({"packet": f.display().to_string()})
+                    }
+                    None => json!(null),
+                },
+                "count": s.count,
+                "delay": s.delay,
+                "raw": raw,
+                "params": sp,
+                "extract": extract,
+                "on_error": match s.on_error { OnError::Stop => "stop", OnError::Continue => "continue" },
+            })
+        })
+        .collect();
+    doc.insert("steps".into(), json!(steps));
+    serde_json::to_writer(&mut *w, &Value::Object(doc))?;
+    writeln!(w)?;
     Ok(())
 }
 #[cfg(test)]
@@ -785,6 +1044,47 @@ use(req) |> ipv4(dst=params("ip"), ttl=64)
         let long = "dst=dns(very.long.hostname.example.com->198.18.0.5) src=127.0.0.1";
         let joined = display::wrap_words(long, 10).join("");
         assert_eq!(joined.replace(' ', ""), long.replace(' ', ""));
+    }
+
+    /// 字节列表统一十六进制展示：extract 出的十进制字节 → `0x..`，非字节项原样。
+    #[test]
+    fn value_display_list_hex() {
+        use packet_dsl::ast::Value;
+        // 十进制字节列表（如 extract 的 raw 字节 "hello"）→ 十六进制
+        assert_eq!(
+            value_display(&Value::List(vec![
+                Value::Int(104),
+                Value::Int(101),
+                Value::Int(108),
+                Value::Int(108),
+                Value::Int(111),
+            ])),
+            "[0x68, 0x65, 0x6c, 0x6c, 0x6f]"
+        );
+        // 十六进制字面量列表保持原样（字节对齐小写）
+        assert_eq!(
+            value_display(&Value::List(vec![
+                Value::Hex(0xde),
+                Value::Hex(0xad),
+                Value::Hex(0xbe),
+                Value::Hex(0xef),
+            ])),
+            "[0xde, 0xad, 0xbe, 0xef]"
+        );
+        // 单字节对齐两位：0x00 / 0x0a
+        assert_eq!(
+            value_display(&Value::List(vec![Value::Int(0), Value::Int(10)])),
+            "[0x00, 0x0a]"
+        );
+        // 非字节项（字符串）递归原样展示
+        assert_eq!(
+            value_display(&Value::List(vec![Value::Str("example.com".into())])),
+            "[\"example.com\"]"
+        );
+        // 空列表
+        assert_eq!(value_display(&Value::List(vec![])), "[]");
+        // 越界 Int 不在字节展示范围，回退十进制（保留原值信息）
+        assert_eq!(value_display(&Value::List(vec![Value::Int(300)])), "[300]");
     }
 
     /// 聚合：同名同默认值去重、同名不同默认值全保留、无默认参数、步骤列表合并。

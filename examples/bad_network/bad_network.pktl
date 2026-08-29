@@ -41,32 +41,32 @@ global:
 
 recipe:
 # 步骤 1：SYN（三次握手第一步）
-- pkg: syn.pkt
+- packet: syn.pkt
   wait: 0
 
 # 步骤 2：ACK（三次握手完成，seq/ack 用 global 算术）
-- pkg: ack.pkt
+- packet: ack.pkt
   wait: 0
 
 # 步骤 3：HTTP GET（第一次发送，PSH|ACK）
-- pkg: http_get.pkt
+- packet: http_get.pkt
   wait: 0
 
 # 步骤 4：TCP Retransmission #1（模拟超时重传，间隔 1s）
-- pkg: retransmit_1.pkt
+- packet: retransmit_1.pkt
   delay: 1
   wait: 0
 
 # 步骤 5：TCP Retransmission #2（指数退避，间隔 2s）
-- pkg: retransmit_2.pkt
+- packet: retransmit_2.pkt
   delay: 2
   wait: 0
 
 # 步骤 6：TCP Retransmission #3（再次退避，间隔 4s）
-- pkg: retransmit_3.pkt
+- packet: retransmit_3.pkt
   delay: 4
   wait: 0
 
 # 步骤 7：RST —— 模拟服务端拒绝或连接异常
-- pkg: rst.pkt
+- packet: rst.pkt
   wait: 0

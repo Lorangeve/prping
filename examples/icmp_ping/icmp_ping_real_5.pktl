@@ -26,7 +26,7 @@ global:
 - name: seq5      # 步骤 5 的序列号
 
 recipe:
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id1
@@ -35,7 +35,7 @@ recipe:
   - name: seq1
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id2
@@ -44,7 +44,7 @@ recipe:
   - name: seq2
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id3
@@ -53,7 +53,7 @@ recipe:
   - name: seq3
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id4
@@ -62,7 +62,7 @@ recipe:
   - name: seq4
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id5

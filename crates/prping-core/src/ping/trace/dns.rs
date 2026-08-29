@@ -1,18 +1,18 @@
 //! 反向 DNS 查询（平台特定：Unix libc / Windows ws2_32 getnameinfo）。
 
 use std::net::IpAddr;
-use std::time::Duration;
 
-/// 反向 DNS 查询（限时）：`-d` 之外每跳一次，超时/无 PTR 返回 None。
+/// 后台启动反向 DNS 查询（不阻塞调用方）：返回接收端，查询线程完成时投递结果。
 ///
-/// getnameinfo 是阻塞 DNS 查询，放在独立线程跑，主流程用 recv_timeout
-/// 限时；超时后线程继续在后台等 DNS 完成（至多几秒）自然退出。
-pub(super) fn reverse_dns_timeout(ip: IpAddr, timeout: Duration) -> Option<String> {
+/// 调用方在合适时机 `recv_timeout` 取回（trace 用它实现跨跳并行：探测下一跳期间
+/// 上一跳的查询在后台跑）。getnameinfo 是阻塞 DNS 查询，线程在后台等 DNS 完成
+/// （至多几秒）自然退出。
+pub(super) fn spawn_reverse_dns(ip: IpAddr) -> std::sync::mpsc::Receiver<Option<String>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(reverse_dns(ip));
     });
-    rx.recv_timeout(timeout).ok().flatten()
+    rx
 }
 
 /// Unix（Linux/macOS/BSD）：libc getnameinfo。
@@ -43,6 +43,8 @@ fn reverse_dns(ip: IpAddr) -> Option<String> {
     };
     let mut host: [MaybeUninit<u8>; 1024] = [MaybeUninit::uninit(); 1024];
     let mut serv: [MaybeUninit<u8>; 64] = [MaybeUninit::uninit(); 64];
+    // NI_NAMEREQD：无 PTR 记录时返回错误而非数字回退串（否则输出地址重复、
+    // JSON hostname 恒非 null，与「无 PTR = None」的文档承诺矛盾）
     let rc = unsafe {
         libc::getnameinfo(
             addr,
@@ -51,7 +53,7 @@ fn reverse_dns(ip: IpAddr) -> Option<String> {
             1024,
             serv.as_mut_ptr() as *mut libc::c_char,
             64,
-            0,
+            libc::NI_NAMEREQD,
         )
     };
     if rc != 0 {
@@ -67,7 +69,7 @@ fn reverse_dns(ip: IpAddr) -> Option<String> {
     use std::ffi::CStr;
     use std::mem::MaybeUninit;
     use windows_sys::Win32::Networking::WinSock::{
-        AF_INET, AF_INET6, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, getnameinfo,
+        AF_INET, AF_INET6, NI_NAMEREQD, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, getnameinfo,
     };
 
     let (addr, addrlen) = match ip {
@@ -93,6 +95,7 @@ fn reverse_dns(ip: IpAddr) -> Option<String> {
     };
     let mut host: [MaybeUninit<u8>; 1024] = [MaybeUninit::uninit(); 1024];
     let mut serv: [MaybeUninit<u8>; 64] = [MaybeUninit::uninit(); 64];
+    // NI_NAMEREQD：无 PTR 记录时返回错误而非数字回退串（与 Unix 路径一致）
     let rc = unsafe {
         getnameinfo(
             addr,
@@ -101,7 +104,7 @@ fn reverse_dns(ip: IpAddr) -> Option<String> {
             1024,
             serv.as_mut_ptr() as *mut u8,
             64,
-            0,
+            NI_NAMEREQD,
         )
     };
     if rc != 0 {

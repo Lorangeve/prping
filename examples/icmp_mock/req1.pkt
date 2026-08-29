@@ -1,0 +1,12 @@
+# client 配方 · 步骤 1：发 ICMP echo request（id=0x1234, seq=1, 载荷 "hello"），
+# `wait: 2` 校验 server 配方的 echo reply，并把回包的 icmp.id 提取进 global.cid
+# （后续步骤复用——配方可包含任意多包）。
+#
+# sniffer 的 seq=1001 = 回包期望值：server 的 reply 把请求 seq 偏移 +1000 作配方
+# 标记（见 reply.pkt）；回环上内核替答的 echo reply 会原样回显 seq=1，只匹配 1001
+# 就能排除内核替答，确保命中的是配方回包。
+payload = raw(bytes="hello")
+use(payload) |> icmp(type=8, id=0x1234, seq=1) |> ipv4(src="127.0.0.1", dst="127.0.0.1")
+
+sniffer:
+  - match icmp(type=0, id=0x1234, seq=1001)

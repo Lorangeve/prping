@@ -7,19 +7,21 @@ use std::net::SocketAddr;
 
 use packet_dsl::ir::PacketSpec;
 
+use rust_i18n::t;
+
 use super::SendOutcome;
 use super::sniffer::SnifferMatcher;
 
-// 以下仅 Linux/IPPROTO_RAW 路径使用（Windows/macOS/Linux+feature=pcap 走 rawpcap）
-#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+// 仅 Linux（非 pcap）与 macOS 的内核 IP 栈/raw ICMP 路径使用（Windows 与 Linux+pcap 走 rawpcap）
+#[cfg(any(all(target_os = "linux", not(feature = "pcap")), target_os = "macos"))]
 use super::icmp_echo_ids;
-#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+#[cfg(any(all(target_os = "linux", not(feature = "pcap")), target_os = "macos"))]
 use super::{Reply, match_reply};
-#[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
+#[cfg(any(all(target_os = "linux", not(feature = "pcap")), target_os = "macos"))]
 use packet_dsl::ir::Layer;
-#[cfg(not(any(windows, target_os = "macos", feature = "pcap")))]
+#[cfg(any(all(target_os = "linux", not(feature = "pcap")), target_os = "macos"))]
 use std::io;
-#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+#[cfg(any(all(target_os = "linux", not(feature = "pcap")), target_os = "macos"))]
 use std::time::Duration;
 
 pub(crate) fn send_raw_bytes(
@@ -31,6 +33,47 @@ pub(crate) fn send_raw_bytes(
     sniffer: Option<&SnifferMatcher>,
     sent_report: Option<&packet_dsl::DissectReport>,
 ) -> anyhow::Result<SendOutcome> {
+    // macOS：裸 IPv4 外层 → 内核 IP 栈 raw socket（util::socket::inject_ip4——剥 IP 头
+    // 按协议发载荷、内核建 IP 头，与 ping 的 raw ICMP 同一模型）。回环 lo0 是
+    // DLT_NULL 裸 IP，pcap 链路层注入（需 EN10MB）发不了——裸 IP 走内核栈即可；
+    // eth 外层仍走 rawpcap 链路层注入。
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(Layer::Ipv4(_)) = pkt.layers.last() {
+            let t =
+                target.ok_or_else(|| anyhow::anyhow!("{}", t!("engine.raw_ip4_need_target")))?;
+            let v4 = match t.ip() {
+                std::net::IpAddr::V4(v4) => v4,
+                other => anyhow::bail!("{}", t!("engine.raw_ip4_not_v4", ip = other)),
+            };
+            // --wait：先开 raw ICMP socket 再发送（回包先于 socket 存在会被内核丢弃）
+            let reply_fd = if wait.is_some() && (sniffer.is_some() || icmp_echo_ids(pkt).is_some())
+            {
+                Some(open_raw_icmp4()?)
+            } else {
+                None
+            };
+            let sent = crate::util::socket::inject_ip4(bytes, v4)
+                .map_err(|e| anyhow::anyhow!("{}", t!("engine.raw_ip4_send_fail", err = e)))?;
+            let reply = match reply_fd {
+                Some(fd) => {
+                    let secs = wait.expect("reply_fd 仅在 --wait 时打开");
+                    wait_icmp_reply(fd, pkt, secs, sniffer, sent_report)?
+                }
+                None => None,
+            };
+            #[cfg(target_os = "macos")]
+            if let Some(fd) = reply_fd {
+                unsafe { libc::close(fd) };
+            }
+            return Ok(SendOutcome {
+                proto: "IP4",
+                sent,
+                received: 0,
+                reply,
+            });
+        }
+    }
     // Windows：Npcap；macOS：系统 libpcap；Linux feature=pcap：系统 libpcap（rawpcap.rs）
     #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
     {
@@ -45,7 +88,14 @@ pub(crate) fn send_raw_bytes(
         // （与 rawpcap/Npcap 侧「先开抓包句柄再发送」同理）。
         #[cfg(target_os = "linux")]
         let reply_fd = if wait.is_some() && (sniffer.is_some() || icmp_echo_ids(pkt).is_some()) {
-            Some(open_raw_icmp4()?)
+            // 按发包 IP 版本选回包 socket：v6（或 eth 内含 v6）→ AF_INET6 +
+            // IPPROTO_ICMPV6（此前恒开 v4 ICMP socket，v6 echo 回包永远收不到、
+            // 静默等满超时）；v4 → 原路径
+            if reply_is_v6(pkt) {
+                Some(open_raw_icmp6()?)
+            } else {
+                Some(open_raw_icmp4()?)
+            }
         } else {
             None
         };
@@ -99,11 +149,43 @@ pub(crate) fn send_raw_bytes(
     }
 }
 
+/// 发包最外层 IP 版本（eth 帧向内找第一个 IP 层）：决定 raw `--wait` 的回包 socket。
+#[cfg(target_os = "linux")]
+fn reply_is_v6(pkt: &PacketSpec) -> bool {
+    pkt.layers
+        .iter()
+        .rev()
+        .find_map(|l| match l {
+            Layer::Ipv6(_) => Some(true),
+            Layer::Ipv4(_) => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
 /// raw 模式应答等待：sniffer 存在时按 sniffer 匹配；否则包是 ICMP echo → 等 echo reply
 /// （按 id+seq 匹配）。socket 由调用方在**发送前**打开（见 `wait_icmp_reply` 注释）。
-#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+#[cfg(any(all(target_os = "linux", not(feature = "pcap")), target_os = "macos"))]
 fn open_raw_icmp4() -> anyhow::Result<libc::c_int> {
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP) };
+    if fd < 0 {
+        anyhow::bail!(
+            "{}",
+            rust_i18n::t!(
+                "errors.raw_icmp_wait",
+                hint = crate::util::privilege_hint(),
+                error = io::Error::last_os_error().to_string()
+            )
+        );
+    }
+    Ok(fd)
+}
+
+/// Linux raw ICMPv6 socket（IPv6 包 `--wait` 的回包接收；raw v6 收包不含 IPv6 头，
+/// 回包是裸 ICMPv6——匹配见 `wait_icmp_reply` 的 type 129 手工分支）。
+#[cfg(target_os = "linux")]
+fn open_raw_icmp6() -> anyhow::Result<libc::c_int> {
+    let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_RAW, libc::IPPROTO_ICMPV6) };
     if fd < 0 {
         anyhow::bail!(
             "{}",
@@ -123,7 +205,7 @@ fn open_raw_icmp4() -> anyhow::Result<libc::c_int> {
 /// 完成回包往返——loopback xmit 触发 NET_RX softirq，softirq 在 local_bh_enable 的
 /// 进程上下文同步执行（icmp 回显 → 回包生成 → 再次投递），回包先于 socket 存在即被
 /// 内核丢弃，发送后才开 socket 永远等不到（与 rawpcap/Npcap「先开抓包句柄再发送」同理）。
-#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+#[cfg(any(all(target_os = "linux", not(feature = "pcap")), target_os = "macos"))]
 fn wait_icmp_reply(
     fd: libc::c_int,
     pkt: &PacketSpec,
@@ -168,6 +250,22 @@ fn wait_icmp_reply(
                 rtt,
                 bytes,
                 matched,
+            }));
+        }
+        // Linux raw ICMPv6 收包不含 IPv6 头（裸 ICMPv6）：dissect 无法识别裸
+        // ICMPv6，按 type 129 echo reply + id/seq 手工匹配（与 ping/icmp.rs
+        // 的无头路径一致）。v4 回包 data[0] 是 IP version nibble，不会误中。
+        if sniffer.is_none()
+            && data.len() >= 8
+            && data[0] == 129
+            && let Some((id, seq)) = super::icmp_echo_ids(pkt)
+            && id == u16::from_be_bytes([data[4], data[5]])
+            && seq == u16::from_be_bytes([data[6], data[7]])
+        {
+            return Ok(Some(Reply {
+                rtt,
+                bytes: data.to_vec(),
+                matched: None,
             }));
         }
     }

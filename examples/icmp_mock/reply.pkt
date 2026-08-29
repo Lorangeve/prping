@@ -1,0 +1,11 @@
+# server 配方 · 步骤 2（触发发包）：构造 ICMP echo reply（type=0）发回请求方。
+# 字段全部来自 listen 步骤的 extract（global）：
+#   r_id / r_payload 回显；r_dst_ip（请求方）→ reply 的 dst、
+#   r_src_ip（本机）→ reply 的 src。ICMP 校验和由序列化器自动重算。
+#
+# **配方标记**：seq = r_seq + 1000。回环上内核会替答 ICMP echo（macOS/Linux 都回
+# type=0 且原样回显 id/seq/载荷——ping 127.0.0.1 不需要服务端），纯回显的 reply
+# 与内核替答逐字节相同，client 无法分辨来源。seq 偏移 1000 让回包带上内核不会
+# 产生的特征，client 的 sniffer 只认这个值（1001/1002）→ 命中的必然是配方回包。
+payload = raw(bytes=global("r_payload"))
+use(payload) |> icmp(type=0, id=global("r_id"), seq=global("r_seq") + 1000) |> ipv4(src=global("r_src_ip"), dst=global("r_dst_ip"))

@@ -67,8 +67,16 @@ fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Option<Value>> {
             len = rest.trim().parse::<usize>().ok();
         }
     }
+    // Content-Length 无上限校验时，恶意/异常客户端可触发数 GB 分配（OOM）
+    const MAX_LSP_MSG: usize = 16 * 1024 * 1024;
     let len =
         len.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length"))?;
+    if len > MAX_LSP_MSG {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Content-Length {len} exceeds {MAX_LSP_MSG}"),
+        ));
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     let msg =
@@ -128,7 +136,8 @@ impl LspServer {
                             "textDocumentSync": 1,
                             "completionProvider": { "triggerCharacters": [">", "(", ",", " "] },
                             "hoverProvider": true,
-                            "documentSymbolProvider": true
+                            "documentSymbolProvider": true,
+                            "definitionProvider": true
                         },
                         "serverInfo": {
                             "name": "prping packet-dsl",
@@ -173,6 +182,12 @@ impl LspServer {
                 if let Some(id) = id {
                     let symbols = self.document_symbol(msg);
                     write_message(w, &response(id, symbols))?;
+                }
+            }
+            "textDocument/definition" => {
+                if let Some(id) = id {
+                    let defs = self.definition(msg);
+                    write_message(w, &response(id, defs))?;
                 }
             }
             "$/cancelRequest" | "workspace/didChangeConfiguration" => {}
@@ -489,6 +504,63 @@ impl LspServer {
             return json!({ "contents": { "kind": "markdown", "value": md } });
         }
         Value::Null
+    }
+
+    /// `textDocument/definition`：定位光标处标识符的定义位置（元件/函数/proto/导出）。
+    fn definition(&self, msg: &Value) -> Value {
+        let uri = msg["params"]["textDocument"]["uri"].as_str().unwrap_or("");
+        let pos = &msg["params"]["position"];
+        let (line, character) = (
+            pos["line"].as_i64().unwrap_or(0) as usize,
+            pos["character"].as_i64().unwrap_or(0) as usize,
+        );
+        let Some(text) = self.text_of(uri) else {
+            return Value::Null;
+        };
+        let Some(word) = word_at(text, line, character) else {
+            return Value::Null;
+        };
+        let Ok(module) = try_parse(text, uri, &self.libs) else {
+            return Value::Null;
+        };
+        // 定义位置：元件 / 函数 / proto / 导出（name_span 覆盖标识符）
+        let span = module
+            .defs
+            .iter()
+            .find(|d| d.name == word)
+            .map(|d| d.name_span)
+            .or_else(|| {
+                module
+                    .funcs
+                    .iter()
+                    .find(|f| f.name == word)
+                    .map(|f| f.name_span)
+            })
+            .or_else(|| {
+                module
+                    .protos
+                    .iter()
+                    .find(|p| p.name == word)
+                    .map(|p| p.name_span)
+            })
+            .or_else(|| {
+                module
+                    .exports
+                    .iter()
+                    .find(|(n, _)| *n == word)
+                    .map(|(_, s)| *s)
+            });
+        let Some(span) = span else {
+            return Value::Null;
+        };
+        // LSP 坐标 0 基；DSL span 1 基
+        json!([{
+            "uri": uri,
+            "range": {
+                "start": { "line": span.start.line - 1, "character": span.start.col - 1 },
+                "end": { "line": span.end.line - 1, "character": span.end.col - 1 }
+            }
+        }])
     }
 
     fn document_symbol(&self, msg: &Value) -> Value {

@@ -21,6 +21,15 @@ pub fn bind_udp(bind: SocketAddr) -> anyhow::Result<smol::Async<socket2::Socket>
     let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     sock.set_recv_buffer_size(4 * 1024 * 1024)?;
     sock.set_send_buffer_size(4 * 1024 * 1024)?;
+    // Linux 默认 rmem_max（~212KB）会把 SO_RCVBUF 静默夹紧（内核按 2 倍记账），
+    // 4MB 请求在默认系统上不生效——读回实际值并提示，注释的「放大到 4MB」不再误导
+    if let Ok(actual) = sock.recv_buffer_size()
+        && actual < 2 * 1024 * 1024
+    {
+        eprintln!(
+            "[udp] 提示：接收缓冲被系统限制为 {actual} 字节（默认 rmem_max 约 212KB，             高带宽场景可调大 sysctl net.core.rmem_max / net.core.wmem_max）"
+        );
+    }
     sock.bind(&socket2::SockAddr::from(bind))?;
     sock.set_nonblocking(true)?;
     Ok(smol::Async::new(sock)?)
@@ -210,12 +219,24 @@ fn win_connect_select(sock: &socket2::Socket, addr: &socket2::SockAddr) -> std::
 }
 
 /// 优雅结束发送方向：shutdown(Write) 后排空残余数据至 EOF。
+///
+/// 带中断与超时：对不随 EOF 关闭的对端（nc -l -k / keep-alive 服务器等）
+/// 不再无限挂起；首次 Ctrl+C 也能打断 drain。100ms 分片轮询（与 drive 的
+/// interruptible_sleep 同理）。
 pub async fn drain_after_send(stream: &mut smol::Async<std::net::TcpStream>) {
     use smol::io::AsyncReadExt;
     let _ = stream.get_ref().shutdown(std::net::Shutdown::Write);
     let mut buf = [0u8; RECV_BUF_SIZE];
     loop {
-        match stream.read(&mut buf).await {
+        if crate::util::interrupted() {
+            break;
+        }
+        let read = smol::future::or(stream.read(&mut buf), async {
+            smol::Timer::after(std::time::Duration::from_millis(100)).await;
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "poll"))
+        })
+        .await;
+        match read {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }

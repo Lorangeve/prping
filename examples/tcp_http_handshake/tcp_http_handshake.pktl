@@ -26,7 +26,7 @@ global:
   init: 0
 
 recipe:
-- pkg: syn.pkt
+- packet: syn.pkt
   wait: 3
   extract:
   - name: cseq
@@ -35,7 +35,7 @@ recipe:
   - name: sseq
     from: reply.tcp.seq     # SYN-ACK 的 seq 号
     as: int
-- pkg: ack.pkt
+- packet: ack.pkt
   wait: 0                   # ACK 不需要等待应答
-- pkg: http_get.pkt
+- packet: http_get.pkt
   wait: 3

@@ -26,6 +26,17 @@ impl SourceSpan {
     }
 }
 
+/// 诊断类别：宿主按类别分支处理（避免对消息文本做字符串匹配）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiagnosticKind {
+    /// 普通错误。
+    #[default]
+    General,
+    /// `reply(层, 字段)` 在无回包上下文中被调用（配方 extract / `--listen --raw`
+    /// 应答模板专用原语）：engine 分析遇到时渲染监听模板而非报错。
+    ReplyOutsideRecipe,
+}
+
 /// 一条诊断（错误）。
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -33,6 +44,8 @@ pub struct Diagnostic {
     /// 出错的文件/模块名（None = 未知或内存中的源码）。
     pub file: Option<String>,
     pub span: Option<SourceSpan>,
+    /// 诊断类别（默认普通）。
+    pub kind: DiagnosticKind,
 }
 
 impl Diagnostic {
@@ -41,6 +54,7 @@ impl Diagnostic {
             message: message.into(),
             file: None,
             span: None,
+            kind: DiagnosticKind::General,
         }
     }
 
@@ -49,6 +63,7 @@ impl Diagnostic {
             message: message.into(),
             file: None,
             span: Some(SourceSpan::from_ast(span, 0, 0)),
+            kind: DiagnosticKind::General,
         }
     }
 

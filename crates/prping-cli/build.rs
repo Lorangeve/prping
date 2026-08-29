@@ -16,14 +16,17 @@ fn main() {
     let config_dir = std::path::Path::new(".cargo");
     let _ = std::fs::create_dir_all(config_dir);
 
-    // runner 脚本：用 sudo setcap 设权限，失败则直接运行二进制
+    // runner 脚本：用 sudo setcap 设权限，失败则直接运行二进制。
+    // 仅在内容变化时重写——此前每次构建都覆盖，用户对脚本的自定义会被冲掉
     let runner = config_dir.join("run-with-cap.sh");
     let script = "#!/bin/sh\nBIN=\"$1\"; shift\nsudo -n setcap cap_net_raw+ep \"$BIN\" 2>/dev/null\nexec \"$BIN\" \"$@\"\n";
-    let _ = std::fs::write(&runner, script);
-    let _ = std::process::Command::new("chmod")
-        .arg("+x")
-        .arg(&runner)
-        .status();
+    if std::fs::read_to_string(&runner).ok().as_deref() != Some(script) {
+        let _ = std::fs::write(&runner, script);
+        let _ = std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(&runner)
+            .status();
+    }
 
     // .cargo/config.toml
     let config = config_dir.join("config.toml");
@@ -40,7 +43,14 @@ fn main() {
     let Ok(profile) = std::env::var("PROFILE") else {
         return;
     };
-    let target_dir = std::path::Path::new(&out_dir).ancestors().nth(3).unwrap();
+    // 从 OUT_DIR 向上找 target/<profile>：此前固定 nth(3).unwrap() 依赖 OUT_DIR
+    // 层数，目录结构变化即构建 panic——改为扫描含 profile 目录的祖先层
+    let Some(target_dir) = std::path::Path::new(&out_dir)
+        .ancestors()
+        .find(|p| p.join(&profile).is_dir())
+    else {
+        return;
+    };
     let binary = target_dir.join(&profile).join("prping");
 
     if binary.exists() {

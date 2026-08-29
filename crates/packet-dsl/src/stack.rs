@@ -52,8 +52,8 @@ pub enum StackWarningKind {
     WrongCarrier,
 }
 
-/// 层名（与宿主 `engine` 展示一致）。
-fn name(l: &Layer) -> &'static str {
+/// 层名（与宿主 `engine` 展示一致；`matchpred` 的匹配/取值共用）。
+pub(crate) fn name(l: &Layer) -> &'static str {
     match l {
         Layer::Ethernet(_) => "eth",
         Layer::Arp(_) => "arp",

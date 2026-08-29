@@ -1,0 +1,16 @@
+# DNS 发包/回包模拟·服务端（packet --wait --raw，裸 --wait = 持续监听）
+#
+# 运行（需 root）：sudo prping packet --wait --raw server.pkt
+# 客户端（另一终端）：prping packet --wait 2 client.pkt 127.0.0.1:53
+#
+# 监听规则：匹配 DNS **查询**（flags=0x0100，QR=0）。
+# 应答模板为裸 IP 外层（无 eth 层）：应答经内核 IP 栈路由注入（Linux
+# IPPROTO_RAW+IP_HDRINCL / macOS 按协议 raw socket），回环与局域网均无需 MAC
+# 解析——macOS lo0 的 DLT_NULL 裸 IP 帧、Linux lo 都能工作。
+sniffer:
+  - match dns(flags=0x0100)
+
+# 应答模板（默认导出）：DNS **应答**——id 回显请求 id、flags=0x8180（QR=1+RD+RA）、
+# 回显查询问题、附带一条 A 记录答案；UDP 端口/IP 互换，校验和自动重算。
+resp = dns(id=reply("dns", "id"), flags=0x8180, questions=["example.com"], answers=[["example.com", 1, 1, 300, ip4("93.184.216.34")]])
+use(resp) |> udp(sport=53, dport=reply("udp", "sport")) |> ipv4(dst=reply("ipv4", "src"), src=reply("ipv4", "dst"))

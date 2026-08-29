@@ -165,15 +165,67 @@ fn parse_ip_base(ip: &[u8], v6: bool) -> Option<(IpAddr, IpAddr, u8, usize, u16)
         if ip.len() < 40 || (ip[0] >> 4) != 6 {
             return None;
         }
-        let next = ip[6];
         let src = IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&ip[8..24]).ok()?));
         let dst = IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).ok()?));
-        Some((src, dst, next, 40, 0))
+        // RFC 8200 扩展头链式追跳（有界 8 层）：此前固定 t_offset=40 且 proto
+        // 取 ip[6]——带扩展头的包（Hop-by-Hop/Fragment/路由等）被漏判为
+        // 「非 TCP/UDP」或端口从扩展头字节误读
+        let mut next = ip[6];
+        let mut off = 40usize;
+        let mut frag_offset = 0u16;
+        for _ in 0..8 {
+            match next {
+                // 逐跳 0 / 路由 43 / 目的 60 / 移动 135 / HIP 139 / SHIM6 140：
+                // 长度 = (hdr[1]+1)*8
+                0 | 43 | 60 | 135 | 139 | 140 => {
+                    if ip.len() < off + 2 {
+                        return None;
+                    }
+                    next = ip[off];
+                    off += ((ip[off + 1] as usize) + 1) * 8;
+                }
+                // 分片 44：定长 8 字节；偏移字段在 off+2（13 位）
+                44 => {
+                    if ip.len() < off + 8 {
+                        return None;
+                    }
+                    let frag = u16::from_be_bytes([ip[off + 2], ip[off + 3]]);
+                    frag_offset = frag & 0x1FFF;
+                    next = ip[off];
+                    off += 8;
+                }
+                // AH 51：长度 = (hdr[1]+2)*4
+                51 => {
+                    if ip.len() < off + 2 {
+                        return None;
+                    }
+                    next = ip[off];
+                    off += ((ip[off + 1] as usize) + 2) * 4;
+                }
+                _ => break,
+            }
+            if off > ip.len() {
+                return None;
+            }
+        }
+        Some((src, dst, next, off, frag_offset))
     } else {
         if ip.len() < 20 || (ip[0] >> 4) != 4 {
             return None;
         }
         let ihl = crate::util::ipv4_ihl(ip);
+        // IHL 合法域 [20, 60]（RFC 791，4 位字段单位 4 字节）；并交叉校验
+        // total_length >= IHL——畸形帧（IHL<5 或 total 小于头长）不再被当作
+        // 有效 IP 头读取端口（此前 IHL=1 时 ports 从偏移 4 误读）
+        if !(20..=60).contains(&ihl) {
+            return None;
+        }
+        let total = ip
+            .get(2..4)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize);
+        if total.is_some_and(|t| t < ihl) {
+            return None;
+        }
         if ip.len() < ihl + 4 {
             return None;
         }
@@ -191,8 +243,8 @@ fn ip_meta(ip: &[u8], v6: bool) -> Option<FrameMeta> {
     if !matches!(proto, 6 | 17) {
         return None;
     }
-    if !v6 && frag_offset > 0 {
-        return None; // IPv4 非首片分片无端口
+    if frag_offset > 0 {
+        return None; // 非首片分片无端口（IPv4 与 IPv6 Fragment 扩展头）
     }
     let (sport, dport) = ports(&ip[t_offset..])?;
     Some(FrameMeta {
@@ -879,6 +931,39 @@ struct FrameCtx<'a> {
     dissect: Option<&'a packet_dsl::dissect::DissectReport>,
 }
 
+/// 帧的 keep 判定（默认 ServiceFilter / --filter 表达式 / 全帧 三态收敛）。
+/// 三平台 4 个抓包循环此前各复制一份同样的 match 块。
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+fn frame_keep(data: &[u8], filter: &Option<ServiceFilter>, expr: &Option<FilterExpr>) -> bool {
+    match (filter, expr) {
+        (Some(f), _) => f.matches_frame(data),
+        (None, Some(e)) => {
+            let report = packet_dsl::dissect(data);
+            let ctx = FrameCtx {
+                dissect: Some(&report),
+            };
+            e.matches_ctx(&ctx)
+        }
+        (None, None) => true,
+    }
+}
+
+/// 裸 IP（macOS lo0 DLT_NULL 剥头后）的 keep 判定，同上。
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+fn bare_ip_keep(data: &[u8], filter: &Option<ServiceFilter>, expr: &Option<FilterExpr>) -> bool {
+    match (filter, expr) {
+        (Some(f), _) => f.matches_bare(data),
+        (None, Some(e)) => {
+            let report = packet_dsl::dissect(data);
+            let ctx = FrameCtx {
+                dissect: Some(&report),
+            };
+            e.matches_ctx(&ctx)
+        }
+        (None, None) => true,
+    }
+}
+
 /// 反解层栈是否含指定层名。
 fn has_layer(r: &packet_dsl::dissect::DissectReport, name: &str) -> bool {
     r.layers
@@ -919,84 +1004,25 @@ fn dissect_addrs(r: &packet_dsl::dissect::DissectReport) -> Option<(IpAddr, IpAd
 /// 多设备路径，与 Windows/macOS 一致）。
 #[cfg(all(target_os = "linux", not(feature = "pcap")))]
 fn spawn_linux(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -> CaptureStatus {
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_PACKET,
-            libc::SOCK_RAW,
-            libc::htons(libc::ETH_P_ALL as u16) as libc::c_int,
-        )
+    let fd = match crate::util::socket::open_af_packet(0) {
+        Ok(fd) => fd,
+        Err(e) => {
+            return CaptureStatus::Unavailable(
+                rust_i18n::t!(
+                    "errors.af_packet_socket",
+                    hint = crate::util::privilege_hint(),
+                    error = e.to_string()
+                )
+                .to_string(),
+            );
+        }
     };
-    if fd < 0 {
-        return CaptureStatus::Unavailable(
-            rust_i18n::t!(
-                "errors.af_packet_socket",
-                hint = crate::util::privilege_hint(),
-                error = std::io::Error::last_os_error().to_string()
-            )
-            .to_string(),
-        );
-    }
-    // 绑定全接口（sll_ifindex=0）
-    let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-    sll.sll_family = libc::AF_PACKET as u16;
-    sll.sll_protocol = libc::htons(libc::ETH_P_ALL as u16);
-    sll.sll_ifindex = 0;
-    let rc = unsafe {
-        libc::bind(
-            fd,
-            &sll as *const libc::sockaddr_ll as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
-        )
-    };
-    if rc < 0 {
-        let msg = std::io::Error::last_os_error().to_string();
-        unsafe { libc::close(fd) };
-        return CaptureStatus::Unavailable(format!("AF_PACKET bind failed: {msg}"));
-    }
     // 全帧模式：尽力开启混杂模式（PACKET_MR_PROMISC，需 CAP_NET_ADMIN），与
     // Windows/macOS pcap 路径默认 promisc(true) 对齐。失败不报错——仍能收到
     // 本机地址/广播/组播帧（ARP 请求等）；要看到网卡上其他主机的流量才需要。
-    // 注意 PACKET_ADD_MEMBERSHIP 不接受 mr_ifindex=0（会 ENODEV），必须按接口
-    // 逐个添加：getifaddrs 枚举接口名 → if_nametoindex 取索引；回环 lo 上混杂
-    // 无意义，跳过。全部失败时给一次性提示（缺 CAP_NET_ADMIN 的典型症状）。
-    if all_frames {
-        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
-        if unsafe { libc::getifaddrs(&mut ifap) } == 0 {
-            let mut cur = ifap;
-            let mut promisc_ok = false;
-            unsafe {
-                while !cur.is_null() {
-                    let ifa = &*cur;
-                    let name = std::ffi::CStr::from_ptr(ifa.ifa_name);
-                    if name != c"lo" {
-                        let ifidx = libc::if_nametoindex(ifa.ifa_name);
-                        if ifidx != 0 {
-                            let mreq = libc::packet_mreq {
-                                mr_ifindex: ifidx as libc::c_int,
-                                mr_type: libc::PACKET_MR_PROMISC as libc::c_ushort,
-                                mr_alen: 0,
-                                mr_address: [0; 8],
-                            };
-                            let rc = libc::setsockopt(
-                                fd,
-                                libc::SOL_PACKET,
-                                libc::PACKET_ADD_MEMBERSHIP,
-                                &mreq as *const libc::packet_mreq as *const libc::c_void,
-                                std::mem::size_of::<libc::packet_mreq>() as libc::socklen_t,
-                            );
-                            if rc == 0 {
-                                promisc_ok = true;
-                            }
-                        }
-                    }
-                    cur = ifa.ifa_next;
-                }
-                libc::freeifaddrs(ifap);
-            }
-            if !promisc_ok {
-                eprintln!("{}", rust_i18n::t!("errors.capture_promisc_failed"));
-            }
-        }
+    // 全部失败时给一次性提示（缺 CAP_NET_ADMIN 的典型症状）。
+    if all_frames && !crate::util::socket::af_packet_promisc_all(fd) {
+        eprintln!("{}", rust_i18n::t!("errors.capture_promisc_failed"));
     }
     // 默认模式构造 ServiceFilter；全帧模式不过滤（None 同时作为「全帧」标记）
     let filter = (!all_frames).then(|| ServiceFilter::new(addr));
@@ -1047,16 +1073,10 @@ fn linux_loop(fd: libc::c_int, filter: Option<ServiceFilter>, expr: Option<Filte
         let frame = &buf[..n as usize];
         // 默认模式：只收本机入向（PACKET_HOST）且目的端口 == 监听端口；全帧模式：
         // --filter 只显示匹配帧，无 filter 显示一切（含广播/组播/出向回包）
-        let keep = match (&filter, &expr) {
-            (Some(f), _) => sll.sll_pkttype == libc::PACKET_HOST && f.matches_frame(frame),
-            (None, Some(e)) => {
-                let report = packet_dsl::dissect(frame);
-                let ctx = FrameCtx {
-                    dissect: Some(&report),
-                };
-                e.matches_ctx(&ctx)
-            }
-            (None, None) => true,
+        let keep = if matches!(&filter, Some(_)) && sll.sll_pkttype != libc::PACKET_HOST {
+            false // 默认模式非本机入向直接丢弃
+        } else {
+            frame_keep(frame, &filter, &expr)
         };
         if keep {
             show_frame(frame);
@@ -1092,7 +1112,8 @@ fn spawn_windows(addr: SocketAddr, all_frames: bool, expr: Option<FilterExpr>) -
     let mut first_err: Option<String> = None;
     for idx in wanted {
         let dev = devs[idx].name.clone();
-        match rawpcap::open_capture(&dev) {
+        // 默认模式（ServiceFilter）只要入向；-a/--filter 全帧模式须看本机出向帧
+        match rawpcap::open_capture(&dev, !all_frames) {
             Ok(mut cap) => {
                 let filter = filter.clone();
                 let expr = expr.clone();
@@ -1134,18 +1155,7 @@ fn windows_loop(
             Ok(p) => {
                 // 默认模式：目的端口 == 监听端口；全帧模式：--filter 只显示匹配帧，
                 // 无 filter 显示一切（Npcap 已开混杂）
-                let keep = match (&filter, &expr) {
-                    (Some(f), _) => f.matches_frame(p.data),
-                    (None, Some(e)) => {
-                        let report = packet_dsl::dissect(p.data);
-                        let ctx = FrameCtx {
-                            dissect: Some(&report),
-                        };
-                        e.matches_ctx(&ctx)
-                    }
-                    (None, None) => true,
-                };
-                if keep {
+                if frame_keep(p.data, &filter, &expr) {
                     show_frame(p.data);
                 }
             }
@@ -1261,35 +1271,13 @@ fn pcap_loop(
                     let Some(ip) = strip_null(p.data) else {
                         continue;
                     };
-                    let keep = match (&filter, &expr) {
-                        (Some(f), _) => f.matches_bare(ip),
-                        (None, Some(e)) => {
-                            let report = packet_dsl::dissect(ip);
-                            let ctx = FrameCtx {
-                                dissect: Some(&report),
-                            };
-                            e.matches_ctx(&ctx)
-                        }
-                        (None, None) => true,
-                    };
-                    if keep {
+                    if bare_ip_keep(ip, &filter, &expr) {
                         show_bare_ip(ip);
                     }
                 } else {
                     // 默认模式：目的端口 == 监听端口；全帧模式：--filter 只显示匹配帧，
                     // 无 filter 显示一切（BPF 已开混杂）
-                    let keep = match (&filter, &expr) {
-                        (Some(f), _) => f.matches_frame(p.data),
-                        (None, Some(e)) => {
-                            let report = packet_dsl::dissect(p.data);
-                            let ctx = FrameCtx {
-                                dissect: Some(&report),
-                            };
-                            e.matches_ctx(&ctx)
-                        }
-                        (None, None) => true,
-                    };
-                    if keep {
+                    if frame_keep(p.data, &filter, &expr) {
                         show_frame(p.data);
                     }
                 }
@@ -1311,8 +1299,9 @@ fn pcap_loop(
 /// 剥 DLT_NULL/LOOP 的 4 字节族头（AF_INET=2 / AF_INET6=30），返回裸 IP 包；
 /// 族头非法或不足 → None。族头字节序：DLT_NULL 是主机字节序，DLT_LOOP 是网络
 /// 字节序——两种都接受（值都是 2/30，只是字节排列不同）。
+/// serve 抓包与 `packet --listen --raw`（pcap 路径）共用。
 #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
-fn strip_null(data: &[u8]) -> Option<&[u8]> {
+pub(crate) fn strip_null(data: &[u8]) -> Option<&[u8]> {
     let head = data.get(..4)?;
     let le = u32::from_le_bytes(head.try_into().ok()?);
     let be = u32::from_be_bytes(head.try_into().ok()?);

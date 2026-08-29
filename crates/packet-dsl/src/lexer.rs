@@ -200,14 +200,22 @@ impl<'a> Lexer<'a> {
                 return;
             }
             let text = &self.src[hex_start..self.pos];
-            let v = u64::from_str_radix(text, 16).expect("已校验 hex 数字");
-            self.tokens.push(Token {
-                tok: Tok::Hex(v),
-                offset: start,
-                len: self.pos - start,
-                line,
-                col,
-            });
+            // >16 位 hex 会超出 u64（此前 .expect 直接 panic；与十进制分支的
+            // 优雅溢出报错对齐）
+            match u64::from_str_radix(text, 16) {
+                Ok(v) => self.tokens.push(Token {
+                    tok: Tok::Hex(v),
+                    offset: start,
+                    len: self.pos - start,
+                    line,
+                    col,
+                }),
+                Err(_) => self.errors.push(LexError {
+                    message: format!("十六进制整数溢出：`{text}`"),
+                    span: Span::new(line, col, line, col + text.len()),
+                    offset: start,
+                }),
+            }
             return;
         }
         while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {

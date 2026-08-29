@@ -70,7 +70,8 @@ pub(crate) trait TraceSocket {
     fn set_recv_timeout(&self, timeout: Duration) -> anyhow::Result<()>;
 
     /// 接收一个包：返回 `(n_bytes, peer_addr)`。
-    fn recv_from(&self, buf: &mut [MaybeUninit<u8>]) -> std::io::Result<(usize, socket2::SockAddr)>;
+    fn recv_from(&self, buf: &mut [MaybeUninit<u8>])
+    -> std::io::Result<(usize, socket2::SockAddr)>;
 
     /// trace dump 标签（如 `"icmp-v4"` / `"udp-v6"`）。
     fn dump_label(&self) -> &str;
@@ -82,92 +83,194 @@ pub(crate) trait TraceSocket {
     fn is_ipv6(&self) -> bool;
 }
 
-/// 逐跳探测通用骨架：hop_no 循环 + interrupted + set_ttl + 发送 + 超时收集 + finish_hop。
+/// 一跳探测的收集结果（逐跳骨架的 hop_body 闭包返回）。
+#[derive(Default)]
+pub(crate) struct HopCollect {
+    /// 本跳回复来源（最后一次匹配回复的 peer；无回复 = None）。
+    pub src: Option<IpAddr>,
+    /// 每探测的 RTT（未匹配 = None）。
+    pub rtts: Vec<Option<Duration>>,
+    /// 是否收到目标回包（SYN-ACK/RST / echo reply / Port Unreachable）。
+    pub dest_hit: bool,
+}
+
+/// 逐跳探测通用骨架：hop_no 循环 + 渲染上一跳（DNS 后台并行）+ interrupted +
+/// PendingHop 收尾——ICMP/UDP（trace_loop）、Unix TCP（tcp.rs）、Windows Npcap
+/// TCP（tcpwin.rs）三路径共用，各路径只提供 hop_body（set_ttl + 发送 + 收集）。
 ///
-/// 各变体只需实现 `TraceSocket` trait，无需重复循环/统计/渲染逻辑。
+/// hop_body 返回的 rtts 为空表示本跳无探测发出（骨架据此 break）。
+pub(crate) fn trace_loop_skeleton<F>(
+    cfg: &PingConfig,
+    max_hops: u32,
+    mut hop_body: F,
+    w: &mut StandardStream,
+) -> anyhow::Result<(Vec<Hop>, bool)>
+where
+    F: FnMut(u32) -> anyhow::Result<HopCollect>,
+{
+    let mut hops: Vec<Hop> = Vec::new();
+    let mut reached = false;
+    // 上一跳延迟渲染：本跳探测期间其 DNS 在后台并行
+    let mut pending: Option<PendingHop> = None;
+
+    for hop_no in 1..=max_hops {
+        // 先渲染上一跳（DNS 已并行跑完本跳的探测窗口）
+        if let Some(prev) = pending.take() {
+            let hostname = dns_hostname(prev.dns_rx);
+            let hop = finish_hop(prev.hop_no, prev.src, prev.rtts, hostname, w)?;
+            hops.push(hop);
+            if prev.dest_hit {
+                reached = true;
+                break;
+            }
+        }
+        if util::interrupted() {
+            break;
+        }
+        let collected = hop_body(hop_no)?;
+        if collected.rtts.is_empty() {
+            break;
+        }
+        pending = Some(PendingHop::new(
+            hop_no,
+            cfg,
+            collected.src,
+            collected.rtts,
+            collected.dest_hit,
+        ));
+    }
+
+    // 循环外渲染最后一跳
+    if let Some(prev) = pending.take() {
+        let hostname = dns_hostname(prev.dns_rx);
+        let hop = finish_hop(prev.hop_no, prev.src, prev.rtts, hostname, w)?;
+        hops.push(hop);
+        if prev.dest_hit {
+            reached = true;
+        }
+    }
+
+    Ok((hops, reached))
+}
+
+/// 逐跳探测（ICMP/UDP）：骨架 + TraceSocket 的发送/解析/收包差异点。
 fn trace_loop<S: TraceSocket>(
     cfg: &PingConfig,
     max_hops: u32,
     socket: &mut S,
     w: &mut StandardStream,
 ) -> anyhow::Result<(Vec<Hop>, bool)> {
-    let mut hops: Vec<Hop> = Vec::new();
-    let mut reached = false;
-
-    for hop_no in 1..=max_hops {
-        if util::interrupted() {
-            break;
-        }
-        util::set_ttl(socket.ttl_socket(), hop_no, socket.is_ipv6())?;
-
-        let probes = socket.send_probes(hop_no);
-        if probes.is_empty() {
-            break;
-        }
-
-        let want: Vec<u16> = probes.iter().map(|&(id, _)| id).collect();
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
-        let mut src: Option<IpAddr> = None;
-        let mut dest_hit = false;
-        let mut remaining = probes.len();
-        let mut buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
-        while remaining > 0 {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
+    trace_loop_skeleton(
+        cfg,
+        max_hops,
+        |hop_no| {
+            util::set_ttl(socket.ttl_socket(), hop_no, socket.is_ipv6())?;
+            let probes = socket.send_probes(hop_no);
+            if probes.is_empty() {
+                return Ok(HopCollect::default());
             }
-            socket.set_recv_timeout(deadline - now)?;
-            match socket.recv_from(&mut buf) {
-                Ok((n, addr)) => {
-                    let data: &[u8] =
-                        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
-                    let peer: IpAddr = addr
-                        .as_socket()
-                        .map(|s| s.ip())
-                        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-                    let (id, is_dest) = match socket.parse_reply(data, &want) {
-                        Some(r) => r,
-                        None => {
-                            trace_dump(socket.dump_label(), data, false);
-                            continue;
-                        }
-                    };
-                    trace_dump(socket.dump_label(), data, true);
-                    if is_dest {
-                        dest_hit = true;
-                    }
-                    if let Some(idx) = probes.iter().position(|&(s, _)| s == id)
-                        && rtts[idx].is_none()
-                    {
-                        let rtt = probes[idx].1.elapsed();
-                        rtts[idx] = Some(rtt);
-                        remaining -= 1;
-                    }
-                    src = Some(peer);
-                }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
+            let want: Vec<u16> = probes.iter().map(|&(id, _)| id).collect();
+            let deadline = Instant::now() + PROBE_TIMEOUT;
+            let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
+            let mut src: Option<IpAddr> = None;
+            let mut dest_hit = false;
+            let mut remaining = probes.len();
+            let mut buf: [MaybeUninit<u8>; 8192] = [MaybeUninit::new(0u8); 8192];
+            while remaining > 0 {
+                let now = Instant::now();
+                if now >= deadline {
                     break;
                 }
-                Err(_) => break,
+                socket.set_recv_timeout(deadline - now)?;
+                match socket.recv_from(&mut buf) {
+                    Ok((n, addr)) => {
+                        let data: &[u8] = util::init_slice(&buf, n);
+                        let peer: IpAddr = addr
+                            .as_socket()
+                            .map(|s| s.ip())
+                            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                        let (id, is_dest) = match socket.parse_reply(data, &want) {
+                            Some(r) => r,
+                            None => {
+                                trace_dump(socket.dump_label(), data, false);
+                                continue;
+                            }
+                        };
+                        trace_dump(socket.dump_label(), data, true);
+                        if is_dest {
+                            dest_hit = true;
+                        }
+                        if let Some(idx) = probes.iter().position(|&(s, _)| s == id)
+                            && rtts[idx].is_none()
+                        {
+                            let rtt = probes[idx].1.elapsed();
+                            rtts[idx] = Some(rtt);
+                            remaining -= 1;
+                        }
+                        src = Some(peer);
+                    }
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
             }
-        }
-
-        let hop = finish_hop(hop_no, cfg, src, rtts, w)?;
-        hops.push(hop);
-        if dest_hit {
-            reached = true;
-            break;
-        }
-    }
-
-    Ok((hops, reached))
+            Ok(HopCollect {
+                src,
+                rtts,
+                dest_hit,
+            })
+        },
+        w,
+    )
 }
 /// 反向 DNS 查询超时（超时按无 PTR 处理，不阻塞整条路径）。
 const DNS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 一跳的延迟渲染 + DNS 后台并行：探测下一跳期间，上一跳的反向 DNS 在后台跑，
+/// 渲染时 `recv_timeout(DNS_TIMEOUT)` 取回——查询通常已在探测窗口内完成，
+/// 未完成最多再等 DNS_TIMEOUT。三条探测路径（ICMP/UDP 的 trace_loop、Unix TCP、
+/// Windows Npcap TCP）共用，消除「逐跳串行等 DNS」的总耗时累加。
+pub(crate) struct PendingHop {
+    pub(crate) hop_no: u32,
+    pub(crate) rtts: Vec<Option<Duration>>,
+    pub(crate) src: Option<IpAddr>,
+    pub(crate) dns_rx: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    pub(crate) dest_hit: bool,
+}
+
+impl PendingHop {
+    pub(crate) fn new(
+        hop_no: u32,
+        cfg: &PingConfig,
+        src: Option<IpAddr>,
+        rtts: Vec<Option<Duration>>,
+        dest_hit: bool,
+    ) -> Self {
+        Self {
+            hop_no,
+            rtts,
+            src,
+            // -d（no_dns）或本跳无回复时不查询
+            dns_rx: if cfg.no_dns {
+                None
+            } else {
+                src.map(dns::spawn_reverse_dns)
+            },
+            dest_hit,
+        }
+    }
+}
+
+/// 取回后台 DNS 结果（限时 DNS_TIMEOUT；超时按无 PTR 处理）。
+pub(crate) fn dns_hostname(
+    rx: Option<std::sync::mpsc::Receiver<Option<String>>>,
+) -> Option<String> {
+    rx.and_then(|rx| rx.recv_timeout(DNS_TIMEOUT).ok().flatten())
+}
 /// 默认最大跳数（`-m`，对标 tracert/traceroute 的 30）。
 pub const DEFAULT_MAX_HOPS: u32 = 30;
 /// TTL 上限（IPv4 协议字段上限）。
@@ -277,20 +380,15 @@ fn ensure_tcp_trace_supported() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一跳收尾：反向 DNS + 输出（文本/JSON），返回该跳 Hop。
+/// 一跳收尾：构造 Hop 并输出（文本/JSON）。hostname 由调用方解析
+/// （跨跳并行，见 `PendingHop`/`dns_hostname`），不再在此串行阻塞。
 pub(crate) fn finish_hop(
     hop_no: u32,
-    cfg: &PingConfig,
     src: Option<IpAddr>,
     rtts: Vec<Option<Duration>>,
+    hostname: Option<String>,
     w: &mut StandardStream,
 ) -> anyhow::Result<Hop> {
-    // 反向 DNS（与收集串行；典型局域网下 PTR 远快于 2s 超时）
-    let hostname = if cfg.no_dns {
-        None
-    } else {
-        src.and_then(|ip| dns::reverse_dns_timeout(ip, DNS_TIMEOUT))
-    };
     let hop = Hop {
         hop: hop_no,
         rtts,
@@ -319,9 +417,7 @@ pub(crate) fn match_tcp_syn_reply_v4(
     if ip.len() < ihl + 20 {
         return None;
     }
-    let src = std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-        ip[12], ip[13], ip[14], ip[15],
-    ));
+    let src = std::net::IpAddr::V4(std::net::Ipv4Addr::new(ip[12], ip[13], ip[14], ip[15]));
     if src != target {
         return None;
     }

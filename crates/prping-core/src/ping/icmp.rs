@@ -19,11 +19,13 @@ use std::mem::MaybeUninit;
 use std::time::Instant;
 
 /// ICMP 应答失败原因（用于区分超时与网络错误）。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IcmpErr {
     Timeout,
     Unreachable,
     TtlExceeded,
+    /// 发送失败（此前 send 错误被静默归类为 Timeout，真实错误被吞掉）。
+    Send(String),
 }
 
 /// 返回 `Ok(true)` 表示有丢包（供退出码判断）。
@@ -130,7 +132,10 @@ impl Probe for IcmpProbe<'_> {
             }
             #[cfg(not(windows))]
             IcmpSender::Raw(sock, target, ident) => {
-                send_recv(sock, target, *ident, seq as u16, size, self.addr).await
+                // seq 回绕（>65536 次迭代）时轮换 ident：固定 (ident, seq) 组合
+                // 复用会让迟到的旧回包错配到当前迭代（-i 0.1 约 1.8h 即回绕）
+                let eff_ident = *ident ^ ((seq >> 16) as u16);
+                send_recv(sock, target, eff_ident, seq as u16, size, self.addr).await
             }
         };
         match outcome {
@@ -141,16 +146,21 @@ impl Probe for IcmpProbe<'_> {
                 Ok(ProbeOutcome::Ok { rtt })
             }
             Err(e) => {
-                let json_err = match e {
+                let json_err = match &e {
                     IcmpErr::Timeout => "timeout",
                     IcmpErr::Unreachable => "unreachable",
                     IcmpErr::TtlExceeded => "ttl exceeded",
+                    // 发送错误显示真实原因（此前伪装成 Timeout 误导排查）
+                    IcmpErr::Send(_) => "send failed",
                 };
                 if !self.cfg.quiet && !stats::json() {
-                    let msg = match e {
-                        IcmpErr::Timeout => t!("common.timeout"),
-                        IcmpErr::Unreachable => t!("common.dest_unreachable"),
-                        IcmpErr::TtlExceeded => t!("common.ttl_expired"),
+                    let msg = match &e {
+                        IcmpErr::Timeout => t!("common.timeout").to_string(),
+                        IcmpErr::Unreachable => t!("common.dest_unreachable").to_string(),
+                        IcmpErr::TtlExceeded => t!("common.ttl_expired").to_string(),
+                        IcmpErr::Send(err) => {
+                            format!("{}：{err}", t!("common.send_failed"))
+                        }
                     };
                     output::writeln_red(w, &msg)?;
                 }
@@ -169,7 +179,9 @@ async fn send_recv_win(
     payload_size: usize,
     source: Option<IpAddr>,
 ) -> Result<(Duration, u8, usize), IcmpErr> {
-    let payload = echo_payload(payload_size);
+    // IcmpSendEcho2 的 DataSize 是 u16：>65535 会静默截断发送错误尺寸——
+    // 钳到 IPv4 最大 ICMP 载荷（Unix 路径超限则由 send 报错，Windows 静默）
+    let payload = echo_payload(payload_size.min(crate::MAX_UDP));
     // HANDLE（*mut c_void）非 Send：unblock 闭包须 Send，句柄按 usize 传值
     let handle = session.handle() as usize;
     // v6 源绑定经 SourceAddress 参数；v4 不支持（IcmpSendEcho2 无源地址参数）
@@ -234,27 +246,43 @@ async fn send_recv(
     async_sock
         .write_with(|sock| sock.send_to(&request, target))
         .await
-        .map_err(|_| IcmpErr::Timeout)?;
+        .map_err(|e| IcmpErr::Send(e.to_string()))?;
     // socket2 的 recv_from 只接受 MaybeUninit 缓冲区；用 new(0) 全量初始化，
     // 这样后续以 &[u8] 读取是健全的（不再依赖 recv 返回的写入长度）。
     let mut buf: [MaybeUninit<u8>; 4096] = [MaybeUninit::new(0u8); 4096];
-    let timeout = Duration::from_secs(4);
-    let recv = smol::future::or(
-        async {
-            async_sock
-                .read_with(|sock| sock.recv_from(&mut buf))
-                .await
-                .map(|(n, _)| n)
-        },
-        async {
-            smol::Timer::after(timeout).await;
-            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
-        },
-    )
-    .await;
-    match recv {
-        Ok(n) => parse_reply(util::init_slice(&buf, n), ident, seq, send_time, addr),
-        Err(_) => Err(IcmpErr::Timeout),
+    // 循环收包直到 deadline：raw ICMP socket 会收到本机所有 ICMP 流量，
+    // 无关报文（其他进程的回显/错误）按 ident/seq 过滤后继续等，而不是
+    // 单次收包即把杂包误判为超时丢包（与 UDP ping 的回包过滤语义一致）。
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(IcmpErr::Timeout);
+        }
+        let recv = smol::future::or(
+            async {
+                async_sock
+                    .read_with(|sock| sock.recv_from(&mut buf))
+                    .await
+                    .map(|(n, _)| n)
+            },
+            async {
+                smol::Timer::after(remaining).await;
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
+            },
+        )
+        .await;
+        let n = match recv {
+            Ok(n) => n,
+            Err(_) => return Err(IcmpErr::Timeout),
+        };
+        match parse_reply(util::init_slice(&buf, n), ident, seq, send_time, addr) {
+            Ok(r) => return Ok(r),
+            // 杂包/ident 不匹配：继续等（还有剩余时间）
+            Err(IcmpErr::Timeout) => {}
+            // 匹配到明确的网络错误（属于本探测的不可达/TTL 超时）
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -278,18 +306,42 @@ fn parse_reply(
                 return Err(IcmpErr::Timeout);
             }
             match icmp[0] {
-                0 => {} // echo reply
-                3 => return Err(IcmpErr::Unreachable),
-                11 => return Err(IcmpErr::TtlExceeded),
-                _ => return Err(IcmpErr::Timeout),
+                0 => {
+                    // echo reply：校验 id/seq，不匹配视为杂包（调用方继续等）
+                    if u16::from_be_bytes([icmp[4], icmp[5]]) != ident
+                        || u16::from_be_bytes([icmp[6], icmp[7]]) != seq
+                    {
+                        return Err(IcmpErr::Timeout);
+                    }
+                    let ttl = if has_v4_hdr { buf[8] } else { 0 };
+                    Ok((rtt, ttl, icmp.len()))
+                }
+                ty @ (3 | 11) => {
+                    // 不可达 / TTL 超时：数据区携带原始报文（内嵌 IP 头 + 前 8B ICMP）。
+                    // 内嵌 ICMP 的 id/seq 匹配才归属到本探测——否则是其他进程的
+                    // 网络错误报文，继续等而不是误判为我们的丢包。
+                    let body = icmp.get(8..).ok_or(IcmpErr::Timeout)?;
+                    if body.len() < 20 {
+                        return Err(IcmpErr::Timeout);
+                    }
+                    let inner_ihl = util::ipv4_ihl(body);
+                    let eicmp = body.get(inner_ihl..).ok_or(IcmpErr::Timeout)?;
+                    if eicmp.len() < 8 {
+                        return Err(IcmpErr::Timeout);
+                    }
+                    if u16::from_be_bytes([eicmp[4], eicmp[5]]) != ident
+                        || u16::from_be_bytes([eicmp[6], eicmp[7]]) != seq
+                    {
+                        return Err(IcmpErr::Timeout);
+                    }
+                    if ty == 3 {
+                        Err(IcmpErr::Unreachable)
+                    } else {
+                        Err(IcmpErr::TtlExceeded)
+                    }
+                }
+                _ => Err(IcmpErr::Timeout),
             }
-            if u16::from_be_bytes([icmp[4], icmp[5]]) != ident
-                || u16::from_be_bytes([icmp[6], icmp[7]]) != seq
-            {
-                return Err(IcmpErr::Timeout);
-            }
-            let ttl = if has_v4_hdr { buf[8] } else { 0 };
-            Ok((rtt, ttl, icmp.len()))
         }
         IpAddr::V6(_) => {
             // 框架探测：Linux raw ICMPv6 收包不含 IPv6 头（pskb_pull），
@@ -300,18 +352,36 @@ fn parse_reply(
                 return Err(IcmpErr::Timeout);
             }
             match icmp[0] {
-                129 => {} // echo reply
-                1 => return Err(IcmpErr::Unreachable),
-                3 => return Err(IcmpErr::TtlExceeded),
-                _ => return Err(IcmpErr::Timeout),
+                129 => {
+                    // echo reply：校验 id/seq，不匹配视为杂包
+                    if u16::from_be_bytes([icmp[4], icmp[5]]) != ident
+                        || u16::from_be_bytes([icmp[6], icmp[7]]) != seq
+                    {
+                        return Err(IcmpErr::Timeout);
+                    }
+                    let hop_limit = if has_v6_hdr { buf[7] } else { 0 };
+                    Ok((rtt, hop_limit, icmp.len()))
+                }
+                ty @ (1 | 3) => {
+                    // 不可达 / TTL 超时：数据区 = 内嵌 IPv6 头(40B) + 前 8B ICMPv6
+                    let body = icmp.get(8..).ok_or(IcmpErr::Timeout)?;
+                    if body.len() < 48 {
+                        return Err(IcmpErr::Timeout);
+                    }
+                    let eicmp = body.get(40..48).ok_or(IcmpErr::Timeout)?;
+                    if u16::from_be_bytes([eicmp[4], eicmp[5]]) != ident
+                        || u16::from_be_bytes([eicmp[6], eicmp[7]]) != seq
+                    {
+                        return Err(IcmpErr::Timeout);
+                    }
+                    if ty == 1 {
+                        Err(IcmpErr::Unreachable)
+                    } else {
+                        Err(IcmpErr::TtlExceeded)
+                    }
+                }
+                _ => Err(IcmpErr::Timeout),
             }
-            if u16::from_be_bytes([icmp[4], icmp[5]]) != ident
-                || u16::from_be_bytes([icmp[6], icmp[7]]) != seq
-            {
-                return Err(IcmpErr::Timeout);
-            }
-            let hop_limit = if has_v6_hdr { buf[7] } else { 0 };
-            Ok((rtt, hop_limit, icmp.len()))
         }
     }
 }
@@ -525,6 +595,7 @@ mod raw_tests {
     }
     #[test]
     fn test_parse_reply_unreachable() {
+        // 外层 IP + ICMP type 3 + 内嵌 IP + 内嵌 ICMP（携带我们的 id/seq）
         let mut p = Vec::new();
         p.extend([
             0x45, 0, 0, 40, 0, 0, 0, 0, 64, 1, 0, 0, 127, 0, 0, 1, 127, 0, 0, 1,
@@ -532,7 +603,15 @@ mod raw_tests {
         p.push(3);
         p.push(0);
         p.extend((0u16).to_be_bytes());
-        p.extend([0u8; 20]);
+        p.extend([0u8; 4]);
+        p.extend([
+            0x45, 0, 0, 40, 0, 0, 0, 0, 64, 1, 0, 0, 127, 0, 0, 1, 127, 0, 0, 1,
+        ]);
+        p.push(0);
+        p.push(0);
+        p.extend((0u16).to_be_bytes());
+        p.extend(1u16.to_be_bytes());
+        p.extend(1u16.to_be_bytes());
         let r = parse_reply(
             &p,
             1,
@@ -541,6 +620,17 @@ mod raw_tests {
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         );
         assert_eq!(r, Err(IcmpErr::Unreachable));
+        // 内嵌 id/seq 不匹配（其他进程的报文）→ 杂包，不应归属
+        let mut other = p.clone();
+        other[20 + 8 + 20 + 4] = 0xAA;
+        let r2 = parse_reply(
+            &other,
+            1,
+            1,
+            Instant::now(),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        );
+        assert_eq!(r2, Err(IcmpErr::Timeout));
     }
     #[test]
     fn test_parse_reply_ttl_expired() {
@@ -551,11 +641,19 @@ mod raw_tests {
         p.push(11);
         p.push(0);
         p.extend((0u16).to_be_bytes());
-        p.extend([0u8; 20]);
+        p.extend([0u8; 4]);
+        p.extend([
+            0x45, 0, 0, 40, 0, 0, 0, 0, 64, 1, 0, 0, 127, 0, 0, 1, 127, 0, 0, 1,
+        ]);
+        p.push(0);
+        p.push(0);
+        p.extend((0u16).to_be_bytes());
+        p.extend(0x1234u16.to_be_bytes());
+        p.extend(7u16.to_be_bytes());
         let r = parse_reply(
             &p,
-            1,
-            1,
+            0x1234,
+            7,
             Instant::now(),
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         );

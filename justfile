@@ -200,35 +200,40 @@ check-pcap:
     cargo clippy --all-targets --workspace --features pcap -- -D warnings
 
 # 检查全部平台语法（本机 + Windows + Linux 交叉）
+# 工具链缺失 → 跳过；编译错误 → 汇总后 exit 1（此前 || echo 把编译错误
+# 与工具链缺失混为一谈，且恒 exit 0，门禁形同虚设）
 [script]
 check-all:
     set -euo pipefail
     echo "=== check-all: 全平台语法检查 ==="
     echo ""
-    echo "── 本机（x86_64-unknown-linux-gnu）──"
-    cargo check --workspace 2>&1
-    echo ""
-    echo "── Windows MSVC x86_64 ──"
-    cargo xwin check --target x86_64-pc-windows-msvc --workspace 2>&1 || echo "[跳过] 未安装 cargo-xwin"
-    echo ""
-    echo "── Windows 7 x64 ──"
-    cargo +nightly xwin check -Z build-std --target x86_64-win7-windows-msvc --workspace 2>&1 || echo "[跳过] 未安装 nightly 或 cargo-xwin"
-    echo ""
-    echo "── Windows 7 x86 ──"
-    cargo +nightly xwin check -Z build-std --target i686-win7-windows-msvc --workspace 2>&1 || echo "[跳过] 未安装 nightly 或 cargo-xwin"
-    echo ""
-    echo "── Linux 32-bit ──"
-    rustup target add i686-unknown-linux-gnu 2>/dev/null || true
-    cargo check --target i686-unknown-linux-gnu --workspace 2>&1 || echo "[跳过] 未安装 i686-unknown-linux-gnu 工具链"
-    echo ""
-    echo "── Linux ARM 32-bit ──"
-    rustup target add armv7-unknown-linux-gnueabihf 2>/dev/null || true
-    cargo check --target armv7-unknown-linux-gnueabihf --workspace 2>&1 || echo "[跳过] 未安装 armv7-unknown-linux-gnueabihf 工具链"
-    echo ""
-    echo "── Linux ARM64 ──"
-    rustup target add aarch64-unknown-linux-gnu 2>/dev/null || true
-    cargo check --target aarch64-unknown-linux-gnu --workspace 2>&1 || echo "[跳过] 未安装 aarch64-unknown-linux-gnu 工具链"
-    echo ""
+    fail=0
+    run_check() {
+        local name="$1" toolcheck="$2"
+        shift 2
+        echo "── $name ──"
+        if ! eval "$toolcheck" >/dev/null 2>&1; then
+            echo "[跳过] 工具链未安装"
+            echo ""
+            return 0
+        fi
+        if ! "$@" 2>&1; then
+            echo "✗ $name 编译失败"
+            fail=1
+        fi
+        echo ""
+    }
+    run_check "本机（x86_64-unknown-linux-gnu）" "true" cargo check --workspace
+    run_check "Windows MSVC x86_64" "command -v cargo-xwin" cargo xwin check --target x86_64-pc-windows-msvc --workspace
+    run_check "Windows 7 x64" "command -v cargo-xwin && rustup toolchain list | grep -q nightly" cargo +nightly xwin check -Z build-std --target x86_64-win7-windows-msvc --workspace
+    run_check "Windows 7 x86" "command -v cargo-xwin && rustup toolchain list | grep -q nightly" cargo +nightly xwin check -Z build-std --target i686-win7-windows-msvc --workspace
+    run_check "Linux 32-bit" "rustup target list --installed | grep -q i686-unknown-linux-gnu || rustup target add i686-unknown-linux-gnu >/dev/null 2>&1" cargo check --target i686-unknown-linux-gnu --workspace
+    run_check "Linux ARM 32-bit" "rustup target list --installed | grep -q armv7-unknown-linux-gnueabihf || rustup target add armv7-unknown-linux-gnueabihf >/dev/null 2>&1" cargo check --target armv7-unknown-linux-gnueabihf --workspace
+    run_check "Linux ARM64" "rustup target list --installed | grep -q aarch64-unknown-linux-gnu || rustup target add aarch64-unknown-linux-gnu >/dev/null 2>&1" cargo check --target aarch64-unknown-linux-gnu --workspace
+    if [ "$fail" -ne 0 ]; then
+        echo "=== 存在编译失败（见上方 ✗ 行）==="
+        exit 1
+    fi
     echo "=== 全部完成 ==="
 
 # 原语文档同步检查（Claude Code hook 同款：分派原语 ↔ builtin_docs(--ls/LSP) ↔ GRAMMAR.md §4.6）

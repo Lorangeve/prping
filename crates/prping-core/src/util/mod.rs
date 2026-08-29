@@ -11,12 +11,12 @@ pub(crate) mod socket;
 pub use config::PingConfig;
 
 // DNS
-pub use dns::{local_bind, print_resolving, resolve, resolve_source, resolve_vec};
+pub use dns::{local_bind, local_mtu_for, print_resolving, resolve, resolve_source, resolve_vec};
 
 // 网络 I/O
 pub use net::{
-    RECV_BUF_SIZE, bind_udp, configure_executor_threads, connect_first, connect_timeout,
-    connect_timed, drain_after_send, init_slice, udp_recv, udp_send,
+    RECV_BUF_SIZE, bind_udp, configure_executor_threads, connect_first, connect_timed,
+    connect_timeout, drain_after_send, init_slice, udp_recv, udp_send,
 };
 
 // Raw socket
@@ -33,7 +33,7 @@ pub use socket::create_tcp_socket;
 
 // 格式化与协议原语
 pub use format::{
-    TCP_RECEIVE_TRIGGER, echo_fill, format_bytes, hex_str, parse_kv_pairs,
+    TCP_RECEIVE_TRIGGER, echo_fill, format_bytes, hex_str, json_escape, parse_kv_pairs,
     parse_udp_receive_trigger, rand_u16, udp_receive_trigger, unix_ts,
 };
 // rand_u32 供 trace TCP SYN 使用：Unix raw TCP 路径 + Windows Npcap 路径（tcpwin.rs）

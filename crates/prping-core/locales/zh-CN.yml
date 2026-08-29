@@ -25,6 +25,7 @@ common:
   connecting_to: '连接到 '
   from: 从
   timeout: 请求超时。
+  send_failed: '发送失败'
   connect_failed: '连接失败: %{error}'
   dest_unreachable: 目标主机不可达。
   ttl_expired: 传输中 TTL 超时。
@@ -40,6 +41,7 @@ stats:
   sent_received: 发送 = %{sent}，接收 = %{received}，丢失 = %{lost} (%{pct}% 丢失),
   min_max_avg: 最小 = %{min}ms，最大 = %{max}ms，平均 = %{avg}ms，标准差 = %{stddev}ms
   percentiles: P50 = %{p50}ms, P95 = %{p95}ms, P99 = %{p99}ms
+  percentile_window_note: '（分位数/直方图/时间线基于最近 %{n} 个样本）'
   jitter: 抖动 = %{avg}ms（最大 %{max}ms）
   latency_dist: '延迟分布:'
 bandwidth:
@@ -51,6 +53,9 @@ bandwidth:
   bytes_human: '（%{bytes}）'
   connections: '并发连接 = %{count}'
   bandwidth: 带宽 = %{mbps} Mbps
+  udp_send_error: 'UDP 发送失败'
+  conn_error: '连接失败'
+  conn_failures: '%{n} 个连接失败——结果为部分数据'
   progress:
     packets: "%{done}/%{total} 包（%{done_bytes}/%{total_bytes}）  %{mbps} Mbps"
     bytes: "%{done_bytes}/%{total_bytes}  %{mbps} Mbps"
@@ -80,6 +85,119 @@ engine:
   note_fuzz: 'note: fuzz 模式——未填字段已随机化'
   note_wait_reply: 'note: 等待匹配应答最多 %{secs}s'
   note_wait_recipe: 'note: 等待应答最多 %{secs}s（每步 wait: 覆盖）'
+  listen_requires_sniffer: '监听模式需要 .pkt 声明 `sniffer:` 段（收到的数据报匹配规则）'
+  listen_binding: '监听 %{addr} —— 回显匹配 sniffer 规则的数据报（Ctrl+C 停止）'
+  listen_echo_fail: '回显到 %{peer} 失败：%{err}'
+  listen_matched: '✓ matched %{bytes} B from %{peer}'
+  listen_ignored: '- ignored %{bytes} B from %{peer}'
+  listen_done: 'listen finished: %{matched}/%{total} datagrams matched'
+  listen_no_port: '无法从包内推导监听端口（需要 udp/tcp dport 或显式 ADDR:PORT）'
+  listen_multi_dport: '导出包使用了不同的目的端口（%{ports}）；请显式指定 ADDR:PORT'
+  listen_send_phase_failed: '发送段先行失败 —— 继续监听（等待对端发包）：%{error}'
+  listen_bind_fail: '绑定监听地址 %{addr} 失败：%{err}'
+  listen_raw_requires_reply: '--wait --raw 需要应答模板：.pkt 的默认导出（可经 reply("层","字段") 取收到的帧字段构造应答帧）'
+  listen_raw_binding: 'raw listen on %{iface} — 按 sniffer 规则匹配完整帧，命中后按应答模板注入（Ctrl+C 停止；需 root/Npcap）'
+  listen_raw_matched: '✓ matched %{frame} B — replied %{sent} B (%{source})'
+  listen_raw_done: 'raw listen finished: %{matched}/%{total} frames matched'
+  listen_recipe_udp: '监听 %{addr}'
+  listen_recipe_raw: '链路层监听 %{iface}'
+  listen_recipe_banner: '%{where_str} —— %{rule}（Ctrl+C 停止；命中后配方继续）'
+
+  recipe_no_cli_wait: '配方不支持 CLI 裸 `--wait`（持续监听）：配方监听请用步骤级 `wait:` 无值（见 examples/dns_trigger/）'
+  recipe_step_failed_stop: '配方 %{file}：第 %{step}/%{total} 步失败（on_error: stop）'
+  recipe_parse_fail: '解析 %{file} 失败：%{err}'
+  recipe_listen_error: '%{file} 监听中断：%{err}'
+  recipe_listen_interrupted: '监听中断：`wait:` 持续监听被 Ctrl+C 终止（未匹配到包）'
+  recipe_eval_fail: '求值 %{file} 失败：%{err}'
+  recipe_send_error: '%{file} 发送中断：%{err}'
+  recipe_bare_only: '步骤 %{file} 的包均为纯裸层（无传输/无 raw 外层），无法发送'
+  recipe_timeout_send: '⚠ wait 超时（%{secs}s）——发送 on_timeout 包 %{file}'
+
+  recipe_timeout_retry: '⏱ wait 超时（%{secs}s）——重试 %{attempt}/%{total}（重发本步骤包）'
+  parse_retry_count: '`on_timeout: retry` 的次数需要正整数，得到 `%{n}`'
+  parse_retry_zero: '`on_timeout: retry` 的次数必须 ≥ 1'
+  recipe_on_timeout_fail: 'on_timeout 包发送失败：%{err}'
+  recipe_extract_no_sent: '步骤没有发出任何包，无法提取 sent 来源的 extract'
+  recipe_extract_no_reply: '步骤没有收到回包，无法提取 %{n} 条 extract（sniffer/回显未匹配）'
+  recipe_extract_failed: 'extract 失败（见上）'
+  recipe_step_failed_summary: '✗ 步骤 %{step}/%{total} 失败（%{n} 个问题）'
+  recipe_failed_total: '配方 %{file}：%{n} 个步骤有失败'
+
+  recipe_unknown_layer: '配方 %{line} 行：未知%{kind}层 `%{layer}`（可用：eth/arp/ipv4/ipv6/icmp/tcp/udp/http/dns/raw）'
+  recipe_unknown_field: '配方 %{line} 行：层 %{layer} 没有字段 `%{field}`（可用：%{names}）'
+  recipe_peer_field_only: '配方 %{line} 行：`reply.peer.` 只支持 ip / port，得到 `%{field}`'
+  recipe_collect_params_fail: '配方 %{file}：第 %{step}/%{total} 步 %{pkt}：%{err}'
+
+  parse_as_only: '`as` 只支持 int / hex / str / bytes，得到 `%{other}`'
+  parse_read_fail: '读取配方失败（%{path}）：%{err}'
+  parse_global_dup: '全局 `%{name}` 重复声明'
+  parse_pkg_renamed: '步骤键 `pkg:` 已改名 `packet:`——请写 `- packet: 文件`'
+  parse_step_syntax: '步骤项语法错误：`%{rest}`（应为 `- packet: 文件` 或裸文件名）'
+  parse_step_no_path: '步骤缺少 .pkt 文件路径'
+  parse_list_outside: '列表项出现在 global:/recipe: 段之外'
+  parse_expect_section: '期望段头 `global:`/`recipe:` 或 `- ` 列表项，得到 `%{trimmed}`'
+  parse_global_only_init: 'global 项只支持 `init:`，得到 `%{key}:`'
+  parse_init_after_name: '`init:` 必须跟在 `- name: <名字>` 之后'
+  parse_init_inline_conflict: '全局 `%{name}` 已在一行内给出 init（`- %{name}=...`），不能再跟 `init:` 行'
+  parse_option_after_step: '选项行必须跟在 `- packet:` 步骤之后'
+  parse_extract_only: 'extract 项只支持 name/from/as，得到 `%{other}`'
+  parse_wait_value: '`wait` 需要无值（无限等待）或秒数（数字），得到 `%{val}`'
+  parse_wait_finite: '`wait` 需要有限秒数（不能是 NaN/无穷），得到 `%{val}`'
+  parse_delay_value: '`delay` 需要秒数（数字），得到 `%{val}`'
+  parse_delay_finite: '`delay` 需要有限秒数（不能是 NaN/无穷），得到 `%{val}`'
+  parse_delay_negative: '`delay` 不能为负数'
+  parse_on_timeout_path: '`on_timeout` 需要 .pkt 文件路径'
+  parse_on_error_value: '`on_error` 只支持 stop / continue，得到 `%{other}`'
+  parse_unknown_option: '未知步骤选项 `%{other}:`（支持 packet/wait/on_timeout/delay/raw/params/extract/on_error）'
+  parse_indent_outside: '缩进行出现在 global:/recipe: 段之外'
+  parse_no_steps: '配方 %{path}：`recipe:` 段至少需要一个步骤'
+  parse_extract_no_name: 'extract 项缺少 `name:`'
+  parse_extract_no_from: 'extract 项 `%{name}` 缺少 `from:`'
+  parse_kv_syntax: '期望 `键: 值`，得到 `%{s}`'
+  parse_kv_empty_key: '键不能为空'
+  parse_nonempty: '`%{what}` 不能为空'
+  parse_global_name_missing: 'global 项 `name:` 缺少名字'
+  parse_global_bare_missing: 'global 项缺少名字：`%{rest}`'
+  parse_global_init_empty: 'global 项 `%{name}` 的 init 值不能为空'
+  parse_global_item_syntax: 'global 项语法错误：`%{rest}`（应为 `- name: <名字>` / `- <名字>` / `- <名字>=<值>`）'
+  parse_global_name_missing2: 'global 项缺少名字'
+  parse_peer_field_only: '`reply.peer.` 只支持 ip / port，得到 `%{field}`'
+  parse_expr_fail: '`from` 表达式解析失败：%{err}'
+  parse_params_value: '`params` 需要 `k=v,k2=v2`，得到 `%{v}`'
+
+  parse_count_value: '`count` 需要正整数（发送次数），得到 `%{val}`'
+  parse_count_zero: '`count` 必须 ≥ 1'
+  parse_raw_value: '`raw` 需要 true / false 或网卡名'
+  parse_raw_iface_empty: '`raw` 的网卡名不能为空'
+  parse_str_no_quote: '字符串缺少结尾引号：`%{s}`'
+  parse_hex_byte_bad: '非法十六进制字节 `%{part}`'
+  parse_byte_out_of_range: '字节列表元素超出 0..255：`%{part}`'
+  parse_byte_list_bad: '非法字节列表元素 `%{part}`'
+  parse_hex_bad: '非法十六进制 `%{s}`'
+  parse_init_value_bad: '无法解析 `init` 值 `%{s}`（支持："字符串" / 十进制 / 0x 十六进制 / [0x01, 0x02] 字节列表）'
+
+  parse_err_prefix: '配方 %{line} 行：%{msg}'
+  recipe_peer_only_listen: '配方 %{line} 行：`reply.peer.%{field}` 仅 listen 步骤（UDP 监听）可用'
+  recipe_no_layer: '配方 %{line} 行：%{src} 没有 %{layer} 层（无法提取 %{name}）'
+  recipe_no_field: '配方 %{line} 行：层 %{layer} 没有字段 %{field}'
+  recipe_not_numeric: '配方 %{line} 行：字段 %{layer}.%{field} 不是数值（%{val}），请用 as: str / bytes'
+  recipe_expr_fail: '配方 %{line} 行：`from` 表达式求值失败：%{err}'
+  recipe_src_label_sent: '发包'
+  recipe_src_label_reply: '回包'
+  recipe_as_convert_fail: '配方 %{line} 行：提取 `%{name}` 的 as 转换失败：%{msg}（原值是 %{val}）'
+  recipe_as_int: '需要整数（Int/Hex）'
+  recipe_as_hex: '需要非负整数（Int/Hex）'
+  recipe_as_str: '需要字符串或整数'
+  recipe_as_bytes: '数值转字节请在表达式里用 be16()/u8() 等原语包一层'
+  recipe_extract_needs_wait: '步骤有回包来源的 extract 但没有 wait（`sent.` 来源取发包不需要 wait，回包来源需要：本步 `wait:`（无值或秒数）或 `--wait`）'
+  listen_template_note: 'note: 应答模板——`reply(层,字段)` 需 --wait --raw 监听上下文，包未展开（engine 只解析不发包）'
+  raw_ip4_need_target: 'raw IPv4 发送需要目标地址（HOST 或包内 IP 层 dst）'
+  raw_ip4_not_v4: '目标不是 IPv4 地址：%{ip}'
+  raw_ip4_send_fail: 'raw IPv4 发送失败：%{err}'
+  listen_raw_unknown_iface: '找不到网络接口 `%{iface}`'
+  listen_raw_bad_iface: '接口名非法：`%{iface}`'
+  listen_raw_no_devices: '没有可用的抓包设备（需要 root/管理员或已安装 Npcap）'
+  listen_raw_threads_exited: '全部抓包线程已退出（设备错误），监听停止'
   note_bare_export: 'note: 裸层导出（无 TCP/UDP 传输、也无 eth/ipv4/ipv6 外层）无法发送，跳过——仅作 --eng 展示'
   note_bare_export_short: 'note: 裸层导出，跳过'
   note_raw_fallback: 'note: 无 TCP/UDP 传输——改用原始套接字发送完整包（%{hint}）'
@@ -124,6 +242,7 @@ errors:
   lsp_requires_eng: "--lsp 只能与 --eng 一起使用"
   raw_requires_pkg: "--raw 只能与 --pkt 一起使用"
   iface_requires_raw: "--iface 只能与 --pkt --raw 一起使用"
+  listen_conflict: '持续监听（--wait 无值）不能与 --fuzz/--out 组合（持续接收并回显；--raw = 链路层监听，可配合 --iface 选网卡）'
   params_requires_eng_pkg: "--params 只能与 --eng 或 --pkt 一起使用"
   params_format: "--params 需要 k=v 格式: `%{value}`"
   global_requires_eng_pkg: "--global 只能与 --eng 或 --pkt 一起使用"
@@ -135,6 +254,8 @@ errors:
   eng_sub_requires_eng: "--ls / --hex / --pcap 只能与 --eng 一起使用"
   eng_sub_conflict_lsp: "--ls / --hex / --pcap 不能与 --lsp 一起使用"
   eng_sub_no_file: "--ls / --hex / --pcap 不接受文件参数"
+  eng_json_sub_conflict: "--json 仅对 FILE.pkt/.pktl 分析模式有效（不能与 --ls/--hex/--pcap/--lsp 组合）"
+  pkt_json_listen_conflict: "--json 不能与持续监听（--wait 无值）组合"
   conflict_engine_mode: "%{flag} 不能与以下参数同时使用: %{opts}"
   eng_requires_file: "--eng 需要 .pkt 文件（或 --eng --lsp）"
   eng_lsp_no_file: "--lsp 不接受文件参数"
@@ -171,9 +292,9 @@ errors:
   engine_mode_required: 未指定模式：请用 --eng / --pkt / --ls / --hex / --pcap
   help_pkg_not_found: |-
     未找到匹配的章节：「%{section}」
-    用 `prping --help-pkg` 查看目录：
+    用 `prping document` 查看目录：
   help_pkg_ambiguous: 命中 %{count} 个章节，请用编号或更精确的标题：
-  help_pkg_toc_hint: 目录（用 `prping --help-pkg <编号或标题>` 跳转）：
+  help_pkg_toc_hint: 目录（用 `prping document <编号或标题>` 跳转）：
   conflict_v4_v6: "-4 与 -6 不能同时使用"
   conflict_server_target: "-s（服务端模式）不能与目标 HOST[:PORT] 同时使用"
   conflict_server_mode: "-s（服务端模式）不能与客户端测试参数同时使用: %{opts}"
@@ -183,7 +304,7 @@ errors:
   receive_requires_latency_bandwidth: "-r 需要配合 -b（带宽测试）或 -l + HOST:PORT（延迟测试）使用"
   lib_requires_eng_pkg: "--lib 需要 --eng 或 --pkt"
   ambiguous_prefix: "子命令前缀 '%{token}' 有歧义：可匹配 %{candidates}"
-  legacy_host_hint: "无法识别的子命令 '%{host}' — prping 现在使用子命令；试试: prping ping %{host}（迁移指南: prping --help-pkg）"
+  legacy_host_hint: "无法识别的子命令 '%{host}' — prping 现在使用子命令；试试: prping ping %{host}（迁移指南: prping document）"
   latency_requires_port: latency 需要 HOST:PORT
 cmd:
   ping: 主机 ping（ICMP；带端口为 TCP，-u 为 UDP，-m 为 MTU 探测）
@@ -225,6 +346,7 @@ help:
       注入配方全局存储的键值（k=v,k2=v2；脚本内用 global("name") 读取；配合 .pktl
       配方时作为 global: 声明的初始值，-g 覆盖 init）
     wait: 发送后等待最多 SECS 秒的匹配应答（对标 scapy sr1），打印 RTT 并反解展示（配合 --pkt）
+    listen: '监听模式：按 .pkt 的 sniffer 规则匹配收到的 UDP 数据报并回显（pktlang 对话的服务端；HOST:PORT 为监听地址，省略时按包内 dport 推导）'
     fuzz: 发送前把未填字段全部随机化（对标 scapy fuzz()，配合 --pkt）
     out: 把构建的包存成 pcap 文件（对标 scapy wrpcap，配合 --pkt）
     ls: 列出全部内置层函数的字段表与自动行为（配合 --eng）
@@ -242,7 +364,7 @@ help:
     pretty: 用 ploot 渲染图表（Unicode/Braille）
     graph: 显示延迟时间线图（配合 -p 用 ploot 渲染）
     version: 显示版本号
-    help_pkg: 使用手册（分页）；--help-pkg 章节标题 跳转（编号或标题）
+    help_pkg: 使用手册（分页）；document 章节标题 跳转（编号或标题）
   usage_ping: 'prping ping [选项] <HOST[:PORT]>'
   usage_latency: 'prping latency [选项] <HOST:PORT>'
   usage_bandwidth: 'prping bandwidth [选项] <HOST:PORT>'
@@ -283,16 +405,17 @@ help:
       prping packet file.pkt 192.168.1.1:9000
       prping packet --raw --wait 2 file.pkt 8.8.8.8
       prping packet arp_request.pkt --raw   # 链路层帧（ARP 等）：目标可省略
+      prping packet --wait server.pkt 127.0.0.1:5353      # 裸 --wait：持续监听并按 sniffer 规则回显
       prping packet arp_request.pkt --raw   # link-layer frame (ARP etc.): target optional
   overview: |-
     prping — ping, 延迟, 带宽测量工具
 
     子命令: ping（ICMP/TCP/UDP/MTU 探测）、latency（延迟）、bandwidth（带宽）、
     server（服务端）、trace（路由跟踪）、engine（包分析）与 packet（发包）。
-  usage: 'prping 子命令 [选项] ...   （完整手册: prping --help-pkg）'
+  usage: 'prping 子命令 [选项] ...   （完整手册: prping document）'
   mode_guide: |-
     子命令可用任意唯一前缀缩写（如 `prping e FILE.pkt` → engine）。
-    详细用法: `prping 子命令 --help` — 完整手册: `prping --help-pkg`。
+    详细用法: `prping 子命令 --help` — 完整手册: `prping document`。
   usage_line: |-
     帮助: prping 子命令 --help   （prping --help 列出全部子命令）
        ping        ICMP ping / TCP ping（带端口）/ UDP ping（-u）/ MTU 探测（-M）

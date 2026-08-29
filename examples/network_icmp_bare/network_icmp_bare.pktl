@@ -17,7 +17,7 @@ global:
 - name: rseq
 
 recipe:
-- pkg: icmp_bare1.pkt
+- packet: icmp_bare1.pkt
   wait: 2
   extract:
   - name: rid
@@ -26,4 +26,4 @@ recipe:
   - name: rseq
     from: reply.icmp.seq
     as: int
-- pkg: icmp_bare2.pkt
+- packet: icmp_bare2.pkt

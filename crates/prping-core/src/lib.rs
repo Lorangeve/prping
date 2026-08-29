@@ -69,7 +69,7 @@
 //! let kind = run(&cfg, |_| {}).expect("run");
 //! ```
 
-rust_i18n::i18n!("locales");
+rust_i18n::i18n!("locales", fallback = "en-US");
 
 mod drive;
 pub(crate) mod engine;
@@ -80,7 +80,11 @@ mod serve;
 mod stats;
 mod util;
 
-// ── 公开 API（lib 的 public surface 最小化）───────────────────────────────
+// ── 公开 API ─────────────────────────────────────────────────────────────
+// 注意：engine/pkg 路径（分析/LSP/pcap 转码/发送/配方/listen）随 CLI 一起公开——
+// prping-cli 的 engine/packet/document 子命令直接调用这些 API，属于事实上的稳定
+// 公开面（早期「公开面最小化」声明已不适用；如需收紧需先把 CLI 调用收敛成高层
+// 入口，属独立重构）。核心测量 API（run/serve/PingConfig/Stats）仍为第一优先保证。
 
 // 基础设施
 pub use manual::{Section, find_sections, manual_for, print_paged, sections, toc};
@@ -88,8 +92,8 @@ pub use output::{indent, pad_to, spaces, stderr, writeln_orange, writeln_red};
 pub use serve::{ServerReport, serve};
 pub use stats::{HistogramSpec, Stats, parse_histogram, set_json, set_pretty};
 pub use util::{
-    PingConfig, configure_executor_threads, interrupted, parse_kv_pairs, resolve,
-    reset_interrupt, resolve_source, set_interrupted,
+    PingConfig, configure_executor_threads, interrupted, parse_kv_pairs, reset_interrupt, resolve,
+    resolve_source, set_interrupted,
 };
 
 // 测量模块
@@ -106,9 +110,9 @@ pub use engine::eng::{
 };
 pub use engine::pcap::{LinkType, PcapRecord, linktype_of, read_pcap, write_pcap};
 pub use engine::pkg::{
-    PkgOptions, Reply, SendMode, SendOutcome, SnifferMatcher, Transport, derive_target,
-    extract_payload, patch_zero_src, raw_only, send_packets, send_recipe, sniffer_match,
-    sniffer_match_with, step_send_mode,
+    PkgOptions, Reply, SendMode, SendOutcome, SnifferMatcher, Transport, WaitMode, derive_target,
+    extract_payload, listen_packets, listen_raw_packets, patch_zero_src, raw_only, send_packets,
+    send_recipe, sniffer_match, sniffer_match_with, step_send_mode,
 };
 pub use engine::recipe::{
     Extract, ExtractAs, FromSpec, GlobalDecl, OnError, Recipe, Step, StepRaw, parse as parse_recipe,
@@ -166,6 +170,10 @@ pub enum PrpingError {
     BandwidthRequiresPort,
     #[error("-4 and -6 cannot be used together")]
     ConflictV4V6,
+    #[error("interval must be a finite number of seconds (got {0})")]
+    InvalidInterval(f64),
+    #[error("duration must be a finite number of seconds (got {0})")]
+    InvalidDuration(f64),
     #[error("MTU probe does not take a port: --mtu HOST")]
     MtuRequiresNoPort,
     #[error(
@@ -195,6 +203,19 @@ pub fn run(
     // config 级不变式：-4/-6 冲突（bin 的 validate 只管 CLI 级冲突，这里兜底库调用方）
     if cfg.v4 && cfg.v6 {
         return Err(PrpingError::ConflictV4V6);
+    }
+
+    // 数值不变式：NaN/±inf/过大值会使 Duration::from_secs_f64 panic
+    // （drive/bandwidth/Run 处），在入口统一拒绝（CLI 侧同样兜底，这里保护库调用方）。
+    // 负 interval 仍走既有 clamp（警告 + 1ms 下限）；负 duration 同样拒绝——
+    // from_secs_f64 对负值 panic，「期限已过」语义并非有意设计。
+    if !cfg.interval.is_finite() || cfg.interval > MAX_DURATION_SECS {
+        return Err(PrpingError::InvalidInterval(cfg.interval));
+    }
+    if let Some(d) = cfg.duration
+        && (!d.is_finite() || d < 0.0 || d > MAX_DURATION_SECS)
+    {
+        return Err(PrpingError::InvalidDuration(d));
     }
 
     // -i 0 快速模式：clamp 到 1ms 下限
@@ -247,7 +268,7 @@ pub fn run(
         // 延迟测试（-l + 端口）
         let size = clamp_udp_size(cfg.size.unwrap(), cfg.udp, &mut on_warning);
         cfg.size = Some(size);
-        cfg.count = cfg.count.max(1);
+        // count=0 = 无限（与 ping 一致；CLI 缺省给 10，显式 -n 0 进入无限）
         let stats = ping::latency::run_client(&cfg)?;
         return Ok(OutcomeKind::Ping(stats));
     }
@@ -272,6 +293,17 @@ pub fn run(
     if cfg.receive {
         on_warning(PrpingWarning::ReceiveIgnoredPing);
     }
+    // ICMP echo 载荷受协议硬上限约束（IPv4 最大 ICMP 报文 65507 字节）：
+    // Unix 路径超限 send 报错、Windows 路径 u16 DataSize 截断——统一 clamp
+    if let Some(sz) = cfg.size
+        && sz > MAX_UDP
+    {
+        on_warning(PrpingWarning::UdpSizeClamped {
+            requested: sz,
+            max: MAX_UDP,
+        });
+        cfg.size = Some(MAX_UDP);
+    }
     cfg.size = Some(cfg.size.unwrap_or(32));
     let stats = ping::icmp::ping(&cfg)?;
     Ok(OutcomeKind::Ping(stats))
@@ -279,6 +311,13 @@ pub fn run(
 
 /// UDP 数据报负载上限（IPv4 65507 / IPv6 65527，取保守值）。
 pub const MAX_UDP: usize = 65507;
+
+/// 秒数型参数（interval/duration/wait/delay）的合理上限：超过即拒绝。
+///
+/// Duration::from_secs_f64 对 NaN/负值/过大值（> ~1.8e19 秒）会 panic，
+/// 此上限远低于溢出阈值（1e12 秒 ≈ 3.2 万年），同时挡住 1e300 这类
+/// 有限但荒谬的输入。
+pub const MAX_DURATION_SECS: f64 = 1e12;
 
 /// UDP 数据报负载上限（IPv4 65507 / IPv6 65527，取保守值），超限时截断并告警。
 fn clamp_udp_size(size: usize, udp: bool, on_warning: &mut impl FnMut(PrpingWarning)) -> usize {

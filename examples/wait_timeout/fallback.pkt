@@ -1,0 +1,3 @@
+# on_timeout 备选包：wait 超时后发送（发其它包 + 打印信息）。
+p = raw(bytes="fallback")
+use(p) |> udp(dport=params("fport")) |> ipv4(dst="127.0.0.1") |> eth()

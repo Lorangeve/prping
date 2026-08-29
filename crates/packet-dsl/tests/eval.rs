@@ -924,31 +924,42 @@ fn lib_value_func_callable_from_script() {
 /// sniffer 块解析并携带进 Module（字面量 = 常量；Ident = 发包同层同名字段；多子句）。
 #[test]
 fn sniffer_block_parses_and_carries() {
+    use packet_dsl::ast::{SnifferItem, SnifferPred};
     let src = "a = raw(bytes=\"x\")\nuse(a) |> icmp() |> ipv4() |> eth()\n\
 sniffer:\n  - match icmp(type=0, id=id, seq=seq)\n  - match dns(id=id)\n";
     let m = packet_dsl::semantic::parse_str("t", src).unwrap();
     let sn = m.sniffer.expect("应有 sniffer");
     assert_eq!(sn.clauses.len(), 2, "多子句列表");
-    let c0 = &sn.clauses[0];
+    let SnifferPred::Clause(c0) = &sn.clauses[0] else {
+        panic!("第一个子句应是 match 子句");
+    };
     assert_eq!(c0.layer, "icmp");
-    assert_eq!(c0.fields.len(), 3);
+    assert_eq!(c0.items.len(), 3);
+    let SnifferItem::FieldEq { name, val } = &c0.items[0] else {
+        panic!("条件 0 应是字段等式");
+    };
+    assert_eq!(name, "type");
     assert!(
         matches!(
-            &c0.fields[0],
-            (n, packet_dsl::SnifferValue::Literal(packet_dsl::ast::Value::Int(0))) if n == "type"
+            val,
+            packet_dsl::SnifferValue::Literal(packet_dsl::ast::Value::Int(0))
         ),
         "type=0 应是常量：{:?}",
-        c0.fields[0]
+        val
     );
+    let SnifferItem::FieldEq { name, val } = &c0.items[1] else {
+        panic!("条件 1 应是字段等式");
+    };
+    assert_eq!(name, "id");
     assert!(
-        matches!(
-            &c0.fields[1],
-            (n, packet_dsl::SnifferValue::SentField(f)) if n == "id" && f == "id"
-        ),
+        matches!(val, packet_dsl::SnifferValue::SentField(f) if f == "id"),
         "id=id 应是 sent 字段引用：{:?}",
-        c0.fields[1]
+        val
     );
-    assert_eq!(sn.clauses[1].layer, "dns", "第二个子句");
+    let SnifferPred::Clause(c1) = &sn.clauses[1] else {
+        panic!("第二个子句应是 match 子句");
+    };
+    assert_eq!(c1.layer, "dns", "第二个子句");
 }
 
 /// 一个文件只能有一个 sniffer 段。
@@ -2167,10 +2178,63 @@ fn eval_extract_value_builtin_only() {
         packet_dsl::eval_extract_value(None, &Params::new(), &Globals::new(), &reply, &v).unwrap();
     assert_eq!(val, Value::List(vec![Value::Int(0), Value::Int(3)]));
 
-    // 非 extract 上下文（reply 访问器未注入）→ reply 回退用户函数 → 未知函数报错
+    // 非 extract 上下文（reply 访问器未注入）→ 可操作的报错（而非回退用户函数的
+    // 「未知函数」：`reply(层,字段)` 是 extract/应答模板专用原语）
     let v = packet_dsl::parser::parse_value_expr(r#"reply("icmp", "seq")"#).unwrap();
     let err = packet_dsl::eval_sniffer_value(None, &Params::new(), &v)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("未知值函数或原语"), "{err}");
+    assert!(
+        err.contains("只能在配方 extract") || err.contains("未知值函数或原语"),
+        "{err}"
+    );
+}
+
+/// `resolve_sources_with_reply`：`reply("层","字段")` 值原语在包定义中生效
+/// （`packet --listen --raw` 的应答模板求值路径）。
+#[test]
+fn resolve_sources_with_reply_accessor() {
+    common::register_eng_lib();
+    let src = "payload = raw(bytes=reply(\"icmp\", \"payload\"))\n\
+use(payload) |> icmp(type=0, id=reply(\"icmp\",\"id\"), seq=reply(\"icmp\",\"seq\")) |> ipv4() |> eth()\n";
+    let m = packet_dsl::semantic::parse_str("t", src).unwrap();
+    let accessor = |layer: &str, field: &str| -> Option<packet_dsl::ast::Value> {
+        match (layer, field) {
+            ("icmp", "id") => Some(packet_dsl::ast::Value::Int(7)),
+            ("icmp", "seq") => Some(packet_dsl::ast::Value::Int(3)),
+            ("icmp", "payload") => Some(packet_dsl::ast::Value::List(vec![
+                packet_dsl::ast::Value::Int(0x68),
+                packet_dsl::ast::Value::Int(0x69),
+            ])),
+            _ => None,
+        }
+    };
+    let sources = packet_dsl::resolve_sources_with_reply(
+        &m,
+        &packet_dsl::Params::new(),
+        &packet_dsl::Globals::new(),
+        &accessor,
+    )
+    .expect("带 reply 访问器求值成功");
+    let pkts: Vec<_> = sources.into_iter().flat_map(|(_, ps)| ps).collect();
+    assert_eq!(pkts.len(), 1);
+    let built = packet_dsl::DefaultSerializer::with_seed(1)
+        .serialize(&pkts[0])
+        .unwrap();
+    // 反解：icmp id/seq 来自访问器（7/3），载荷 "hi"
+    let rep = packet_dsl::dissect(&built);
+    let icmp = rep
+        .layers
+        .iter()
+        .find_map(|l| match l {
+            packet_dsl::ir::Layer::Icmp(f) => Some(f),
+            _ => None,
+        })
+        .expect("有 icmp 层");
+    assert_eq!(icmp.id, Some(7));
+    assert_eq!(icmp.seq, Some(3));
+    assert_eq!(icmp.payload.as_deref(), Some(&b"hi"[..]));
+    // 无访问器：reply(...) 回退用户函数 → 未定义函数报错
+    let err = packet_dsl::resolve_sources(&m).unwrap_err().to_string();
+    assert!(err.contains("reply") || err.contains("未知"), "{err}");
 }

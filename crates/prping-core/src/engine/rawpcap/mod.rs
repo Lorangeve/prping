@@ -30,7 +30,7 @@ use packet_dsl::ir::{Layer, PacketSpec};
 #[cfg(windows)]
 use rust_i18n::t;
 #[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 use std::net::SocketAddr;
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
@@ -40,10 +40,7 @@ use std::time::{Duration, Instant};
 mod device;
 #[cfg(any(windows, target_os = "macos", feature = "pcap", test))]
 pub(crate) use device::{DeviceInfo, capture_devices, format_device_list, pick_device, wrap_eth};
-// ethertype_of 仅 wrap_ip4/wrap_ip6 内部使用（不对外导出）
-#[cfg(any(windows, target_os = "macos", feature = "pcap"))]
-use device::ethertype_of;
-
+// ethertype_of 仅 wrap_ip4/wrap_ip6 内部使用（不对外导出），本模块不需要
 // ── Windows 专属：iphlpapi FFI + MAC 解析 ─────────────────────
 
 /// MIB_IPFORWARDROW（`GetBestRoute` 输出；14 × DWORD，无填充，x86/x64 同构）。
@@ -235,7 +232,8 @@ fn send_raw_pcap(
         _ => anyhow::bail!("raw 发送需要最外层为 eth / ipv4 / ipv6 层"),
     };
     // 先开抓包句柄再发送：局域网回包可能 <1ms，先发后开（Linux 的做法）会漏抓
-    let mut cap = open_capture(&dev)?;
+    // raw 发送路径需要过滤自注入帧
+    let mut cap = open_capture(&dev, true)?;
     cap.sendpacket(frame.as_slice())
         .map_err(|e| anyhow::anyhow!("pcap 发送失败（{dev}）：{e}"))?;
     let reply = match wait {
@@ -282,7 +280,10 @@ pub(crate) fn list_devices() -> anyhow::Result<Vec<DeviceInfo>> {
 }
 
 #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
-pub(crate) fn open_capture(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Active>> {
+pub(crate) fn open_capture(
+    dev: &str,
+    filter_self: bool,
+) -> anyhow::Result<pcap::Capture<pcap::Active>> {
     let platform = if cfg!(windows) { "Npcap" } else { "libpcap" };
     let open_err = |e: pcap::Error| -> anyhow::Error {
         anyhow::anyhow!(rust_i18n::t!(
@@ -311,8 +312,45 @@ pub(crate) fn open_capture(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Acti
     // 只收"入向"包：pcap_sendpacket 注入的帧会被本句柄看到，direction=In 把刚发
     // 的帧过滤掉（否则 --wait 时可能把自己的发送帧误匹配成应答）。失败忽略：
     // 少数驱动不支持 direction 过滤，代价只是多收几帧杂包。
-    let _ = cap.direction(pcap::Direction::In);
+    // 注意：serve -a 全帧模式须看本机出向帧，传 filter_self=false 关闭该过滤
+    //（此前恒设 In，Windows 上 -a/--filter 永远看不到服务端自己的回包）。
+    if filter_self {
+        let _ = cap.direction(pcap::Direction::In);
+    }
     Ok(cap)
+}
+
+/// 监听专用 pcap 打开（`packet --listen --raw` 用）：与发送路径的 [`open_capture`]
+/// 不同，**不做 EN10MB 限制**——抓包本身与链路类型无关，macOS lo0（DLT_NULL）等
+/// 也要能收（回环剥头见 `serve::strip_null`）；混杂模式**尽力而为**：BIOCPROMISC
+/// 不支持的设备（如 macOS anpi*）降级为不混杂重开，而不是让整个设备打开失败。
+#[cfg(any(windows, target_os = "macos", feature = "pcap"))]
+pub(crate) fn open_capture_listen(dev: &str) -> anyhow::Result<pcap::Capture<pcap::Active>> {
+    let platform = if cfg!(windows) { "Npcap" } else { "libpcap" };
+    let open_err = |e: pcap::Error| -> anyhow::Error {
+        anyhow::anyhow!(rust_i18n::t!(
+            "errors.pcap_open",
+            platform = platform,
+            dev = dev,
+            error = e.to_string(),
+            hint = crate::util::privilege_hint()
+        ))
+    };
+    let open_with = |promisc: bool| {
+        pcap::Capture::from_device(dev)
+            .map_err(&open_err)?
+            .timeout(100)
+            .promisc(promisc)
+            .immediate_mode(true)
+            .open()
+            .map_err(open_err)
+    };
+    match open_with(true) {
+        Ok(cap) => Ok(cap),
+        // BIOCPROMISC 等混杂失败 → 降级为不混杂重开（监听不依赖混杂：本机地址/
+        // 广播/组播帧仍能收到；只是看不到网卡上其他主机的流量）
+        Err(_) => open_with(false),
+    }
 }
 
 // ── IPv4 以太网封装 ─────────────────────────────────────────────
@@ -860,13 +898,13 @@ mod tests {
                 name: "eth0".into(),
                 desc: None,
                 loopback: false,
-                addrs: vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))],
+                addrs: vec![std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5))],
             },
             DeviceInfo {
                 name: "eth1".into(),
                 desc: None,
                 loopback: false,
-                addrs: vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
+                addrs: vec![std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))],
             },
         ];
         // 通配绑定 → 全部设备（回环 + 所有非回环，等价 Linux AF_PACKET 全接口）

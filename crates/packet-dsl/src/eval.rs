@@ -407,14 +407,37 @@ pub fn resolve_sources_with_globals(
     params: &Params,
     globals: &Globals,
 ) -> PktResult<Vec<(PacketSource, Vec<PacketSpec>)>> {
+    resolve_sources_ctx(module, params, globals, None)
+}
+
+/// 按来源分组求值（带运行时参数 + 全局存储 + **回包访问器**）：`reply("层","字段")`
+/// 值原语从 `reply` 取收到的帧反解字段（`packet --listen --raw` 的应答模板求值用；
+/// 无访问器时 `reply` 回退用户函数）。
+pub fn resolve_sources_with_reply<'a>(
+    module: &Module,
+    params: &Params,
+    globals: &Globals,
+    reply: ReplyAccess<'a>,
+) -> PktResult<Vec<(PacketSource, Vec<PacketSpec>)>> {
+    resolve_sources_ctx(module, params, globals, Some(reply))
+}
+
+/// 求值上下文共用体：`reply: Option` 控制 `reply("层","字段")` 是否可用。
+fn resolve_sources_ctx(
+    module: &Module,
+    params: &Params,
+    globals: &Globals,
+    reply: Option<ReplyAccess<'_>>,
+) -> PktResult<Vec<(PacketSource, Vec<PacketSpec>)>> {
     let entry = entry_index(module)?;
     let mut ctx = EvalCtx {
         graph: &module.graph,
         stack: Vec::new(),
         params,
         globals,
-        reply: None,
+        reply,
         env_stack: vec![FnEnv::new()],
+        value_depth: 0,
     };
     let mut out = Vec::new();
     if let Some((p, _)) = &module.default {
@@ -467,6 +490,7 @@ pub fn eval_sniffer_value_with_globals(
         globals,
         reply: None,
         env_stack: vec![FnEnv::new()],
+        value_depth: 0,
     };
     let val = ctx.eval_value(entry, v)?;
     bytes_of(&val, v_span(v))
@@ -495,6 +519,7 @@ pub fn eval_extract_value(
         globals,
         reply: Some(reply),
         env_stack: vec![FnEnv::new()],
+        value_depth: 0,
     };
     ctx.eval_value(entry, v)
 }
@@ -539,6 +564,9 @@ fn entry_index(module: &Module) -> PktResult<usize> {
         .ok_or_else(|| Diagnostic::new("模块不在已解析的图中"))
 }
 
+/// 用户值函数最大调用深度（防自递归/互递归栈溢出；正常 .pkt 函数嵌套远低于此）。
+const MAX_VALUE_FUNC_DEPTH: usize = 64;
+
 struct EvalCtx<'a> {
     graph: &'a ModuleGraph,
     /// 组件求值栈（循环检测）：(定义模块下标, 名字)。
@@ -552,6 +580,8 @@ struct EvalCtx<'a> {
     reply: Option<ReplyAccess<'a>>,
     /// 函数参数环境栈（内层函数在最上）。
     env_stack: Vec<FnEnv>,
+    /// 用户值函数当前调用深度（`eval_user_value_func` 入口 +1、出口 -1）。
+    value_depth: usize,
 }
 
 impl EvalCtx<'_> {
@@ -1172,10 +1202,11 @@ impl EvalCtx<'_> {
                 raw: Some(bytes),
             }),
             "arp" => Layer::Arp(ArpFields {
-                op: num("op").and_then(|n| match n {
-                    1 => Some(ArpOp::Request),
-                    2 => Some(ArpOp::Reply),
-                    _ => None,
+                op: num("op").map(|n| match n {
+                    1 => ArpOp::Request,
+                    2 => ArpOp::Reply,
+                    // RARP(3) 等未知 opcode：保留原始值
+                    other => ArpOp::Other(u16::try_from(other).unwrap_or(0)),
                 }),
                 sha: macv("sha"),
                 spa: ip4v("spa"),
@@ -1525,7 +1556,10 @@ impl EvalCtx<'_> {
                                 *span,
                             ));
                         };
-                        Ok(Value::Int(a + b))
+                        // checked 加法：debug/release 均不 panic/回绕，溢出报诊断
+                        a.checked_add(b).map(Value::Int).ok_or_else(|| {
+                            Diagnostic::at(format!("`+` 整数溢出：{a} + {b}"), *span)
+                        })
                     }
                 }
             }
@@ -1619,6 +1653,20 @@ impl EvalCtx<'_> {
                     let field = str_of(args.get(1), "reply", span)?;
                     f(&layer, &field).ok_or_else(|| {
                         Diagnostic::at(format!("回包没有 `{layer}.{field}` 字段"), span)
+                    })
+                } else if args.len() == 2 {
+                    // 无回包访问器（普通解析/`engine` 分析）但按 2 参调用：
+                    // 这是配方 extract / `--listen --raw` 应答模板的专用原语，
+                    // 给出可操作的报错而不是「参数过多」（eng_lib 的 0 参
+                    // `func reply()` 撞名仍走用户函数分支）。
+                    Err(Diagnostic {
+                        kind: crate::diag::DiagnosticKind::ReplyOutsideRecipe,
+                        ..Diagnostic::at(
+                            "`reply(层, 字段)` 只能在配方 extract 的 `from:` 表达式或 \
+                             `--listen --raw` 应答模板中使用（本上下文没有回包可读取）"
+                                .to_string(),
+                            span,
+                        )
                     })
                 } else {
                     self.eval_user_value_func(module, name, args, span)
@@ -1820,19 +1868,15 @@ impl EvalCtx<'_> {
                                 span,
                             ));
                         }
+                        // checked 算术：debug/release 均不 panic/回绕，溢出返回 None
+                        // （div 的 b==0 由 checked_div 返回 None，调用方先判除零再报溢出）
                         let op = match name {
-                            "bor" => |a: i64, b: i64| a | b,
-                            "band" => |a: i64, b: i64| a & b,
-                            "bxor" => |a: i64, b: i64| a ^ b,
-                            "mul" => |a: i64, b: i64| a * b,
-                            "div" => |a: i64, b: i64| {
-                                if b == 0 {
-                                    i64::MAX // 除零哨兵：下方折叠后报错
-                                } else {
-                                    a / b
-                                }
-                            },
-                            "sub" => |a: i64, b: i64| a - b,
+                            "bor" => |a: i64, b: i64| Some(a | b),
+                            "band" => |a: i64, b: i64| Some(a & b),
+                            "bxor" => |a: i64, b: i64| Some(a ^ b),
+                            "mul" => |a: i64, b: i64| a.checked_mul(b),
+                            "div" => |a: i64, b: i64| a.checked_div(b),
+                            "sub" => |a: i64, b: i64| a.checked_sub(b),
                             _ => unreachable!("已在分支排除"),
                         };
                         // 双形态：全部 Int/Hex → 整数；全部同宽字节列表 → 元素级
@@ -1843,10 +1887,14 @@ impl EvalCtx<'_> {
                         {
                             let mut acc = int_of(args.first(), name, span)?;
                             for v in &args[1..] {
-                                acc = op(acc, int_of(Some(v), name, span)?);
-                            }
-                            if name == "div" && acc == i64::MAX {
-                                return Err(Diagnostic::at("`div` 除数为 0", span));
+                                let b = int_of(Some(v), name, span)?;
+                                // 除零先报（checked_div 对 b==0 返回 None，混淆为溢出）
+                                if name == "div" && b == 0 {
+                                    return Err(Diagnostic::at("`div` 除数为 0", span));
+                                }
+                                acc = op(acc, b).ok_or_else(|| {
+                                    Diagnostic::at(format!("`{name}` 整数溢出"), span)
+                                })?;
                             }
                             Ok(Value::Int(acc))
                         } else if !is_arith && args.iter().all(|a| matches!(a, Value::List(_))) {
@@ -1870,7 +1918,8 @@ impl EvalCtx<'_> {
                             for i in 0..w {
                                 let mut acc = lists[0][i];
                                 for l in &lists[1..] {
-                                    acc = op(acc as i64, l[i] as i64) as u8;
+                                    // 位运算（本路径仅 bor/band/bxor）不可能溢出
+                                    acc = op(acc as i64, l[i] as i64).expect("位运算不溢出") as u8;
                                 }
                                 out.push(acc);
                             }
@@ -2023,32 +2072,47 @@ impl EvalCtx<'_> {
         if args.len() > func.params.len() {
             return Err(Diagnostic::at(format!("值函数 `{name}`：参数过多"), span));
         }
-        let mut env: FnEnv = FnEnv::new();
-        for p in &func.params {
-            let v = match &p.default {
-                Some(d) if matches!(d, Value::Call { .. } | Value::BinOp { .. }) => {
-                    // 默认值里的值调用（含库值函数）/运算在定义模块作用域求值
-                    Some(self.eval_value(def_module, d)?)
-                }
-                other => other.clone(),
-            };
-            env.insert(p.name.clone(), v);
+        // 防自递归/互递归栈溢出：进入函数体（含默认值求值——默认值里可调值函数）
+        // 前检查深度，超限报错而不是耗尽栈崩溃（组件循环检测不覆盖值函数路径）
+        if self.value_depth >= MAX_VALUE_FUNC_DEPTH {
+            return Err(Diagnostic::at(
+                format!("值函数调用深度超过 {MAX_VALUE_FUNC_DEPTH} 层（疑似递归调用：`{name}`）"),
+                span,
+            ));
         }
-        for (i, a) in args.iter().enumerate() {
-            env.insert(func.params[i].name.clone(), Some(a.clone()));
-        }
-        self.env_stack.push(env);
-        let result = self.eval_value(def_module, &body);
-        self.env_stack.pop();
-        match ret {
-            // `-> bytes`：结果由调用方在字节上下文校验（bytes_of）
-            crate::ast::ValueRet::Bytes => result,
-            // `-> int`：结果必须是整数（运行时校验，与 `-> bytes` 的声明+校验一致）
-            crate::ast::ValueRet::Int => {
-                let v = result?;
-                Ok(Value::Int(int_of(Some(&v), name, span)?))
+        self.value_depth += 1;
+        // 闭包收尾：无论函数体求值成功与否都递减深度（错误路径不泄漏计数）
+        let mut run = || -> PktResult<Value> {
+            let mut env: FnEnv = FnEnv::new();
+            for p in &func.params {
+                let v = match &p.default {
+                    Some(d) if matches!(d, Value::Call { .. } | Value::BinOp { .. }) => {
+                        // 默认值里的值调用（含库值函数）/运算在定义模块作用域求值
+                        Some(self.eval_value(def_module, d)?)
+                    }
+                    other => other.clone(),
+                };
+                env.insert(p.name.clone(), v);
             }
-        }
+            for (i, a) in args.iter().enumerate() {
+                env.insert(func.params[i].name.clone(), Some(a.clone()));
+            }
+            self.env_stack.push(env);
+            let result = self.eval_value(def_module, &body);
+            self.env_stack.pop();
+            match ret {
+                // `-> bytes`：结果由调用方在字节上下文校验（bytes_of）
+                crate::ast::ValueRet::Bytes => result,
+                // `-> int`：结果必须是整数（运行时校验，与 `-> bytes` 的声明+校验一致）
+                crate::ast::ValueRet::Int => {
+                    let v = result?;
+                    Ok(Value::Int(int_of(Some(&v), name, span)?))
+                }
+            }
+        };
+        let result = run();
+        self.value_depth -= 1;
+        result
     }
 
     /// 流水线求值：use 元件展开为包组，然后逐层包裹（内 → 外）。

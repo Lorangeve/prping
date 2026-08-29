@@ -167,7 +167,9 @@ fn no_transport_layer_fails_with_hint() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("没有可发送的包") || msg.contains("no packets to send") || msg.contains("err_"),
+        msg.contains("没有可发送的包")
+            || msg.contains("no packets to send")
+            || msg.contains("err_"),
         "{msg}"
     );
 }
@@ -205,7 +207,9 @@ fn raw_bare_export_is_skipped() {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("没有可发送的包") || err.to_string().contains("no packets to send") || err.to_string().contains("err_"),
+            err.to_string().contains("没有可发送的包")
+                || err.to_string().contains("no packets to send")
+                || err.to_string().contains("err_"),
             "裸导出应跳过并汇总报错：{err}"
         );
     }
@@ -225,7 +229,9 @@ fn raw_transport_without_outer_layer_is_error() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("failed to send") || err.to_string().contains("发送失败") || err.to_string().contains("err_send_failed"),
+        err.to_string().contains("failed to send")
+            || err.to_string().contains("发送失败")
+            || err.to_string().contains("err_send_failed"),
         "裸传输层应逐包报错：{err}"
     );
 }
@@ -253,7 +259,9 @@ fn raw_link_layer_frame_without_target_is_sendable() {
             let msg = e.to_string();
             assert!(!msg.contains("目标地址"), "链路层帧不应报目标缺失：{msg}");
             assert!(
-                msg.contains("failed to send") || msg.contains("发送失败") || msg.contains("err_send_failed"),
+                msg.contains("failed to send")
+                    || msg.contains("发送失败")
+                    || msg.contains("err_send_failed"),
                 "无权限时也应走发送失败路径而非目标解析失败：{msg}"
             );
         }
@@ -274,7 +282,9 @@ fn empty_file_is_error() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("没有可发送的包") || err.to_string().contains("no packets to send") || err.to_string().contains("err_"),
+        err.to_string().contains("没有可发送的包")
+            || err.to_string().contains("no packets to send")
+            || err.to_string().contains("err_"),
         "{err}"
     );
 }
@@ -483,7 +493,7 @@ fn send_with_wait_gets_udp_echo() {
     let opts = prping_core::PkgOptions {
         target: Some(target),
         mode: SendMode::Payload,
-        wait: Some(2.0),
+        wait: prping_core::WaitMode::OneShot(2.0),
         ..Default::default()
     };
     send_packets(&file, &opts).expect("wait 发送应成功");
@@ -549,6 +559,7 @@ sniffer:\n  - match dns(id=id)\n",
 /// sniffer_match：常量 + sent 引用组合（icmp type=0, id=id, seq=seq）。
 #[test]
 fn sniffer_match_icmp_echo_reply() {
+    ensure_registry();
     let m = parse_str(
         "t",
         "p = raw(bytes=\"x\")\nuse(p) |> icmp(id=7, seq=3) |> ipv4(src=\"1.2.3.4\", dst=\"8.8.8.8\") |> eth()\n\
@@ -579,6 +590,187 @@ sniffer:\n  - match icmp(type=0, id=id, seq=seq)\n",
     );
 }
 
+/// 构造 icmp echo 发包 + echo reply 回包（sniffer 谓词测试的公共骨架）：
+/// 返回 (sniffer spec, reply, sent)。
+fn icmp_sniffer(sniffer_src: &str) -> (packet_dsl::ast::SnifferSpec, Vec<u8>, Vec<u8>) {
+    ensure_registry();
+    let src = format!(
+        "p = raw(bytes=\"x\")\nuse(p) |> icmp(id=7, seq=3) |> ipv4(src=\"1.2.3.4\", dst=\"8.8.8.8\") |> eth()\n{sniffer_src}"
+    );
+    let m = parse_str("t", &src).unwrap();
+    let spec = m.sniffer.clone().unwrap();
+    let built = packet_dsl::resolve(&m).unwrap();
+    let sent = packet_dsl::DefaultSerializer::with_seed(1)
+        .serialize(&built.packets[0])
+        .unwrap();
+    let mut reply = sent.clone();
+    reply[34] = 0; // icmp type → echo reply
+    reply[35] = 0; // code
+    (spec, reply, sent)
+}
+
+/// 统一谓词：`and(...)` 组合（跨子句 AND；任一不满足即整体不匹配）。
+#[test]
+fn sniffer_and_combinator() {
+    let (spec, reply, sent) =
+        icmp_sniffer("sniffer:\n  - and(match icmp(type=0), match icmp(id=id))\n");
+    let got = prping_core::sniffer_match(&spec, &reply, &sent)
+        .unwrap()
+        .expect("and 应匹配");
+    assert_eq!(got[0], ("type".to_string(), "0".to_string()));
+    assert_eq!(got[1], ("id".to_string(), "7".to_string()));
+    // and 中一个子句不满足 → 不匹配
+    let (spec, reply, sent) =
+        icmp_sniffer("sniffer:\n  - and(match icmp(type=0), match icmp(type=8))\n");
+    assert_eq!(
+        prping_core::sniffer_match(&spec, &reply, &sent).unwrap(),
+        None,
+        "and 内 type 不可能同时为 0 和 8"
+    );
+}
+
+/// 统一谓词：`or(...)` 组合（任一子句命中即匹配）。
+#[test]
+fn sniffer_or_combinator() {
+    let (spec, reply, sent) =
+        icmp_sniffer("sniffer:\n  - or(match icmp(type=0), match icmp(type=8))\n");
+    assert!(
+        prping_core::sniffer_match(&spec, &reply, &sent)
+            .unwrap()
+            .is_some(),
+        "or 第一分支命中"
+    );
+    let (spec, reply, sent) =
+        icmp_sniffer("sniffer:\n  - or(match icmp(type=8), match icmp(type=8))\n");
+    assert_eq!(
+        prping_core::sniffer_match(&spec, &reply, &sent).unwrap(),
+        None,
+        "or 两分支都不满足"
+    );
+}
+
+/// 统一谓词：`not(...)`（子谓词不满足才命中；反解后整包判定）。
+#[test]
+fn sniffer_not_combinator() {
+    let (spec, reply, sent) = icmp_sniffer("sniffer:\n  - not(match icmp(type=8))\n");
+    assert!(
+        prping_core::sniffer_match(&spec, &reply, &sent)
+            .unwrap()
+            .is_some(),
+        "echo reply（type=0）不是 echo request（type=8）→ 命中"
+    );
+    let (spec, reply, sent) = icmp_sniffer("sniffer:\n  - not(match icmp(type=0))\n");
+    assert_eq!(
+        prping_core::sniffer_match(&spec, &reply, &sent).unwrap(),
+        None,
+        "echo reply 是 type=0 → not 不命中"
+    );
+}
+
+/// 统一谓词：`ne(字段, 值)` 不等比较（不报告命中字段）。
+#[test]
+fn sniffer_ne_item() {
+    let (spec, reply, sent) = icmp_sniffer("sniffer:\n  - match icmp(type=0, ne(id, 99))\n");
+    let got = prping_core::sniffer_match(&spec, &reply, &sent)
+        .unwrap()
+        .expect("type=0 且 id!=99 应匹配");
+    assert_eq!(got, vec![("type".to_string(), "0".to_string())], "{got:?}");
+    let (spec, reply, sent) = icmp_sniffer("sniffer:\n  - match icmp(ne(type, 0))\n");
+    assert_eq!(
+        prping_core::sniffer_match(&spec, &reply, &sent).unwrap(),
+        None,
+        "echo reply type==0 → ne(type,0) 不满足"
+    );
+}
+
+/// 构造 udp 载荷 = 给定文本的包（字节谓词测试用）：返回 (sniffer spec, reply=回显, sent)。
+fn text_udp_sniffer(
+    payload: &str,
+    sniffer_src: &str,
+) -> (packet_dsl::ast::SnifferSpec, Vec<u8>, Vec<u8>) {
+    ensure_registry();
+    let src = format!(
+        "p = raw(bytes=\"{payload}\")\n\
+use(p) |> udp(dport=9999) |> ipv4(src=\"1.2.3.4\", dst=\"8.8.8.8\") |> eth()\n{sniffer_src}"
+    );
+    let m = parse_str("t", &src).unwrap();
+    let spec = m.sniffer.clone().unwrap();
+    let built = packet_dsl::resolve(&m).unwrap();
+    let sent = packet_dsl::DefaultSerializer::with_seed(1)
+        .serialize(&built.packets[0])
+        .unwrap();
+    (spec, sent.clone(), sent)
+}
+
+/// 统一谓词：字节模式（mask / startswith / contains / endswith 作用于层原始字节）。
+#[test]
+fn sniffer_byte_patterns() {
+    // icmp 层原始字节首字节 = type（echo reply = 0x00）
+    let (spec, reply, sent) = icmp_sniffer("sniffer:\n  - match icmp(mask(0x00))\n");
+    assert!(
+        prping_core::sniffer_match(&spec, &reply, &sent)
+            .unwrap()
+            .is_some(),
+        "0x00 & 0x00 == 0x00 → 命中"
+    );
+    let (spec, reply, sent) = icmp_sniffer("sniffer:\n  - match icmp(mask(0x01))\n");
+    assert_eq!(
+        prping_core::sniffer_match(&spec, &reply, &sent).unwrap(),
+        None,
+        "0x00 & 0x01 != 0x01"
+    );
+    // raw 载荷层：startswith / contains / endswith（载荷 = "hello world"，非 http/dns）
+    let (spec, reply, sent) = text_udp_sniffer(
+        "hello world",
+        "sniffer:\n  - match raw(startswith(\"hel\"), contains(\"worl\"), endswith(\"orld\"))\n",
+    );
+    let got = prping_core::sniffer_match(&spec, &reply, &sent)
+        .unwrap()
+        .expect("hello world 载荷应命中全部字节谓词");
+    assert!(got.is_empty(), "字节谓词不报告字段：{got:?}");
+    let (spec, reply, sent) = text_udp_sniffer(
+        "hello world",
+        "sniffer:\n  - match raw(startswith(\"POST\"))\n",
+    );
+    assert_eq!(
+        prping_core::sniffer_match(&spec, &reply, &sent).unwrap(),
+        None,
+        "载荷以 hel 开头，startswith(POST) 不命中"
+    );
+    // http 层原始字节 = 完整载荷（rest 消费到末尾）：文本协议字节谓词
+    let (spec, reply, sent) = text_udp_sniffer(
+        "GET / HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n",
+        "sniffer:\n  - match http(startswith(\"GET \"), contains(\"HTTP/1.1\"))\n",
+    );
+    let got = prping_core::sniffer_match(&spec, &reply, &sent)
+        .unwrap()
+        .expect("GET 载荷应命中 http 字节谓词");
+    assert!(got.is_empty(), "纯字节谓词不报告字段：{got:?}");
+}
+
+/// 监听模式（allow_sent=false）：引用发包字段（裸 Ident）构建期报错。
+#[test]
+fn sniffer_listen_rejects_sent_ref() {
+    let m = parse_str(
+        "t",
+        "p = raw(bytes=\"x\")\nuse(p) |> icmp(id=7, seq=3) |> ipv4() |> eth()\n\
+sniffer:\n  - match icmp(type=0, id=id)\n",
+    )
+    .unwrap();
+    let spec = m.sniffer.clone().unwrap();
+    let err = match packet_dsl::Matcher::build(
+        &spec,
+        Some(&m),
+        &packet_dsl::Params::new(),
+        &packet_dsl::Globals::new(),
+        false,
+    ) {
+        Err(e) => e,
+        Ok(_) => panic!("监听模式应拒绝发包字段引用"),
+    };
+    assert!(err.to_string().contains("监听模式"), "{err}");
+}
+
 /// sniffer 字段名非法 → 发送前报错。
 #[test]
 fn sniffer_unknown_field_errors() {
@@ -590,7 +782,7 @@ sniffer:\n  - match dns(nonexistent=1)\n",
     let err = send_packets(
         &file,
         &PkgOptions {
-            wait: Some(1.0),
+            wait: prping_core::WaitMode::OneShot(1.0),
             ..Default::default()
         },
     )
@@ -625,7 +817,7 @@ sniffer:\n  - match dns(id=id)\n",
     let opts = prping_core::PkgOptions {
         target: Some(target),
         mode: SendMode::Payload,
-        wait: Some(2.0),
+        wait: prping_core::WaitMode::OneShot(2.0),
         ..Default::default()
     };
     send_packets(&file, &opts).expect("wait + sniffer 发送应成功");
@@ -662,7 +854,7 @@ sniffer:\n  - match dns(id=myid())\n",
     let opts = prping_core::PkgOptions {
         target: Some(target),
         mode: SendMode::Payload,
-        wait: Some(2.0),
+        wait: prping_core::WaitMode::OneShot(2.0),
         params: vec![("id".to_string(), "0x4242".to_string())],
         ..Default::default()
     };
@@ -836,6 +1028,7 @@ fn render_dns_shows_question_names() {
 #[test]
 fn sniffer_multiple_clauses_or() {
     ensure_registry();
+    ensure_registry();
     let m = parse_str(
         "t",
         "a = dns(id=0x4242, questions=[\"example.com\"])\nuse(a) |> udp(dport=53) |> ipv4() |> eth()\n\
@@ -874,6 +1067,7 @@ sniffer:\n  - match icmp(id=id, seq=seq)\n  - match dns(id=id)\n",
 /// sniffer：值表达式（字节原语/字节列表）按**字节**级比较。
 #[test]
 fn sniffer_match_expr_primitives() {
+    ensure_registry();
     let m = parse_str(
         "t",
         "p = raw(bytes=\"x\")\nuse(p) |> icmp(id=7, seq=3) |> ipv4(src=\"1.2.3.4\", dst=\"8.8.8.8\") |> eth()\n\
@@ -921,6 +1115,7 @@ sniffer:\n  - match icmp(type=u8(0), id=be16(7), seq=[0x00, 0x03])\n",
 #[test]
 fn sniffer_match_expr_user_func_and_params() {
     ensure_registry();
+    ensure_registry();
     let m = parse_str(
         "t",
         "func myid() -> bytes { be16(params(\"id\", \"7\")) }\n\
@@ -966,7 +1161,7 @@ sniffer:\n  - match dns(id=nonexistent_func())\n",
     let err = send_packets(
         &file,
         &PkgOptions {
-            wait: Some(1.0),
+            wait: prping_core::WaitMode::OneShot(1.0),
             ..Default::default()
         },
     )
@@ -975,6 +1170,208 @@ sniffer:\n  - match dns(id=nonexistent_func())\n",
         err.to_string().contains("匹配值表达式求值失败"),
         "应有表达式求值错误：{err}"
     );
+}
+
+// ── 监听模式（packet --listen）────────────────────────────────
+
+/// 监听模式端到端：按 sniffer 规则匹配收到的 UDP 数据报并**回显**；
+/// 不匹配的数据报被忽略（客户端超时无回包）。
+#[test]
+fn listen_echoes_matching_datagrams() {
+    ensure_registry();
+    prping_core::reset_interrupt();
+    let dir = temp_recipe_dir("listen");
+    // 监听规则：载荷反解为 dns 且 id=0x1234（监听无发包，用字面量匹配）
+    std::fs::write(
+        dir.join("listen.pkt"),
+        "a = dns(id=0x1234, questions=[\"example.com\"])\nuse(a) |> udp(dport=5353) |> ipv4() |> eth()\n\
+sniffer:\n  - match dns(id=0x1234)\n",
+    )
+    .unwrap();
+    // 找一个空闲端口作为监听地址
+    let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let target = probe.local_addr().unwrap();
+    drop(probe);
+    // 监听线程（summary 模式；测试用 set_interrupted 模拟 Ctrl+C 退出）
+    let file = dir.join("listen.pkt");
+    let handle = std::thread::spawn(move || {
+        prping_core::listen_packets(
+            &file,
+            &PkgOptions {
+                target: Some(target),
+                mode: SendMode::Payload,
+                summary: true,
+                ..Default::default()
+            },
+        )
+    });
+    // 客户端：构造 dns 查询载荷（id=0x1234）
+    let m = parse_str(
+        "t",
+        "a = dns(id=0x1234, questions=[\"example.com\"])\nuse(a) |> udp(dport=5353) |> ipv4() |> eth()\n",
+    )
+    .unwrap();
+    let built = packet_dsl::resolve(&m).unwrap();
+    let payload = extract_payload(&built.packets[0]).unwrap().1;
+    let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+    client
+        .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+        .unwrap();
+    // 1) 不匹配的数据报（id=0x9999）→ 忽略，无回显
+    let bad = {
+        let mut b = payload.clone();
+        b[0..2].copy_from_slice(&0x9999u16.to_be_bytes());
+        b
+    };
+    client.send_to(&bad, target).unwrap();
+    let mut buf = [0u8; 4096];
+    assert!(
+        matches!(
+            client.recv_from(&mut buf),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+        ),
+        "不匹配的数据报不应回显"
+    );
+    // 2) 匹配的数据报 → 原样回显
+    client.send_to(&payload, target).unwrap();
+    let (n, _) = client.recv_from(&mut buf).unwrap();
+    assert_eq!(&buf[..n], payload.as_slice(), "回显应字节保真");
+    // 3) 结束监听（模拟 Ctrl+C）
+    prping_core::set_interrupted(true);
+    handle.join().unwrap().expect("监听正常退出");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── 监听模式 raw（packet --listen --raw）错误路径（均在校验期失败，无需权限）──
+
+/// raw 监听缺 sniffer → 报错。
+#[test]
+fn listen_raw_requires_sniffer_errors() {
+    ensure_registry();
+    let dir = temp_recipe_dir("lr-no-sniffer");
+    std::fs::write(
+        dir.join("s.pkt"),
+        "p = raw(bytes=\"x\")\nuse(p) |> icmp(type=8) |> ipv4() |> eth()\n",
+    )
+    .unwrap();
+    let err = prping_core::listen_raw_packets(
+        &dir.join("s.pkt"),
+        &PkgOptions {
+            mode: SendMode::Raw { iface: None },
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("sniffer"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// raw 监听缺默认导出（应答模板）→ 报错。
+#[test]
+fn listen_raw_requires_reply_template_errors() {
+    ensure_registry();
+    let dir = temp_recipe_dir("lr-no-reply");
+    std::fs::write(
+        dir.join("s.pkt"),
+        "q = dns(id=1, questions=[\"example.com\"])\nq2 = use(q) |> udp(dport=53) |> ipv4() |> eth()\nexport:\n- q2\nsniffer:\n  - match icmp(type=8)\n",
+    )
+    .unwrap();
+    let err = prping_core::listen_raw_packets(
+        &dir.join("s.pkt"),
+        &PkgOptions {
+            mode: SendMode::Raw { iface: None },
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("应答模板")
+            || msg.contains("reply template")
+            || msg.contains("listen_raw_requires_reply"),
+        "{msg}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// raw 监听规则引用发包字段（裸 Ident）→ 构建期报错（allow_sent=false）。
+#[test]
+fn listen_raw_rejects_sent_ref() {
+    ensure_registry();
+    let dir = temp_recipe_dir("lr-sent");
+    std::fs::write(
+        dir.join("s.pkt"),
+        "p = raw(bytes=\"x\")\nuse(p) |> icmp(type=8) |> ipv4() |> eth()\nsniffer:\n  - match icmp(type=8, id=id)\n",
+    )
+    .unwrap();
+    let err = prping_core::listen_raw_packets(
+        &dir.join("s.pkt"),
+        &PkgOptions {
+            mode: SendMode::Raw { iface: None },
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("监听模式"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 完整帧匹配：ICMP echo request（type=8）命中监听规则，echo reply（type=0）不命中。
+#[test]
+fn listen_raw_matcher_on_full_frames() {
+    ensure_registry();
+    let m = parse_str(
+        "t",
+        "p = raw(bytes=\"hello\")\nuse(p) |> icmp(type=8, id=7, seq=3) |> ipv4(src=\"1.2.3.4\", dst=\"5.6.7.8\") |> eth()\nsniffer:\n  - match icmp(type=8)\n",
+    )
+    .unwrap();
+    let built = packet_dsl::resolve(&m).unwrap();
+    let frame = packet_dsl::DefaultSerializer::with_seed(1)
+        .serialize(&built.packets[0])
+        .unwrap();
+    let spec = m.sniffer.clone().unwrap();
+    let matcher = packet_dsl::Matcher::build(
+        &spec,
+        Some(&m),
+        &packet_dsl::Params::new(),
+        &packet_dsl::Globals::new(),
+        false,
+    )
+    .unwrap();
+    // echo request 命中
+    assert!(matcher.matches(&frame, None).is_some(), "type=8 请求应命中");
+    // 改成 echo reply（type=0）→ 不命中
+    let mut reply = frame.clone();
+    reply[34] = 0; // eth14 + ipv4 20 → icmp type
+    assert_eq!(matcher.matches(&reply, None), None, "type=0 不应命中");
+}
+
+/// 监听模式：sniffer 引用发包字段（裸 Ident）→ 构建期报错（allow_sent=false）。
+#[test]
+fn listen_rejects_sent_ref() {
+    ensure_registry();
+    let dir = temp_recipe_dir("listen-sent");
+    std::fs::write(
+        dir.join("listen.pkt"),
+        "a = dns(id=0x1234, questions=[\"example.com\"])\nuse(a) |> udp(dport=5353) |> ipv4() |> eth()\n\
+sniffer:\n  - match dns(id=id)\n",
+    )
+    .unwrap();
+    let err = prping_core::listen_packets(
+        &dir.join("listen.pkt"),
+        &PkgOptions {
+            target: Some("127.0.0.1:1".parse().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("监听模式"),
+        "监听规则不能引用发包字段：{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ── 配方（.pktl）──────────────────────────────────────────────
@@ -1000,7 +1397,7 @@ fn recipe_parse_full() {
 - name: seq
 
 recipe:
-- pkg: a.pkt
+- packet: a.pkt
   wait: 1.5
   params: k=1,k2=0x2
   extract:
@@ -1019,7 +1416,7 @@ recipe:
     assert_eq!(r.globals[1].init, None, "无 init = 未初始化");
     assert_eq!(r.steps.len(), 2);
     assert_eq!(r.steps[0].pkg, dir.join("a.pkt"));
-    assert_eq!(r.steps[0].wait, Some(1.5));
+    assert_eq!(r.steps[0].wait, Some(prping_core::WaitMode::OneShot(1.5)));
     assert_eq!(
         r.steps[0].params,
         vec![("k".into(), "1".into()), ("k2".into(), "0x2".into())]
@@ -1137,7 +1534,7 @@ fn recipe_parse_from_expr() {
     std::fs::write(
         &pktl,
         r#"recipe:
-- pkg: a.pkt
+- packet: a.pkt
   wait: 1
   extract:
   - name: next_seq
@@ -1211,7 +1608,7 @@ fn recipe_extract_expr_feeds_next_step() {
     .unwrap();
     std::fs::write(
         dir.join("flow.pktl"),
-        "global:\n- name: tid\n  init: 0x1111\n\nrecipe:\n- pkg: step1.pkt\n  wait: 1\n  extract:\n  - name: tid\n    from: reply.dns.id + 1\n    as: int\n- step2.pkt\n",
+        "global:\n- name: tid\n  init: 0x1111\n\nrecipe:\n- packet: step1.pkt\n  wait: 1\n  extract:\n  - name: tid\n    from: reply.dns.id + 1\n    as: int\n- step2.pkt\n",
     )
     .unwrap();
 
@@ -1263,68 +1660,68 @@ fn recipe_parse_errors() {
     let cases: Vec<(&str, &str, &str)> = vec![
         (
             "unknown-opt.pktl",
-            "recipe:\n- pkg: a.pkt\n  foo: 1\n",
-            "未知步骤选项",
+            "recipe:\n- packet: a.pkt\n  foo: 1\n",
+            "unknown step option",
         ),
         (
             "extract-no-name.pktl",
-            "recipe:\n- pkg: a.pkt\n  wait: 1\n  extract:\n  - from: reply.dns.id\n",
-            "缺少 `name:`",
+            "recipe:\n- packet: a.pkt\n  wait: 1\n  extract:\n  - from: reply.dns.id\n",
+            "missing `name:`",
         ),
         (
             "from-no-reply.pktl",
-            "recipe:\n- pkg: a.pkt\n  wait: 1\n  extract:\n  - name: x\n    from: dns.id\n",
-            "`from` 表达式解析失败",
+            "recipe:\n- packet: a.pkt\n  wait: 1\n  extract:\n  - name: x\n    from: dns.id\n",
+            "`from` expression parse failed",
         ),
         (
             "from-bad-expr.pktl",
-            "recipe:\n- pkg: a.pkt\n  wait: 1\n  extract:\n  - name: x\n    from: reply.tcp.seq +\n",
-            "`from` 表达式解析失败",
+            "recipe:\n- packet: a.pkt\n  wait: 1\n  extract:\n  - name: x\n    from: reply.tcp.seq +\n",
+            "`from` expression parse failed",
         ),
         (
             "bad-init.pktl",
             "global:\n- name: x\n  init: not-a-value!\nrecipe:\n- a.pkt\n",
-            "无法解析 `init` 值",
+            "cannot parse `init` value",
         ),
         (
             "inline-init-empty.pktl",
             "global:\n- tid=\nrecipe:\n- a.pkt\n",
-            "init 值不能为空",
+            "empty init value",
         ),
         (
             "colon-form.pktl",
             "global:\n- tid: 0x1234\nrecipe:\n- a.pkt\n",
-            "global 项语法错误",
+            "global item syntax error",
         ),
         (
             "dup-inline.pktl",
             "global:\n- tid=1\n- name: tid\nrecipe:\n- a.pkt\n",
-            "重复声明",
+            "declared twice",
         ),
         (
             "double-init.pktl",
             "global:\n- tid=1\n  init: 2\nrecipe:\n- a.pkt\n",
-            "不能再跟 `init:` 行",
+            "cannot add an `init:` line",
         ),
         (
             "dup-global.pktl",
             "global:\n- name: x\n- name: x\nrecipe:\n- a.pkt\n",
-            "重复声明",
+            "declared twice",
         ),
         (
             "empty-recipe.pktl",
             "global:\n- name: x\n",
-            "`recipe:` 段至少需要一个步骤",
+            "needs at least one step",
         ),
         (
             "bad-onerror.pktl",
-            "recipe:\n- pkg: a.pkt\n  on_error: maybe\n",
-            "`on_error` 只支持 stop / continue",
+            "recipe:\n- packet: a.pkt\n  on_error: maybe\n",
+            "`on_error` only supports stop / continue",
         ),
         (
             "raw-empty.pktl",
-            "recipe:\n- pkg: a.pkt\n  raw:\n",
-            "`raw` 需要 true / false 或网卡名",
+            "recipe:\n- packet: a.pkt\n  raw:\n",
+            "`raw` needs true / false or an interface name",
         ),
     ];
     let dir = temp_recipe_dir("parse-errors");
@@ -1358,7 +1755,7 @@ fn recipe_extract_feeds_next_step() {
     .unwrap();
     std::fs::write(
         dir.join("flow.pktl"),
-        "global:\n- name: tid\n  init: 0x1111\n\nrecipe:\n- pkg: step1.pkt\n  wait: 1\n  extract:\n  - name: tid\n    from: reply.dns.id\n    as: int\n- step2.pkt\n",
+        "global:\n- name: tid\n  init: 0x1111\n\nrecipe:\n- packet: step1.pkt\n  wait: 1\n  extract:\n  - name: tid\n    from: reply.dns.id\n    as: int\n- step2.pkt\n",
     )
     .unwrap();
 
@@ -1403,6 +1800,127 @@ fn recipe_extract_feeds_next_step() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 配方端到端：`extract from: sent.<层>.<字段>` 取**本步发包**字段（无需 wait）→
+/// global；步骤 2 的 `global("tid")` 应复用 sent extract 值（而非 init 0x1111）。
+#[test]
+fn recipe_extract_from_sent() {
+    ensure_registry();
+    let dir = temp_recipe_dir("extract-sent");
+    std::fs::write(
+        dir.join("step1.pkt"),
+        "a = dns(id=0x4321, questions=[\"example.com\"])\nuse(a) |> udp(dport=53) |> ipv4() |> eth()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("step2.pkt"),
+        "a = dns(id=global(\"tid\"), questions=[\"example.com\"])\nuse(a) |> udp(dport=53) |> ipv4() |> eth()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("flow.pktl"),
+        "global:\n- name: tid\n  init: 0x1111\n\nrecipe:\n- packet: step1.pkt\n  extract:\n  - name: tid\n    from: sent.dns.id\n    as: int\n- step2.pkt\n",
+    )
+    .unwrap();
+
+    // UDP 回显服务器：收两个数据报并回显，校验第二个的 DNS id 来自 sent extract
+    let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+    let target = sock.local_addr().unwrap();
+    let sock2 = Arc::clone(&sock);
+    let (got_tx, got_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut datagrams = Vec::new();
+        for _ in 0..2 {
+            let (n, peer) = sock2.recv_from(&mut buf).unwrap();
+            let data = buf[..n].to_vec();
+            datagrams.push(data.clone());
+            let _ = sock2.send_to(&data, peer); // 回显
+        }
+        got_tx.send(datagrams).unwrap();
+    });
+
+    // 无 wait：sent extract 不需要回包
+    send_recipe(
+        &dir.join("flow.pktl"),
+        &PkgOptions {
+            target: Some(target),
+            mode: SendMode::Payload,
+            ..Default::default()
+        },
+    )
+    .expect("配方发送成功");
+    server.join().unwrap();
+
+    let datagrams = got_rx.recv().unwrap();
+    assert_eq!(datagrams.len(), 2, "两个步骤各发一个数据报");
+    let dns_id = |b: &[u8]| u16::from_be_bytes([b[0], b[1]]);
+    assert_eq!(dns_id(&datagrams[0]), 0x4321, "步骤 1 DNS id");
+    assert_eq!(
+        dns_id(&datagrams[1]),
+        0x4321,
+        "步骤 2 应复用 sent extract 的 tid（而非 init 0x1111）：{:02x?}",
+        datagrams[1]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 配方解析：`from: sent.<层>.<字段>` → [`FromSpec::SentField`]（无 wait 也合法）。
+#[test]
+fn recipe_parse_from_sent() {
+    let dir = temp_recipe_dir("parse-sent");
+    let pktl = dir.join("sent.pktl");
+    std::fs::write(
+        &pktl,
+        "recipe:\n- packet: a.pkt\n  extract:\n  - name: id\n    from: sent.icmp.id\n    as: int\n",
+    )
+    .unwrap();
+    let r = parse_recipe(&pktl).expect("解析成功");
+    assert!(matches!(
+        r.steps[0].extract[0].from,
+        prping_core::FromSpec::SentField { .. }
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 配方解析：`sent.` 来源 + `reply.` 来源同一步——无需 wait（只校验 sent）。
+#[test]
+fn recipe_parse_sent_without_wait_ok() {
+    let dir = temp_recipe_dir("parse-sent-nowait");
+    let pktl = dir.join("s.pktl");
+    std::fs::write(
+        &pktl,
+        "recipe:\n- packet: a.pkt\n  extract:\n  - name: x\n    from: sent.icmp.id\n",
+    )
+    .unwrap();
+    let r = parse_recipe(&pktl).expect("sent 来源无 wait 合法");
+    assert_eq!(r.steps[0].extract.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 配方解析：`from: reply.<层>.<字段>` 仍无 wait → 报错（回包来源需要 wait）。
+#[test]
+fn recipe_parse_reply_requires_wait() {
+    let dir = temp_recipe_dir("parse-reply-nowait");
+    let pktl = dir.join("r.pktl");
+    std::fs::write(
+        &pktl,
+        "recipe:\n- packet: a.pkt\n  extract:\n  - name: x\n    from: reply.icmp.id\n",
+    )
+    .unwrap();
+    let err = send_recipe(
+        &pktl,
+        &PkgOptions {
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("failed"),
+        "回包来源 extract 无 wait 应使步骤失败：{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 配方解析：步骤 `raw:` 开关——`true`（开 raw，网卡继承 CLI）/ `false`（强制载荷）/
 /// 网卡名（`eth0` 或带引号 `"eth1"`）/ 未声明（继承 CLI）。
 #[test]
@@ -1412,13 +1930,13 @@ fn recipe_parse_raw_option() {
     std::fs::write(
         &pktl,
         r#"recipe:
-- pkg: a.pkt
+- packet: a.pkt
   raw: true
-- pkg: b.pkt
+- packet: b.pkt
   raw: false
-- pkg: c.pkt
+- packet: c.pkt
   raw: eth0
-- pkg: d.pkt
+- packet: d.pkt
   raw: "eth1"
 - e.pkt
 "#,
@@ -1508,7 +2026,7 @@ fn recipe_raw_false_overrides_cli_raw() {
     .unwrap();
     std::fs::write(
         dir.join("flow.pktl"),
-        "recipe:\n- pkg: step1.pkt\n  raw: false\n- pkg: step2.pkt\n  raw: false\n",
+        "recipe:\n- packet: step1.pkt\n  raw: false\n- packet: step2.pkt\n  raw: false\n",
     )
     .unwrap();
 
@@ -1564,7 +2082,7 @@ fn recipe_on_error_stop_aborts() {
     .unwrap();
     std::fs::write(
         dir.join("flow.pktl"),
-        "recipe:\n- pkg: bad.pkt\n- pkg: ok.pkt\n",
+        "recipe:\n- packet: bad.pkt\n- packet: ok.pkt\n",
     )
     .unwrap();
 
@@ -1599,7 +2117,7 @@ fn recipe_on_error_continue_sends_rest() {
     .unwrap();
     std::fs::write(
         dir.join("flow.pktl"),
-        "recipe:\n- pkg: bad.pkt\n  on_error: continue\n- pkg: ok.pkt\n",
+        "recipe:\n- packet: bad.pkt\n  on_error: continue\n- packet: ok.pkt\n",
     )
     .unwrap();
 
@@ -1623,7 +2141,7 @@ fn recipe_on_error_continue_sends_rest() {
     )
     .unwrap_err();
     assert!(
-        err.to_string().contains("有失败"),
+        err.to_string().contains("failed"),
         "continue 后汇总报错：{err}"
     );
     server.join().unwrap();

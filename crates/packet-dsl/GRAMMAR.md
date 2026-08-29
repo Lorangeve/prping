@@ -213,8 +213,14 @@ rule_call      = "and" "(" rule_call { "," rule_call } ")"
                        允许字段值约束）；`not` 不支持。多个 `#[rule]` 注解与 and(...) 等价。 *)
 match_loc      = "at" "=" num | "in" "=" ident ;
 rule_kv        = ( "dport" | "sport" | "proto" | "next_header" | "ethertype" ) "=" num ;
-sniffer_stmt   = "sniffer" ":" nl { "-" nl sniffer_match } ;  (* ≥1 项 *)
-sniffer_match  = "match" ident "(" [ sniffer_field { "," sniffer_field } [ "," ] ] ")" ;
+sniffer_stmt   = "sniffer" ":" nl { "-" nl sniffer_pred } ;  (* ≥1 项；顶层列表 = 隐式 OR *)
+sniffer_pred   = "match" ident "(" [ sniffer_item { "," sniffer_item } [ "," ] ] ")"
+               | "and" "(" sniffer_pred { "," sniffer_pred } [ "," ] ")"
+               | "or" "(" sniffer_pred { "," sniffer_pred } [ "," ] ")"
+               | "not" "(" sniffer_pred ")" ;
+sniffer_item   = sniffer_field | "ne" "(" ident "," value ")"
+               | "mask" "(" num ")" | "startswith" "(" STRING ")"
+               | "endswith" "(" STRING ")" | "contains" "(" STRING ")" ;
 sniffer_field  = ident "=" value ;
 def_stmt       = ident "=" expr ;
 pipeline_stmt  = pipeline ;                                (* 顶层匿名流水线 = 默认导出 *)
@@ -246,8 +252,15 @@ ident          = IDENT ;
 > - `call` 与 `value_call` 的差别：前者参数可命名/位置（`arg`），后者只收位置
 >   值列表——值函数（字节原语 / 用户值函数）**没有命名参数**。
 > - `sniffer_field` 的右值有三种语义：字面量（常量比较）、裸 `ident`（引用发包
->   同层同名字段）、其余 `value`（值表达式——原语/值函数/`params`/字节列表，
->   求值为字节后与回包字段**字节**比较；语法仍是上面的 `value`，语义在求值期区分）。
+>   同层同名字段；监听模式无发包，构建期报错）、其余 `value`（值表达式——原语/
+>   值函数/`params`/字节列表，求值为字节后与回包字段**字节**比较；语法仍是上面的
+>   `value`，语义在求值期区分）。
+> - **sniffer 谓词组合**（与 `#[rule]` 同构）：`and(...)` 全部子谓词满足（支持跨层
+>   AND）、`or(...)` 任一满足、`not(...)` 取反（监听/回包反解后整包判定；`#[rule]`
+>   侧不支持 `not`）；层内条件：`ne(字段, 值)` 不等、`mask(0xc0)` 层原始字节首字节
+>   位掩码、`startswith/endswith/contains("...")` 层原始字节前缀/后缀/子串
+>   （proto 命中时作用于整个报文）。字段集 = 反解层实际解析字段
+>   （`matchpred::field_names`，与 `--eng` 展示/配方 `extract` 共用）。
 > - **`params(...)` 按形状解析**（取代已移除的 `int()`）：`0x`/`0X` 前缀 = 十六进制数值、
 >   纯十进制数字 = 数值、其余 = 字符串——`be16(params("port", "53"))` 直接可用
 >   （`--params port=5353`）。**默认值可为任意值表达式**：未注入时求值为默认
@@ -470,7 +483,9 @@ full = use(ax) |> tcp(dport=80)
 export:
 - full
 
-# sniffer 回包匹配（值 = 字面量常量或裸 Ident 引用发包字段）
+# sniffer 回包/监听匹配（值 = 字面量常量 / 裸 Ident 发包字段引用 / 值表达式；
+# and/or/not 组合 + ne/mask/startswith/endswith/contains 条件）
 sniffer:
   - match icmp(type=0, id=id, seq=seq)
+  - and(match udp(dport=53), not(match dns(flags=0x8180)))
 ```

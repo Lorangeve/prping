@@ -20,7 +20,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 // pcap I/O 路径（Windows）专用导入；纯函数与测试在任意平台编译
 #[cfg(windows)]
-use super::{Hop, PROBE_TIMEOUT, PROBES_PER_HOP, PingConfig, finish_hop};
+use super::{Hop, PROBE_TIMEOUT, PROBES_PER_HOP, PingConfig};
 #[cfg(windows)]
 use crate::util;
 #[cfg(windows)]
@@ -75,86 +75,84 @@ pub(crate) fn trace_tcp_pcap(
     let dev =
         crate::engine::rawpcap::select_device_name(Some(&SocketAddr::new(target_ip, dport)), None)?;
     let (dst_mac, src_mac) = crate::engine::rawpcap::resolve_macs_win(target_v4)?;
-    let mut cap = crate::engine::rawpcap::open_capture(&dev)?;
+    // Windows TCP trace 需要过滤自注入的 SYN 帧
+    let mut cap = crate::engine::rawpcap::open_capture(&dev, true)?;
 
-    let mut hops: Vec<Hop> = Vec::new();
     let mut sport_counter: u16 = TCP_SPORT_MIN;
-    let mut reached = false;
-
-    for hop_no in 1..=max_hops {
-        if util::interrupted() {
-            break;
-        }
-
-        // 构造并注入本跳全部探测（背靠背，不逐包等待）
-        let mut probes: Vec<(u16, Instant, Vec<u8>)> = Vec::with_capacity(PROBES_PER_HOP);
-        for _ in 0..PROBES_PER_HOP {
-            let sport = sport_counter;
-            sport_counter = sport_counter.wrapping_add(1);
-            if sport_counter > TCP_SPORT_MAX {
-                sport_counter = TCP_SPORT_MIN;
-            }
-            let frame = build_syn_frame(dst_mac, src_mac, target_v4, local, sport, dport, hop_no);
-            let sent = Instant::now();
-            if cap.sendpacket(frame.as_slice()).is_ok() {
-                probes.push((sport, sent, frame));
-            }
-        }
-        if probes.is_empty() {
-            break;
-        }
-
-        // 收集回复直到全部匹配或超时
-        let want: Vec<u16> = probes.iter().map(|&(s, _, _)| s).collect();
-        let sent_frames: Vec<&[u8]> = probes.iter().map(|p| p.2.as_slice()).collect();
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
-        let mut src: Option<IpAddr> = None;
-        let mut dest_hit = false;
-        let mut remaining = probes.len();
-        while remaining > 0 {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            match cap.next_packet() {
-                Ok(p) => {
-                    // Npcap 会把刚注入的帧回读给抓包句柄（direction(In) 过滤在部分
-                    // 虚拟网卡上不生效）——与发送帧逐字节相同的帧是"自己"，跳过
-                    // （真回包不可能与 SYN 请求逐字节相同）。
-                    if sent_frames.iter().any(|f| *f == p.data) {
-                        continue;
-                    }
-                    let Some(m) = parse_reply_frame(p.data, target_v4, dport, &want) else {
-                        super::trace_dump("tcp-pcap", p.data, false);
-                        continue;
-                    };
-                    super::trace_dump("tcp-pcap", p.data, true);
-                    if m.is_dest {
-                        dest_hit = true;
-                    }
-                    if let Some(idx) = probes.iter().position(|&(s, _, _)| s == m.sport)
-                        && rtts[idx].is_none()
-                    {
-                        rtts[idx] = Some(probes[idx].1.elapsed());
-                        remaining -= 1;
-                    }
-                    src = Some(m.src);
+    // 逐跳骨架共用（渲染上一跳/interrupted/PendingHop 收尾），本路径只提供
+    // hop_body：构造并注入 SYN 帧 + pcap next_packet 收集
+    super::trace_loop_skeleton(
+        cfg,
+        max_hops,
+        |hop_no| {
+            // 构造并注入本跳全部探测（背靠背，不逐包等待）
+            let mut probes: Vec<(u16, Instant, Vec<u8>)> = Vec::with_capacity(PROBES_PER_HOP);
+            for _ in 0..PROBES_PER_HOP {
+                let sport = sport_counter;
+                sport_counter = sport_counter.wrapping_add(1);
+                if sport_counter > TCP_SPORT_MAX {
+                    sport_counter = TCP_SPORT_MIN;
                 }
-                Err(pcap::Error::TimeoutExpired) => continue,
-                Err(e) => return Err(anyhow::anyhow!("pcap 捕获失败：{e}")),
+                let frame =
+                    build_syn_frame(dst_mac, src_mac, target_v4, local, sport, dport, hop_no);
+                let sent = Instant::now();
+                if cap.sendpacket(frame.as_slice()).is_ok() {
+                    probes.push((sport, sent, frame));
+                }
             }
-        }
+            if probes.is_empty() {
+                return Ok(super::HopCollect::default());
+            }
 
-        let hop = finish_hop(hop_no, cfg, src, rtts, w)?;
-        hops.push(hop);
-        if dest_hit {
-            reached = true;
-            break;
-        }
-    }
-
-    Ok((hops, reached))
+            // 收集回复直到全部匹配或超时
+            let want: Vec<u16> = probes.iter().map(|&(s, _, _)| s).collect();
+            let sent_frames: Vec<&[u8]> = probes.iter().map(|p| p.2.as_slice()).collect();
+            let deadline = Instant::now() + PROBE_TIMEOUT;
+            let mut rtts: Vec<Option<Duration>> = vec![None; probes.len()];
+            let mut src: Option<IpAddr> = None;
+            let mut dest_hit = false;
+            let mut remaining = probes.len();
+            while remaining > 0 {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                match cap.next_packet() {
+                    Ok(p) => {
+                        // Npcap 会把刚注入的帧回读给抓包句柄（direction(In) 过滤在部分
+                        // 虚拟网卡上不生效）：与发送帧逐字节相同的帧是自身回读，跳过
+                        // （真回包不可能与 SYN 请求逐字节相同）。
+                        if sent_frames.iter().any(|f| *f == p.data) {
+                            continue;
+                        }
+                        let Some(m) = parse_reply_frame(p.data, target_v4, dport, &want) else {
+                            super::trace_dump("tcp-pcap", p.data, false);
+                            continue;
+                        };
+                        super::trace_dump("tcp-pcap", p.data, true);
+                        if m.is_dest {
+                            dest_hit = true;
+                        }
+                        if let Some(idx) = probes.iter().position(|&(s, _, _)| s == m.sport)
+                            && rtts[idx].is_none()
+                        {
+                            rtts[idx] = Some(probes[idx].1.elapsed());
+                            remaining -= 1;
+                        }
+                        src = Some(m.src);
+                    }
+                    Err(pcap::Error::TimeoutExpired) => continue,
+                    Err(e) => return Err(anyhow::anyhow!("pcap 捕获失败：{e}")),
+                }
+            }
+            Ok(super::HopCollect {
+                src,
+                rtts,
+                dest_hit,
+            })
+        },
+        w,
+    )
 }
 
 /// 单帧回复的解析结果。
@@ -199,7 +197,8 @@ fn parse_reply_frame(
     match ip[9] {
         6 => {
             // TCP 回复：复用共享匹配逻辑
-            let (sport, is_dest) = super::match_tcp_syn_reply_v4(ip, IpAddr::V4(target), dport, want)?;
+            let (sport, is_dest) =
+                super::match_tcp_syn_reply_v4(ip, IpAddr::V4(target), dport, want)?;
             Some(ReplyMatch {
                 sport,
                 src,

@@ -458,7 +458,7 @@ pub(crate) fn find_rule<'a>(
 }
 
 /// 按 IR 层类型找 proto（`#[proto(kind="eth")]` 等层头声明，无 rule 分派——
-/// dissect 层头解析用它：固定层序 + 注册表字段表反解，失败回退硬编码）。
+/// dissect 层头解析用它：固定层序 + 注册表字段表反解，失败 → None（按 raw 保留））。
 pub(crate) fn find_by_kind<'a>(
     registry: &'a [ResolvedProto],
     kind: &str,
@@ -640,12 +640,13 @@ fn parse_sub_sequence(
     let mut consumed = 0usize;
     while !rest.is_empty() {
         match parse_consumed_at(sub, rest, full, base) {
-            Some((hit, n)) => {
+            // 零消费匹配（如 bytes=0 字段）：rest 不推进 → 死循环，直接停止
+            Some((hit, n)) if n > 0 => {
                 subs.push(hit);
                 consumed += n;
                 rest = &rest[n.min(rest.len())..];
             }
-            None => break, // 帧不匹配（如 PADDING 0x00 不是 CRYPTO）→ 停止，剩余不消费
+            _ => break, // 帧不匹配或零消费 → 停止，剩余不消费
         }
     }
     consumed
@@ -917,7 +918,7 @@ pub(crate) fn eval_width(v: &Value, vals: &std::collections::HashMap<String, i64
             left,
             right,
             ..
-        } => Some(eval_width(left, vals)? + eval_width(right, vals)?),
+        } => Some(eval_width(left, vals)?.checked_add(eval_width(right, vals)?)?),
         Value::Call { name, args, .. } => {
             let a = args
                 .iter()
@@ -927,21 +928,26 @@ pub(crate) fn eval_width(v: &Value, vals: &std::collections::HashMap<String, i64
                 "band" => a.into_iter().reduce(|x, y| x & y),
                 "bor" => a.into_iter().reduce(|x, y| x | y),
                 "bxor" => a.into_iter().reduce(|x, y| x ^ y),
-                "shl" => a.into_iter().reduce(|x, y| x << y),
-                "shr" => a.into_iter().reduce(|x, y| x >> y),
-                "mul" => a.into_iter().reduce(|x, y| x * y),
-                "div" => {
+                // checked 算术：溢出/非法移位量 → None（调用方回退 raw，不 panic）
+                "shl" | "shr" | "mul" | "sub" | "div" => {
                     let mut it = a.into_iter();
                     let mut acc = it.next()?;
                     for y in it {
-                        if y == 0 {
-                            return None;
-                        }
-                        acc /= y;
+                        acc = match name.as_str() {
+                            "shl" => u32::try_from(y).ok().and_then(|s| acc.checked_shl(s))?,
+                            "shr" => u32::try_from(y).ok().and_then(|s| acc.checked_shr(s))?,
+                            "mul" => acc.checked_mul(y)?,
+                            "sub" => acc.checked_sub(y)?,
+                            _ => {
+                                if y == 0 {
+                                    return None;
+                                }
+                                acc.checked_div(y)?
+                            }
+                        };
                     }
                     Some(acc)
                 }
-                "sub" => a.into_iter().reduce(|x, y| x - y),
                 _ => None,
             }
         }

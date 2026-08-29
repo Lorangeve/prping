@@ -15,10 +15,10 @@ global:
 
 # recipe: 按顺序发送多个 .pkt；每步可覆盖 wait/params，extract 从回包取值写 global
 recipe:
-- pkg: recipe_query.pkt
+- packet: recipe_query.pkt
   wait: 1
   extract:
   - name: tid
     from: reply.dns.id
     as: hex
-- pkg: recipe_query.pkt
+- packet: recipe_query.pkt

@@ -33,14 +33,14 @@
     - `socket.rs` — raw socket 基础设施（`create_icmp_socket`/`create_tcp_socket`/`create_udp_socket`/`set_ttl`/`icmp_offset_v4`/`raw_socket_error`）
     - `format.rs` — 随机数（`rand_u16`/`rand_u32`）、载荷填充（`echo_fill`）、时间戳（`unix_ts`）、字节格式化（`format_bytes`）、UDP 触发协议（`udp_receive_trigger`）
     - `interrupt.rs` — Ctrl+C 中断标志（`interrupted`/`set_interrupted`/`reset_interrupt`）+ `Run` 循环控制（按次数/时长/中断停止）
-  - **`engine/`** — 包构造引擎（LSP/pcap/转码/配方），子模块 `eng/`（display/lsp）、`pkg/`（send/recipe/sniffer/raw）
+  - **`engine/`** — 包构造引擎（LSP/pcap/转码/配方），子模块 `eng/`（display/lsp）、`pkg/`（send/recipe/sniffer/raw/listen/listen_raw）
   - **`stats.rs`** — 统计收集（min/max/avg/stddev/percentile/jitter）+ 直方图计算/渲染 + JSON/文本输出
   - **`drive.rs`** — `Probe` trait + 统一 ping 循环骨架（间隔/预热/统计/JSONL/收尾），icmp/tcp/udp/latency 共用
   - **`output.rs`** — 终端颜色（termcolor）+ 服务端连接日志 + 缩进工具函数（`indent`/`spaces`/`pad_to`）
-  - **`manual.rs`** — `--help-pkg` 手册分页渲染
+  - **`manual.rs`** — `document` 子命令的手册分页渲染（顶层 `--help-pkg` 已废弃）
 - **终端颜色**: [termcolor](https://github.com/BurntSushi/termcolor)，颜色函数统一在 `output.rs`（客户端与服务端一致）
 - **直方图**: 默认 ASCII `#`（内置）；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图与 Braille 散点时间线（非 tty 自动剥离 ANSI）；`-H` 支持桶数或逗号分隔阈值（ms）
-- **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en-US.yml` + `locales/zh-CN.yml`，自动检测 `$LANG` 或 `--lang`
+- **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en-US.yml` + `locales/zh-CN.yml`，自动检测 locale：`--lang` 显式指定优先；全平台统一 `$LANG` 优先（如 `en_US.UTF-8` → en-US）；macOS/Windows 在 `$LANG` 缺失时用系统 UI 语言兜底（macOS 系统设置 → 语言与地区，经 `CFLocaleCopyCurrent`）；未知 locale 回退英文
 - **信号处理**: Ctrl+C 优雅退出 — Unix `libc::signal` / Windows `kernel32::SetConsoleCtrlHandler`（首次停止输出统计、再次强制退出）；`--json` 模式在 Unix 运行期关 stdin tty 的 `ECHOCTL` 隐藏终端回显的 `^C`（退出时恢复）
 - **DNS 解析**: `smol::unblock` + `std::net::ToSocketAddrs`，统一在 `util/dns.rs`（`resolve_vec` 返回全部、`resolve` 取首个；解析横幅 `util::print_resolving`）
 - **ping 循环驱动器**: icmp/tcp/udp/latency 共用 `drive.rs::drive`（间隔/预热/统计/JSONL/收尾），各模式实现 `Probe` trait 只做「一次探测」与人读行
@@ -115,15 +115,15 @@ prping bandwidth [OPTIONS] HOST:PORT Bandwidth test（-l 缺省 8k；--parallel 
 prping server ADDR:PORT     Server（同时服务 latency/bandwidth；-v 抓包 dissect；-a 全帧抓包显示所有可见帧，需显式 -v；--filter 表达式过滤帧，需显式 -a）
 prping trace [OPTIONS] HOST[:PORT] Traceroute（ICMP echo 默认；带端口自动 TCP SYN（无 --tcp 标志）；-u/--udp 经典 UDP 33434 起递增；-m 最大跳数 / -d 免 DNS / --json）
 prping engine [OPTIONS] FILE.pkt|.pktl  引擎：分析/LSP/--ls/--hex/--pcap/配方概览（无扩展名参数自动定位 pktl：先 `<arg>.pktl`，再同名文件夹 `<arg>/<arg>.pktl`；--ls 自动分页）
-prping packet [OPTIONS] FILE.pkt|.pktl [HOST:PORT]  构建发送/配方执行（--raw/--wait/--fuzz/--out）
+prping packet [OPTIONS] FILE.pkt|.pktl [HOST:PORT]  构建发送/配方执行（--raw/--wait[SECS]/--fuzz/--out；裸 --wait = 持续监听回显，--wait --raw = 链路层监听按应答模板应答）
 prping document [SECTION]   使用手册（全文 / 章节跳转）
 prping -s ADDR|IFACE ...    指定源地址/网卡（测量子命令内）
 顶层 --version / --lang（任意位置）由 main() pre-scan 处理，不占子命令位
 ```
 每个子命令的选项集只含该模式生效的选项（结构性互斥）：ping 含 `-u/-l/-g/-p/-m`，
 latency 含 `-u/-l/-r/-g/-p`，bandwidth 含 `-u/-l/-r/--parallel`，trace 含 `-m/-d`，
-engine/packet 含引擎选项（`--lsp/--ls/--hex/--pcap` 互斥且不带文件；`--to-pkt/--structured/--skip/--limit` 需 `--pcap`；`--iface` 需 `--raw`）。
-`validate_*` 只留真校验：`--json`×`-p/-g/-H`、`-m`×其他 ping 选项、非法 `-H`/`-n`、
+engine/packet 含引擎选项（`--lsp/--ls/--hex/--pcap` 互斥且不带文件；`--to-pkt/--structured/--skip/--limit` 需 `--pcap`；`--iface` 需 `--raw`；`--json`——engine 仅分析模式、packet 发送/配方模式）。
+`validate_*` 只留真校验：`--json`×`-p/-g/-H`、engine `--json`×`--ls/--hex/--pcap/--lsp`、packet `--json`×裸 `--wait`（持续监听）、`-m`×其他 ping 选项、非法 `-H`/`-n`、
 server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 
 ## 功能完成度
@@ -145,6 +145,7 @@ server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 15. 路由跟踪 — `-t`/`--traceroute`（ICMP echo + 递增 TTL 逐跳）及 TCP SYN（带端口自动）/ `--udp` 经典变体（细节 → `docs/claude-rules/measure.md`）
 16. 配方 `.pktl` — 多个 `.pkt` 按顺序发出，global 跨步骤存储 / extract / wait / raw 步骤开关 / on_error（细节 → `docs/claude-rules/engine.md`）
 17. 反向 DNS — `--reverse-dns`（`-R`）对探测结果中的 IP 地址进行反向 DNS 查询，`-R` 启用反向查询（增加延迟），输出中显示域名（如 `192.168.1.1 (gateway.example.com)`）
+18. engine/packet `--json` — `engine FILE.pkt/.pktl --json` 输出单个 JSON 文档（.pkt 结构化分析：sources→packets→层栈字段/hex/警告/raw_only；.pktl 配方概览：globals/params/steps/extract）；`packet FILE.pkt/.pktl --json` 输出 JSONL（每包一行 + 汇总行；配方模式含 step/extract 行）
 
 ## 协议学习资源
 

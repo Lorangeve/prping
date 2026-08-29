@@ -28,6 +28,7 @@ pub mod dissect;
 pub mod eval;
 pub mod ir;
 pub mod lexer;
+pub mod matchpred;
 pub mod parser;
 pub mod proto;
 pub mod registry;
@@ -44,11 +45,16 @@ pub use registry::{Params, builtin_doc, builtin_docs, is_builtin, parse_param_va
 
 pub use dissect::{DissectReport, dissect};
 pub use eval::{
-    Globals, PacketSource, eval_extract_value, eval_sniffer_value, eval_sniffer_value_with_globals,
-    resolve, resolve_sources, resolve_sources_with_globals, resolve_sources_with_params,
-    resolve_with_globals, resolve_with_params,
+    Globals, PacketSource, ReplyAccess, eval_extract_value, eval_sniffer_value,
+    eval_sniffer_value_with_globals, resolve, resolve_sources, resolve_sources_with_globals,
+    resolve_sources_with_params, resolve_sources_with_reply, resolve_with_globals,
+    resolve_with_params,
 };
 pub use ir::{BuildResult, Layer, PacketSpec};
+pub use matchpred::{
+    FVal, Matcher, field_names, layer_field, layer_field_bytes, layer_name, layer_raw_bytes,
+    reply_field_names, sniffer_match, sniffer_match_with,
+};
 pub use semantic::{
     Def, LibExport, Module, ResolvedImport, default_libs, lib_exports, parse_file,
     parse_file_with_libs, parse_source_at, parse_source_at_with_libs, parse_str,

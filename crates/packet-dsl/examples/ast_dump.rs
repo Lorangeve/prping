@@ -3,8 +3,9 @@ use packet_dsl::parser::parse_ast;
 
 fn main() {
     let src = match std::env::args().nth(1) {
-        Some(path) => std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("读取 {path} 失败：{e}")),
+        Some(path) => {
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取 {path} 失败：{e}"))
+        }
         None => r#"# 包名 = b
 import a { a, b }
 export:

@@ -49,13 +49,7 @@ pub fn read_pcap(path: &Path) -> anyhow::Result<(u16, bool, Vec<PcapRecord>)> {
         r.read_exact(&mut b)?;
         Ok(b)
     }
-    let u16v = |b: &[u8]| {
-        if le {
-            u16::from_le_bytes([b[0], b[1]])
-        } else {
-            u16::from_be_bytes([b[0], b[1]])
-        }
-    };
+    // 全局头 network 是 4 字节字段，只用 u32v（不再需要 u16v）
     let u32v = |b: &[u8]| {
         if le {
             u32::from_le_bytes([b[0], b[1], b[2], b[3]])
@@ -64,8 +58,10 @@ pub fn read_pcap(path: &Path) -> anyhow::Result<(u16, bool, Vec<PcapRecord>)> {
         }
     };
     let hdr = rd(&mut r, 20)?; // version_major(2) minor(2) thiszone(4) sigfigs(4) snaplen(4) network(4)
-    let _linktype = u32v(&hdr[16..20]);
-    let network = u16v(&hdr[16..18]) as u16;
+    // network 是 4 字节字段：此前按 u16 只读低 2 字节，大端文件 linktype 恒为 0
+    let network = u32v(&hdr[16..20]) as u16;
+    // snaplen 用于约束记录长度（防畸形文件超分配）
+    let snaplen = u32v(&hdr[8..12]) as usize;
     let mut records = Vec::new();
     loop {
         let mut rec = [0u8; 16];
@@ -78,6 +74,16 @@ pub fn read_pcap(path: &Path) -> anyhow::Result<(u16, bool, Vec<PcapRecord>)> {
         let ts_frac = u32v(&rec[4..8]);
         let incl_len = u32v(&rec[8..12]) as usize;
         let _orig_len = u32v(&rec[12..16]);
+        // incl_len 无上限校验时，伪造文件可触发数 GB 分配（OOM abort）——
+        // 与 snaplen 对齐并设 64 MiB 硬上限（snaplen=0 时兜底 64 MiB）
+        let cap = if snaplen == 0 {
+            64 * 1024 * 1024
+        } else {
+            snaplen.min(64 * 1024 * 1024)
+        };
+        if incl_len > cap {
+            anyhow::bail!("pcap 记录长度 {incl_len} 超过上限 {cap}（文件可能已损坏）");
+        }
         let data = rd(&mut r, incl_len)?;
         records.push(PcapRecord {
             ts_sec,

@@ -25,6 +25,7 @@ common:
   connecting_to: 'Connecting to '
   from: 'from '
   timeout: Request timed out.
+  send_failed: 'send failed'
   connect_failed: 'connect failed: %{error}'
   dest_unreachable: Destination Host Unreachable.
   ttl_expired: TTL expired in transit.
@@ -40,6 +41,7 @@ stats:
   sent_received: Sent = %{sent}, Received = %{received}, Lost = %{lost} (%{pct}% loss),
   min_max_avg: Minimum = %{min}ms, Maximum = %{max}ms, Average = %{avg}ms, StdDev = %{stddev}ms
   percentiles: P50 = %{p50}ms, P95 = %{p95}ms, P99 = %{p99}ms
+  percentile_window_note: '(percentiles/histogram/timeline based on the most recent %{n} samples)'
   jitter: Jitter = %{avg}ms (max %{max}ms)
   latency_dist: 'Latency distribution:'
 bandwidth:
@@ -51,6 +53,9 @@ bandwidth:
   bytes_human: '(%{bytes})'
   connections: 'Connections = %{count}'
   bandwidth: Bandwidth = %{mbps} Mbps
+  udp_send_error: 'UDP send failed'
+  conn_error: 'connection failed'
+  conn_failures: '%{n} connection(s) failed — results are partial'
   progress:
     packets: "%{done}/%{total} pkts (%{done_bytes}/%{total_bytes})  %{mbps} Mbps"
     bytes: "%{done_bytes}/%{total_bytes}  %{mbps} Mbps"
@@ -80,6 +85,119 @@ engine:
   note_fuzz: 'note: fuzz mode — unset fields randomized'
   note_wait_reply: 'note: waiting up to %{secs}s for a matching reply'
   note_wait_recipe: 'note: waiting up to %{secs}s for replies (per-step wait: overrides)'
+  listen_requires_sniffer: 'listen mode requires a `sniffer:` section in the .pkt (match rule for incoming datagrams)'
+  listen_binding: 'listening on %{addr} — echo datagrams matching the sniffer rule (Ctrl+C to stop)'
+  listen_echo_fail: 'echo to %{peer} failed: %{err}'
+  listen_matched: '✓ matched %{bytes} B from %{peer}'
+  listen_ignored: '- ignored %{bytes} B from %{peer}'
+  listen_done: 'listen finished: %{matched}/%{total} datagrams matched'
+  listen_no_port: 'cannot derive listen port from the packet (need a udp/tcp dport or an explicit ADDR:PORT)'
+  listen_multi_dport: 'packet exports use different destination ports (%{ports}); specify ADDR:PORT explicitly'
+  listen_send_phase_failed: 'send phase failed — continuing to listen (waiting for the peer): %{error}'
+  listen_bind_fail: 'failed to bind %{addr}: %{err}'
+  listen_raw_requires_reply: '--wait --raw needs a reply template: the .pkt default export (use reply("layer","field") to read fields of the received frame)'
+  listen_raw_binding: 'raw listen on %{iface} — match frames with the sniffer rule, inject the reply template on a hit (Ctrl+C to stop; root/Npcap required)'
+  listen_raw_matched: '✓ matched %{frame} B — replied %{sent} B (%{source})'
+  listen_raw_done: 'raw listen finished: %{matched}/%{total} frames matched'
+  listen_recipe_udp: 'listening on %{addr}'
+  listen_recipe_raw: 'link-layer listen on %{iface}'
+  listen_recipe_banner: '%{where_str} — %{rule} (Ctrl+C to stop; recipe continues on match)'
+
+  recipe_no_cli_wait: 'recipe does not support a bare CLI `--wait` (continuous listen): use a step-level `wait:` with no value (see examples/dns_trigger/)'
+  recipe_step_failed_stop: 'recipe %{file}: step %{step}/%{total} failed (on_error: stop)'
+  recipe_parse_fail: 'failed to parse %{file}: %{err}'
+  recipe_listen_error: '%{file} listen interrupted: %{err}'
+  recipe_listen_interrupted: 'listen interrupted: `wait:` continuous listen stopped by Ctrl+C (no packet matched)'
+  recipe_eval_fail: 'failed to evaluate %{file}: %{err}'
+  recipe_send_error: '%{file} send interrupted: %{err}'
+  recipe_bare_only: 'step %{file}: all packets are bare layers (no transport/raw outer), cannot send'
+  recipe_timeout_send: '⚠ wait timeout (%{secs}s) — sending on_timeout packet %{file}'
+
+  recipe_timeout_retry: '⏱ wait timeout (%{secs}s) — retrying %{attempt}/%{total} (resend this step)'
+  parse_retry_count: '`on_timeout: retry` count needs a positive integer, got `%{n}`'
+  parse_retry_zero: '`on_timeout: retry` count must be >= 1'
+  recipe_on_timeout_fail: 'failed to send the on_timeout packet: %{err}'
+  recipe_extract_no_sent: 'no packet was sent in this step; cannot extract from `sent.` sources'
+  recipe_extract_no_reply: 'no reply received; cannot extract %{n} extract(s) (sniffer/echo did not match)'
+  recipe_extract_failed: 'extract failed (see above)'
+  recipe_step_failed_summary: '✗ step %{step}/%{total} failed (%{n} issues)'
+  recipe_failed_total: 'recipe %{file}: %{n} step(s) failed'
+
+  recipe_unknown_layer: 'recipe line %{line}: unknown %{kind} layer `%{layer}` (available: eth/arp/ipv4/ipv6/icmp/tcp/udp/http/dns/raw)'
+  recipe_unknown_field: 'recipe line %{line}: layer %{layer} has no field `%{field}` (available: %{names})'
+  recipe_peer_field_only: 'recipe line %{line}: `reply.peer.` only supports ip / port, got `%{field}`'
+  recipe_collect_params_fail: 'recipe %{file}: step %{step}/%{total} %{pkt}: %{err}'
+
+  parse_as_only: '`as` only supports int / hex / str / bytes, got `%{other}`'
+  parse_read_fail: 'failed to read the recipe (%{path}): %{err}'
+  parse_global_dup: 'global `%{name}` declared twice'
+  parse_pkg_renamed: 'step key `pkg:` was renamed to `packet:` — write `- packet: FILE`'
+  parse_step_syntax: 'step item syntax error: `%{rest}` (expected `- packet: FILE` or a bare filename)'
+  parse_step_no_path: 'step is missing the .pkt file path'
+  parse_list_outside: 'list item outside of global:/recipe:'
+  parse_expect_section: 'expected a `global:`/`recipe:` header or a `- ` list item, got `%{trimmed}`'
+  parse_global_only_init: 'global items only support `init:`, got `%{key}:`'
+  parse_init_after_name: '`init:` must follow `- name: <name>`'
+  parse_init_inline_conflict: 'global `%{name}` already has an inline init (`- %{name}=...`); cannot add an `init:` line'
+  parse_option_after_step: 'option line must follow a `- packet:` step'
+  parse_extract_only: 'extract items only support name/from/as, got `%{other}`'
+  parse_wait_value: '`wait` needs no value (infinite wait) or seconds (a number), got `%{val}`'
+  parse_wait_finite: '`wait` needs a finite number of seconds (not NaN/infinity), got `%{val}`'
+  parse_delay_value: '`delay` needs seconds (a number), got `%{val}`'
+  parse_delay_finite: '`delay` needs a finite number of seconds (not NaN/infinity), got `%{val}`'
+  parse_delay_negative: '`delay` cannot be negative'
+  parse_on_timeout_path: '`on_timeout` needs a .pkt file path'
+  parse_on_error_value: '`on_error` only supports stop / continue, got `%{other}`'
+  parse_unknown_option: 'unknown step option `%{other}:` (supported: packet/wait/on_timeout/delay/raw/params/extract/on_error)'
+  parse_indent_outside: 'indented line outside of global:/recipe:'
+  parse_no_steps: 'recipe %{path}: `recipe:` needs at least one step'
+  parse_extract_no_name: 'extract item is missing `name:`'
+  parse_extract_no_from: 'extract item `%{name}` is missing `from:`'
+  parse_kv_syntax: 'expected `key: value`, got `%{s}`'
+  parse_kv_empty_key: 'the key cannot be empty'
+  parse_nonempty: '`%{what}` cannot be empty'
+  parse_global_name_missing: 'global item `name:` is missing the name'
+  parse_global_bare_missing: 'global item is missing the name: `%{rest}`'
+  parse_global_init_empty: 'global item `%{name}` has an empty init value'
+  parse_global_item_syntax: 'global item syntax error: `%{rest}` (expected `- name: <name>` / `- <name>` / `- <name>=<value>`)'
+  parse_global_name_missing2: 'global item is missing the name'
+  parse_peer_field_only: '`reply.peer.` only supports ip / port, got `%{field}`'
+  parse_expr_fail: '`from` expression parse failed: %{err}'
+  parse_params_value: '`params` needs `k=v,k2=v2`, got `%{v}`'
+
+  parse_count_value: '`count` needs a positive integer (times to send), got `%{val}`'
+  parse_count_zero: '`count` must be >= 1'
+  parse_raw_value: '`raw` needs true / false or an interface name'
+  parse_raw_iface_empty: '`raw` interface name cannot be empty'
+  parse_str_no_quote: 'string is missing the closing quote: `%{s}`'
+  parse_hex_byte_bad: 'invalid hex byte `%{part}`'
+  parse_byte_out_of_range: 'byte list element out of 0..255: `%{part}`'
+  parse_byte_list_bad: 'invalid byte list element `%{part}`'
+  parse_hex_bad: 'invalid hex `%{s}`'
+  parse_init_value_bad: 'cannot parse `init` value `%{s}` (supported: "string" / decimal / 0x hex / [0x01, 0x02] byte list)'
+
+  parse_err_prefix: 'recipe line %{line}: %{msg}'
+  recipe_peer_only_listen: 'recipe line %{line}: `reply.peer.%{field}` is only available in a listen step (UDP listen)'
+  recipe_no_layer: 'recipe line %{line}: %{src} has no %{layer} layer (cannot extract %{name})'
+  recipe_no_field: 'recipe line %{line}: layer %{layer} has no field %{field}'
+  recipe_not_numeric: 'recipe line %{line}: field %{layer}.%{field} is not numeric (%{val}); use as: str / bytes'
+  recipe_expr_fail: 'recipe line %{line}: `from` expression evaluation failed: %{err}'
+  recipe_src_label_sent: 'sent packet'
+  recipe_src_label_reply: 'reply'
+  recipe_as_convert_fail: 'recipe line %{line}: `as` conversion for `%{name}` failed: %{msg} (original value: %{val})'
+  recipe_as_int: 'need an integer (Int/Hex)'
+  recipe_as_hex: 'need a non-negative integer (Int/Hex)'
+  recipe_as_str: 'need a string or integer'
+  recipe_as_bytes: 'to convert a number to bytes, wrap it in the expression with primitives like be16()/u8()'
+  recipe_extract_needs_wait: 'step has reply-sourced extract but no wait (`sent.` sources take the sent packet and need no wait; reply sources need this step`s `wait:` (no value or seconds) or `--wait`)'
+  listen_template_note: 'note: reply template — `reply(layer,field)` needs the --wait --raw listen context, packets not expanded (engine only parses, does not send)'
+  raw_ip4_need_target: 'raw IPv4 send needs a target address (HOST or the packet IP-layer dst)'
+  raw_ip4_not_v4: 'target is not an IPv4 address: %{ip}'
+  raw_ip4_send_fail: 'raw IPv4 send failed: %{err}'
+  listen_raw_unknown_iface: 'unknown interface `%{iface}`'
+  listen_raw_bad_iface: 'invalid interface name: `%{iface}`'
+  listen_raw_no_devices: 'no usable capture devices (need root/admin, or Npcap installed)'
+  listen_raw_threads_exited: 'all capture threads exited (device error), listen stopped'
   note_bare_export: 'note: bare layer export (no TCP/UDP transport, no eth/ipv4/ipv6 outer layer) cannot be sent, skipped — --eng display only'
   note_bare_export_short: 'note: bare layer export, skipped'
   note_raw_fallback: 'note: no TCP/UDP transport — sending full packet via raw sockets (%{hint})'
@@ -125,6 +243,7 @@ errors:
   lsp_requires_eng: "--lsp only applies with --eng"
   raw_requires_pkg: "--raw only applies with --pkt"
   iface_requires_raw: "--iface only applies with --pkt --raw"
+  listen_conflict: "continuous listen (bare --wait) cannot be combined with --fuzz/--out (receives and echoes; --raw = link-layer listen, pairs with --iface)"
   params_requires_eng_pkg: "--params only applies with --eng or --pkt"
   params_format: "--params expects k=v format: `%{value}`"
   global_requires_eng_pkg: "--global only applies with --eng or --pkt"
@@ -136,6 +255,8 @@ errors:
   eng_sub_requires_eng: "--ls / --hex / --pcap only apply with --eng"
   eng_sub_conflict_lsp: "--ls / --hex / --pcap cannot be combined with --lsp"
   eng_sub_no_file: "--ls / --hex / --pcap do not take a file argument"
+  eng_json_sub_conflict: "--json is only valid for FILE.pkt/.pktl analysis (cannot combine with --ls/--hex/--pcap/--lsp)"
+  pkt_json_listen_conflict: "--json cannot be combined with continuous listen (bare --wait)"
   conflict_engine_mode: "%{flag} cannot be combined with: %{opts}"
   eng_requires_file: "--eng needs a .pkt file to analyze (or --eng --lsp)"
   eng_lsp_no_file: "--lsp does not take a file argument"
@@ -172,9 +293,9 @@ errors:
   engine_mode_required: 'no mode given: use --eng / --pkt / --ls / --hex / --pcap'
   help_pkg_not_found: |-
     no manual section matches "%{section}"
-    use `prping --help-pkg` to list the table of contents:
+    use `prping document` to list the table of contents:
   help_pkg_ambiguous: "%{count} sections match; use the number or a more specific title:"
-  help_pkg_toc_hint: 'table of contents (use `prping --help-pkg <number-or-title>` to jump):'
+  help_pkg_toc_hint: 'table of contents (use `prping document <number-or-title>` to jump):'
   conflict_v4_v6: "-4 and -6 cannot be used together"
   conflict_server_target: "-s (server mode) cannot be combined with a target HOST[:PORT]"
   conflict_server_mode: "-s (server mode) cannot be combined with client test options: %{opts}"
@@ -184,7 +305,7 @@ errors:
   receive_requires_latency_bandwidth: "-r requires -b (bandwidth) or -l (latency) with HOST:PORT"
   lib_requires_eng_pkg: "--lib requires --eng or --pkt"
   ambiguous_prefix: "ambiguous subcommand prefix '%{token}': matches %{candidates}"
-  legacy_host_hint: "unrecognized subcommand '%{host}' — prping now uses subcommands; try: prping ping %{host} (migration guide: prping --help-pkg)"
+  legacy_host_hint: "unrecognized subcommand '%{host}' — prping now uses subcommands; try: prping ping %{host} (migration guide: prping document)"
   latency_requires_port: latency requires HOST:PORT
 cmd:
   ping: Ping a host (ICMP; TCP with a port, UDP with -u, MTU probe with -m)
@@ -228,6 +349,7 @@ help:
       Recipe globals injected into the global store (k=v,k2=v2; read via global("name") in the
       script; with a .pktl recipe this seeds global: declarations, -g overrides init)
     wait: Wait up to SECS for a matching reply (like scapy sr1), print RTT and dissect it (with --pkt)
+    listen: 'listen mode: match incoming UDP datagrams against the .pkt sniffer rule and echo them (server side of a pktlang conversation; HOST:PORT is the listen address, derived from the packet dport when omitted)'
     fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkt)
     out: Save built packets to a pcap file (like scapy wrpcap, with --pkt)
     ls: List all builtin layer functions with fields and auto behavior (with --eng)
@@ -245,7 +367,7 @@ help:
     pretty: Render graphs with ploot (Unicode/Braille)
     graph: Print latency timeline graph (combine with -p for ploot rendering)
     version: Show version
-    help_pkg: Full manual (paged); --help-pkg SECTION jumps to a chapter (number or title)
+    help_pkg: Full manual (paged); document SECTION jumps to a chapter (number or title)
   usage_ping: 'prping ping [OPTIONS] <HOST[:PORT]>'
   usage_latency: 'prping latency [OPTIONS] <HOST:PORT>'
   usage_bandwidth: 'prping bandwidth [OPTIONS] <HOST:PORT>'
@@ -287,15 +409,16 @@ help:
       prping packet --raw --wait 2 file.pkt 8.8.8.8
       prping packet arp_request.pkt --raw   # 链路层帧（ARP 等）：目标可省略
       prping packet arp_request.pkt --raw   # link-layer frame (ARP etc.): target optional
+      prping packet --wait server.pkt 127.0.0.1:5353      # bare --wait: continuous listen, echo on match
   overview: |-
     prping — ping, latency, bandwidth measurement utility
 
     Subcommands: ping (ICMP/TCP/UDP/MTU probe), latency, bandwidth,
     server, trace (traceroute), engine (packet analysis) and packet.
-  usage: 'prping COMMAND [OPTIONS] ...   (prping --help-pkg for the full manual)'
+  usage: 'prping COMMAND [OPTIONS] ...   (prping document for the full manual)'
   mode_guide: |-
     Subcommands can be abbreviated to any unique prefix (e.g. `prping e FILE.pkt` → engine).
-    Detailed help: `prping COMMAND --help` — full manual: `prping --help-pkg`.
+    Detailed help: `prping COMMAND --help` — full manual: `prping document`.
   usage_line: |-
     Help: prping COMMAND --help   (prping --help lists all commands)
        ping        ICMP ping / TCP ping (port) / UDP ping (-u) / MTU probe (-m)

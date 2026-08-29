@@ -322,11 +322,13 @@ impl Tpl {
                 }
             } else if g == 0
                 && sep_is_colon
-                && input.len() >= 2
-                && input[0] == b':'
-                && input[1] == b':'
+                && *pos + 1 < input.len()
+                && input[*pos] == b':'
+                && input[*pos + 1] == b':'
             {
-                // 输入开头 `::` → 压缩（组 0 为填充）
+                // 输入（当前游标处）`::` → 压缩（组 0 为填充）。此前误用
+                // 绝对 input[0]/input[1]：模板在重复组前有字面项/说明符时
+                // （如 `ip={3:%x:}` 配 `ip=::1`）压缩失效或误触发。
                 fill_pos = Some(0);
                 compressed = true;
                 *pos += 2;

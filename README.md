@@ -218,10 +218,10 @@ LSP / pcap）集成在 prping 同一 binary 中（与测量模式互斥）。
 
 ## 使用手册
 
-`prping --help-pkg` 输出完整双语使用手册（[docs/manual-zh.md](docs/manual-zh.md) /
+`prping document` 输出完整双语使用手册（[docs/manual-zh.md](docs/manual-zh.md) /
 [docs/manual-en.md](docs/manual-en.md)，随 `--lang` 选择）：26 章覆盖全部模式/选项/
 统计（含 jitter）/JSON/MTU/`-s`/退出码/FAQ/示例。长文在 tty 下经 `less` 自动分页，
-文档头部有目录，`prping --help-pkg <编号或标题>` 直接跳转章节学习。
+文档头部有目录，`prping document <编号或标题>` 直接跳转章节学习。
 
 ## 示例
 

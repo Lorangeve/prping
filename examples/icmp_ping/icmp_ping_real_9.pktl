@@ -34,7 +34,7 @@ global:
 - name: seq9      # 步骤 9 的序列号
 
 recipe:
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id1
@@ -43,7 +43,7 @@ recipe:
   - name: seq1
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id2
@@ -52,7 +52,7 @@ recipe:
   - name: seq2
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id3
@@ -61,7 +61,7 @@ recipe:
   - name: seq3
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id4
@@ -70,7 +70,7 @@ recipe:
   - name: seq4
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id5
@@ -79,7 +79,7 @@ recipe:
   - name: seq5
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id6
@@ -88,7 +88,7 @@ recipe:
   - name: seq6
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id7
@@ -97,7 +97,7 @@ recipe:
   - name: seq7
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id8
@@ -106,7 +106,7 @@ recipe:
   - name: seq8
     from: reply.icmp.seq
     as: int
-- pkg: icmp_ping_step.pkt
+- packet: icmp_ping_step.pkt
   wait: 1
   extract:
   - name: id9

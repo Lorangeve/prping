@@ -40,5 +40,5 @@ global:
   init: 0x5678
 
 recipe:
-- pkg: dns_query.pkt      # 步骤 1：DNS 查询请求
-- pkg: dns_response.pkt   # 步骤 2：DNS 查询响应
+- packet: dns_query.pkt      # 步骤 1：DNS 查询请求
+- packet: dns_response.pkt   # 步骤 2：DNS 查询响应

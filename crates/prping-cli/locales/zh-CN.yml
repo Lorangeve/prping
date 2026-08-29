@@ -88,6 +88,8 @@ errors:
   lsp_requires_eng: "--lsp 只能与 --eng 一起使用"
   raw_requires_pkg: "--raw 只能与 --pkt 一起使用"
   iface_requires_raw: "--iface 只能与 --pkt --raw 一起使用"
+  listen_conflict: '持续监听（--wait 无值）不能与 --fuzz/--out 组合（持续接收并回显；--raw = 链路层监听，可配合 --iface 选网卡）'
+  listen_raw_no_target: '--wait --raw（链路层监听）不需要 ADDR:PORT（帧按帧内 MAC/IP 决定去向）'
   params_requires_eng_pkg: "--params 只能与 --eng 或 --pkt 一起使用"
   params_format: "--params 需要 k=v 格式: `%{value}`"
   global_requires_eng_pkg: "--global 只能与 --eng 或 --pkt 一起使用"
@@ -99,6 +101,11 @@ errors:
   eng_sub_requires_eng: "--ls / --hex / --pcap 只能与 --eng 一起使用"
   eng_sub_conflict_lsp: "--ls / --hex / --pcap 不能与 --lsp 一起使用"
   eng_sub_no_file: "--ls / --hex / --pcap 不接受文件参数"
+  eng_json_sub_conflict: "--json 仅对 FILE.pkt/.pktl 分析模式有效（不能与 --ls/--hex/--pcap/--lsp 组合）"
+  pkt_json_listen_conflict: "--json 不能与持续监听（--wait 无值）组合"
+
+  pkt_count_zero: '--count 必须 ≥ 1（每个包重复发送次数）'
+  listen_count_conflict: '持续监听（--wait 无值）不支持 --count > 1（监听不发包）'
   to_pkt_requires_pcap: "--to-pkt 只能与 --pcap 一起使用"
   structured_requires_to_pkt: "--structured 只能与 --to-pkt 一起使用"
   skip_limit_requires_to_pkt: "--skip / --limit 只能与 --to-pkt 一起使用"
@@ -113,6 +120,10 @@ errors:
   bandwidth_requires_port: 带宽测试需要 HOST:PORT
   invalid_count: '无效的次数: %{value}（使用 N 或 Ns）'
   invalid_histogram: '无效的直方图参数: %{value}（使用 N 或 t1,t2,...）'
+  invalid_port: '无效的端口: %{value}'
+  ping_port_no_size: 'ping %{target} 带端口时不能使用 -l（负载大小 -l 仅对无端口的 ICMP ping 有效；带端口请用 latency -l 或 bandwidth -l）'
+  parallel_zero: '--parallel 必须 >= 1'
+  count_zero_bandwidth: '带宽测试次数（-n）必须 >= 1（缺省 1000；时长模式用 -n Ns）'
   udp_size_clamped: UDP 负载已截断为 %{max} 字节（请求 %{size}）
   interval_min: 间隔已截断为最小 1ms（请求 %{value}s）
   parallel_udp_ignored: UDP 模式忽略 --parallel（UDP 带宽为单连接）
@@ -146,6 +157,7 @@ errors:
   conflict_json_pretty: "--json 与 -p/--pretty 不能同时使用"
   conflict_json_graph: "--json 与 -g/--graph 不能同时使用"
   conflict_json_histogram: "--json 与 -H/--histogram 不能同时使用"
+  pkt_json_summary_conflict: "--json 与 --summary 不能同时使用（--summary 会输出人读文本，破坏 JSONL 契约）"
   receive_requires_latency_bandwidth: "-r 需要配合 -b（带宽测试）或 -l + HOST:PORT（延迟测试）使用"
   capture_all_requires_verbose: "--capture-all 需要配合 --verbose 使用"
   filter_requires_capture_all: "--filter 需要配合 --capture-all 使用"
@@ -193,7 +205,10 @@ help:
     global: >-
       注入配方全局存储的键值（k=v,k2=v2；脚本内用 global("name") 读取；配合 .pktl
       配方时作为 global: 声明的初始值，-g 覆盖 init）
-    wait: 发送后等待最多 SECS 秒的匹配应答（对标 scapy sr1），打印 RTT 并反解展示（配合 --pkt）
+    pkt_count: 每个包重复发送次数（配方步骤 `count:` 覆盖；--wait 无值不支持）
+    wait: >-
+      等待/监听模式：`--wait SECS` = 发送后等一个匹配应答（对标 scapy sr1），打印 RTT 并反解展示；
+      `--wait`（无值）或负数（如 `--wait=-2`）= 无限等待/持续监听（服务端，命中回显/按应答模板应答，Ctrl+C 退出）
     fuzz: 发送前把未填字段全部随机化（对标 scapy fuzz()，配合 --pkt）
     out: 把构建的包存成 pcap 文件（对标 scapy wrpcap，配合 --pkt）
     summary: 摘要模式：只打印一行结果（包数、目标、发送/失败数），隐藏逐包详情
@@ -221,7 +236,7 @@ help:
     capture_all: 抓取并显示所有可见帧（ARP/ICMP/广播/出向），而不只是发往监听端口的流量（需 -v）
     capture_filter: 只显示匹配该 tcpdump 风格表达式的帧（需 -a）：arp/icmp/tcp/udp/ip/ip6、port N、host IP、and/or/not、括号——另支持 eng_lib 可反解协议（如 dns/http/quic_initial）。如 "arp or icmp"、"tcp port 53"、"dns"
     version: 显示版本号
-    help_pkg: 使用手册（分页）；--help-pkg 章节标题 跳转（编号或标题）
+    help_pkg: 使用手册（分页）；document 章节标题 跳转（编号或标题）
   usage_ping: 'prping ping [选项] <HOST[:PORT]>'
   usage_latency: 'prping latency [选项] <HOST:PORT>'
   usage_bandwidth: 'prping bandwidth [选项] <HOST:PORT>'

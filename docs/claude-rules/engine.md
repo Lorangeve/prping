@@ -107,20 +107,52 @@
     （回包 socket 须**先于发送打开**——回环/近零延迟下内核在 send() 内同步完成回包往返，
     发送后再开 socket 会把回包永久漏掉；`send_raw_bytes` 先 `open_raw_icmp4` 再发再等）；
     UDP 回读有 1s、TCP 有 2s 超时（无 wait 分支同样要有默认超时，否则测试挂起）。
-  - **sniffer 段（.pkt 回包校验）**：`sniffer:` + `- match icmp(type=0, id=id, seq=seq)`
-    列表（与 `export:` 同风格，多子句 = 任一命中）——`--wait` 时按声明匹配应答
-    （`pkg.rs::SnifferMatcher`：回包反解层字段 == 字面量常量、发包同层同名字段
-    `SentField`，或**值表达式**——原语/值函数/`params(...)`/字节列表，构建期
+  - **sniffer 段（.pkt 回包校验 / 监听规则）**：`sniffer:` + `- 谓词` 列表（与
+    `export:` 同风格，**顶层列表 = 隐式 OR**）——`--wait` 时按声明匹配应答、
+    裸 `--wait` 时作监听规则（服务端）。匹配器为 **packet-dsl `matchpred::Matcher`**（与
+    `#[rule]` 共享字段取值内核）：回包反解层字段 == 字面量常量、发包同层同名字段
+    `SentField`（`id=id`；**监听模式无发包，`allow_sent: false` 构建期报错**），
+    或**值表达式**——原语/值函数/`params(...)`/字节列表，构建期
     `eval_sniffer_value` 求值为字节后与回包字段**字节**比较，如
     `match icmp(id=myid(), seq=[0x00, 0x01])`，可复用同文件 `func ... -> bytes`；
-    匹配成功 `✓ reply matched: k=v ... (rtt)`，超时 `✗ no matching reply`）；
-    替代默认 DNS/ICMP 硬编码匹配。字段名与 `engine` 展示一致
-    （`sport`/`dport`/`type` 为 IR 字段 `src_port`/`dst_port`/`icmp_type` 别名；
-    每层支持字段静态校验，字面量按字段类型强转，`sniffer_match` 为公开测试/宿主
-    API（仅内置原语），`sniffer_match_with` 带模块 + 参数（支持值函数/`params`）；
-    默认 ICMP 匹配按发包 IP 族取期望回包类型（v4 type=0 / v6 type=129），防把
-    echo request 自身当回包；
-    仅配合 `--wait`，TCP 回显无独立字节故不适用）。
+    匹配成功 `✓ reply matched: k=v ... (rtt)`，超时 `✗ no matching reply`）。
+    **统一谓词**（与 `#[rule]` 同构）：`and(...)`/`or(...)`/`not(...)` 组合
+    （支持跨层 AND、取反）、层内 `ne(字段, 值)` 不等、`mask(0xc0)`/`startswith`/
+    `endswith`/`contains("...")` 字节谓词（层原始字节；proto 命中时作用于整个
+    报文）——见 `matchpred.rs`。字段名 = `matchpred::field_names`（与 `engine`
+    展示/配方 `extract` 共用；`sport`/`dport`/`type` 为 IR 字段
+    `src_port`/`dst_port`/`icmp_type` 别名；**字段集 = 反解层实际解析字段**，
+    如 dns 只有 `id`/`flags`——`opcode` 不独立解析不要列）；每层支持字段静态
+    校验，字面量按字段类型强转，`sniffer_match` 为公开测试/宿主 API（仅内置
+    原语），`sniffer_match_with` 带模块 + 参数（支持值函数/`params`）；
+    替代默认 DNS/ICMP 硬编码匹配（默认 ICMP 匹配按发包 IP 族取期望回包类型
+    v4 type=0 / v6 type=129，防把 echo request 自身当回包）；
+    仅配合 `--wait`，TCP 回显无独立字节故不适用。
+  - **裸 `--wait` 持续监听（pktlang 对话服务端）**：`pkg/listen.rs::listen_packets`——**发送段先行**
+    （文件有可发送的导出先发送再监听；含 `reply()` 叶子的应答模板不可发送跳过），绑定
+    CLI `HOST:PORT`（或按包内最外层 udp/tcp dport 推导，IPv6 包 → `[::]`），
+    循环接收 UDP 数据报，反解后按 .pkt 的 sniffer 规则匹配（`allow_sent:
+    false`）；命中**原样回显**给发送方并打印 `✓ matched ... from peer` +
+    反解展示，未命中忽略；Ctrl+C 优雅退出（读超时 200ms 轮询中断标志）并打印
+    匹配统计。与客户端 `--wait`（发送 + 同一规则匹配应答）配对即可让两个进程
+    用 export + sniffer 模拟通信（demo → `examples/sniffer_chat/README.md`）。
+  - **`--wait --raw` 链路层监听完整版**：`pkg/listen_raw.rs::listen_raw_packets`（同样发送段先行，
+    应答模板自动跳过）
+    ——持续接收**完整帧**（Linux 默认 AF_PACKET 单 socket 全接口/指定 `--iface`，
+    复用 `util::socket::open_af_packet`/`af_packet_promisc_all`；macOS/Windows/
+    Linux+pcap 走 `rawpcap::open_capture_listen` 多设备多线程——**接收导向打开**：
+    不做 EN10MB 限制（macOS lo0 的 DLT_NULL 也能收，剥头复用 `serve::strip_null`）、
+    混杂尽力而为（BIOCPROMISC 不支持的设备如 macOS anpi* 降级不混杂）；
+    应答注入走**接收设备**（--iface 优先），按 sniffer 统一谓词匹配（`allow_sent: false`），命中后
+    按**应答模板**（.pkt 默认导出，经 `reply("层","字段")` 取收到的帧字段——
+    `resolve_sources_with_reply` 绑定 ReplyAccess）构造应答帧并经
+    `inject_reply` raw 注入（**裸 IPv4 外层应答走内核 IP 栈路由**：
+    `util::socket::inject_ip4`——Linux IPPROTO_RAW+IP_HDRINCL 整包 / macOS 按
+    报文协议开 raw socket 只发 IP 载荷，回环与局域网均无需 MAC 解析，macOS lo0
+    的 DLT_NULL 裸 IP 帧也能注入；eth 外层应答仍走 `send_raw_bytes` 链路层注入）；
+    自注入/lo 双投递防护（最近注入帧 +
+    DEDUP_WINDOW 去重）；Ctrl+C 优雅退出 + 匹配统计。需要 root/Npcap。
+    demo → `examples/icmp_echo_server/`（纯 pktlang 的 ICMP echo 服务端，应答模板为裸 IP 外层）。
   - **pcap**：`src/pcap.rs` 手写格式（magic 0xa1b2c3d4 LE/BE + nano 变体；24B 全局 + 16B
     记录头；`LinkType{Ethernet=1, Raw=101}`）。`packet --out` 写入、`engine --pcap` 读取、
     **`engine --pcap x.pcap --to-pkt DIR` 转码**（`src/engine/convert.rs`，`--out` 逆操作）：每记录一个
@@ -161,12 +193,30 @@
    `prping engine examples/transport_tcp` 都直接可用（`main.rs::resolve_pktl_arg`）。
 - **配方（.pktl = package list）**：`src/recipe.rs` 解析清单（`global:` 段声明跨步骤
   共享变量 + `recipe:` 段按顺序列出步骤）；`pkg.rs::send_recipe` 执行——每步 = 一个
-  `.pkt`（解析/求值注入当前 global 快照），步骤选项 `wait:`（覆盖 `--wait`）/
+  `.pkt`（解析/求值注入当前 global 快照），步骤项键 `- packet: 文件`（旧键 `pkg:`
+  已改名，写 `pkg:` 报错提示改名），步骤选项 `wait:`（**与 CLI `--wait` 同语义**：
+  无值或负数 = **无限等待**（无值 = 持续监听，等价 CLI 裸 `--wait`/负数 `--wait`——
+  本步不发送，用 .pkt 的 sniffer 匹配外部到达的包，命中后配方继续（触发后续步骤
+  发包），匹配包供 `extract` 的 `reply.` 来源取值；**监听方式自动选择**：包内有
+  udp/tcp 传输层 → UDP 数据报监听（`pkg/listen.rs::listen_udp_once`，绑定 CLI
+  `HOST:PORT` 或包内 dport 推导），无（ICMP/ARP 等）→ 链路层监听
+  （`pkg/listen_raw.rs::listen_raw_once`）；`raw: true|网卡` 可显式覆盖）、
+  `wait: 秒数` = 发送后等一个匹配应答（覆盖 CLI `--wait SECS`）、
+  `on_timeout: retry [N]|文件`（**wait 超时处理**：超时未收到匹配应答 →
+  `retry [N]` **重发当前步骤的包 N 次**（每次重新 wait，任一次等到回包即成功，
+  默认 1；`recipe::OnTimeout::Retry`）或**发送备选 .pkt**（发其它包，步骤继续；
+  `pkg.rs::send_on_timeout_packet`））、
+  `count: N`（**每个包重复发送 N 次**，覆盖 CLI `--count`；`send_module` 循环层
+  实现，`--count`/`count:` 均按 `opts.count` 逐包 ×N 发送）/
   `raw:`（覆盖 `--raw`：`true` 开原始发送且网卡继承 CLI `--iface`、网卡名 = 开原始
   发送并指定网卡、`false` 强制载荷发送；`pkg.rs::step_send_mode` 实现）/`delay:`
-  （步骤开始前等待）/`params:`（追加覆盖 `-p`/`--params`）/`extract:`（回包取值写
-  global，`from:` 两种
-  形态：`reply.<层>.<字段>` 直取复用 sniffer 字段机制 + `as: int|hex|str|bytes`，或
+  （步骤开始前等待）/`params:`（追加覆盖 `-p`/`--params`）/`extract:`（取值写
+  global，`from:` 四种
+  形态：`reply.<层>.<字段>` 直取**回包**反解字段复用 sniffer 字段机制
+  （需 `wait:`（OneShot 或持续监听））、`sent.<层>.<字段>` 直取**本步发包**反解字段（**无需 wait**，
+  经 `SendCtx.on_sent` 回调收集完整序列化包字节）、**`reply.peer.ip`/`reply.peer.port`**
+  （持续监听步骤 UDP 监听的**对端地址**——载荷无 udp 头，对端来自 socket peer，
+  供后续步骤回包；`FromSpec::PeerField`），`as: int|hex|str|bytes`，或
   **值表达式**（`reply.<层>.<字段>` 叶子改写为 `reply("层","字段")` 原语调用后按 DSL
   值表达式解析求值——可调函数/原语/`+`，可引用同步骤 .pkt 值函数/`params`/`global`，
   `as:` 可选，缺省 = 自然类型值；`reply` 原语仅在 extract 求值上下文生效，其余回退
@@ -179,11 +229,24 @@
   包合并写一个 pcap；`engine FILE.pktl` 展示结构概览并校验 extract 字段名
   （表达式形态遍历 `reply(...)` 叶子校验）。
   `send_packets`/`send_recipe` 共用发送循环 `pkg.rs::send_module`（`SendCtx` 携带
-  module/sources/params/globals + 回包回调 ReplyCb）。示例（每协议一个文件夹，
+  module/sources/params/globals + 回包回调 `on_reply` + 发包回调 `on_sent`，
+  均 `ReplyCb`）。示例（每协议一个文件夹，
   内含同名 `.pktl` 与其 `.pkt`，均为可实际发送的多包流程）：
   `examples/tcp_handshake/`（TCP 三次握手：SYN → ACK → HTTP GET，seq/ack 经
   `global` 算术链）/ `examples/transport_udp/`（UDP：DNS 查询 + VNC 横幅）/
   `examples/dns_recipe/`（DNS 查询 + extract 复用）/ `examples/network_icmp_bare/`
+  / `examples/dns_echo_listen/`（**DNS 发包/回包模拟**：服务端模板构造带 A 记录的
+  应答，id 回显、客户端校验）
+  / `examples/tcp_handshake_listen/`（**TCP 三次握手模拟**：`--wait --raw` 服务端
+  按 sniffer 匹配 SYN、模板构造 SYN-ACK（ack=seq+1/地址互换），客户端校验并回 ACK）
+  / `examples/sniffer_chat/`（**双进程通信模拟**：裸 `--wait` 服务端按 sniffer
+  规则回显 + 客户端配方 sent/reply extract——见该目录 README.md）
+  / `examples/wait_timeout/`（**wait 超时处理**：`on_timeout` 发备选包）
+  / `examples/icmp_mock/`（**配方对模拟 ICMP**：server.pktl 链路层监听触发发包 +
+    client.pktl 两步 request + extract 复用——配方可含任意多包；回包 seq 偏移
+    +1000 作配方标记，排除回环内核替答）
+  / `examples/dns_trigger/`（**配方监听触发**：`wait:` 无值步骤匹配 DNS 查询 →
+  extract id/`reply.peer.port` 对端 → 触发步骤发包应答——纯配方服务端）
   （ICMP echo，裸 IP 走内核路由）/ `examples/app_http/`（HTTP GET/POST over TCP）/
   `examples/link_arp/`（ARP 请求/应答）/ `examples/quic_initial/`（QUIC Initial/Short）。
 
