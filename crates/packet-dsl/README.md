@@ -67,8 +67,10 @@ use(req) |> eth(dst_mac="ff:ff:ff:ff:ff:ff")
 length/checksum）。标准库 [eng_lib/bytes.pkt](../eng_lib/bytes.pkt) 为每种层提供
 具名包装 `eth_bytes`/`ipv4_bytes`/`tcp_bytes`/...（`func eth_bytes(bytes) { layer("eth", bytes) }`）。
 
-层头函数（`eth` / `arp` / `ipv4` / `ipv6` / `icmp` / `tcp` / `udp` / `http` / `dns`）
-由标准库 [eng_lib/headers.pkt](../eng_lib/headers.pkt) 用 `hex`/`raw` + 字节原语定义，
+层头协议（`eth` / `arp` / `ipv4` / `ipv6` / `icmp` / `tcp` / `udp` / `http` / `dns`）
+由标准库 [eng_lib/headers.pkt](../eng_lib/headers.pkt) 以 `#[proto]` 自表示声明
+（proto = 值函数 + 字段标注：字段表双端驱动——构造按声明编码、反解按声明读字节；
+层身份经 `#[proto(kind=...)]`、应用层分派经 `#[rule(...)]`），
 默认库自动加载、导出隐式可见，无需 import 直接调用。
 
 随机值用构建期字节原语：整数方向 `sport=rand16()`（随机端口）、`id=rand16()` 等；
@@ -90,13 +92,14 @@ dns_name 值原语的字面量解析）：`%c` 通配 1 字节；`%d1/%d2/%d4` �
 **位运算 `bor`/`band`/`bxor`/`bnot`/`shl`/`shr`**：整数（Int/Hex）或同宽字节列表
 （元素级）位运算——协议标志位常量（`syn()`/`df()`/`request()`…，eng_lib/bytes.pkt）
 组合用：`tcp(flags=bor(syn(), ack()))`（取代旧引擎原语 `tcpflags`/`ip4flags`/`arpop`）。
-**算法原语 `sum`/`count`/`len`/`cksum`/`md5`/`sha1`/`sha256`**：整数列表求和
-（空 = 0）/ 列表长度 / 字节数（字符串按 UTF-8、字节列表原样）/ 2B 反码校验和
-（RFC 1071，与自动校验和一致）/ 16·20·32B 摘要——DNS qdcount 用 `count(questions)`；
-校验和与摘要都是引擎原语（输入字节列表或字符串），`cksum(hex("..."))` 一步。
-**`reduce(列表, 初始, f)`**：唯一高阶原语——**字节折叠**（初始字节/字符串，回调
-返回字节逐项拼接），f = **具名值函数名** `func f(acc, item) -> bytes`
-（http headers / dns questions 逐项拼接）。lambda / map / filter / 多态折叠 /
+**算法原语 `count`/`cksum`/`md5`/`sha1`/`sha256`**（引擎原语，输入字节列表或字符串）：
+列表长度 / 2B 反码校验和（RFC 1071，与自动校验和一致）/ 16·20·32B 摘要——DNS
+qdcount 用 `count(questions)`，`cksum(hex("..."))` 一步；`sum`（整数求和）与
+`reduce`（字节折叠）已按「无消费者不下沉」移除。逐项拼接由 **proto 字段表的重复区**
+承担：`#[meta(list="计数", item="子proto")]`（按计数重复）与 `#[meta(rest="子proto")]`
+（到失败/末尾；与 `bytes=窗口` 同设 = 窗口内重复）——http headers / dns questions 即此。
+**eng_lib 库值函数**（非引擎原语，导出隐式可见）：`len`/`line`（`bytes.pkt`）、
+`varint`/`qvarint`（`vint.pkt`）。lambda / map / filter / 多态折叠 /
 比较逻辑（`==`/`&&`/`!`…）已移除：算法由原语提供，语言保持最小、求值保证终止。
 值函数返回类型 `-> bytes` / `-> int`（`-> bool` 已移除）；`+` 是唯一运算符。
 `hex("...")` 也可在参数值位置使用（hex 字符串 → 字节列表值），如
@@ -240,16 +243,24 @@ sniffer:
 | 模块 | 职责 |
 | --- | --- |
 | `lexer` / `parser` | chumsky 解析（token 流 → AST，带行/列 span） |
+| `ast` | AST 定义（`FieldDecl` 字段表 = 构造/反解双端共享的数据载体） |
 | `semantic` | import 图、递归搜索、循环检测、名字解析（`parse_file` / `parse_str`） |
 | `eval` | 求值（`resolve`）：use 展开、变体笛卡尔积、组件循环检测 |
-| `registry` | 内置层函数注册表 + 参数解析 |
+| `registry` | 内置原语文档 + proto 注册表（dissect 分派）+ 参数解析 |
 | `ir` | 结构化 IR（`BuildResult` / `PacketSpec` / `Layer`，serde） |
 | `serialize` | 默认序列化器：字节产出（checksum / length / 随机值，seed 可注入） |
+| `proto` | proto 解析侧：同一字段表反向读字节 + `#[rule]` 判别 + 全局注册表 |
+| `dissect` | 载荷逐层反解调度（`dissect(bytes)` → `DissectReport`） |
+| `codec` | vint 方案双向编解码（le128 / prefix / table） |
+| `tpl` | 字符串模板（`ip4`/`ip6`/`mac`/`dns_name` 值函数的通用实现） |
+| `matchpred` | sniffer 匹配器（回包校验 / 监听规则） |
+| `stack` | 层栈咨询性检查（只警告不阻断） |
+| `diag` | 统一诊断类型（解析 / 语义 / 求值共用） |
 
 ## 测试
 
 ```sh
-cargo test -p packet-dsl        # 67 个测试：解析器边界 / 语义 / 求值 / golden 字节
+cargo test -p packet-dsl        # 解析器边界 / 语义 / 求值 / golden 字节 / 反解 / sniffer
 ```
 
 Golden 用例覆盖：ARP 请求、DNS over UDP、HTTP over TCP、VNC 原始载荷；

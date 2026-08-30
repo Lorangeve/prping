@@ -1205,7 +1205,7 @@ func bad(a=1, b=2) -> bytes {
     )
     .unwrap_err();
     assert!(e.to_string().contains("不是 8 的倍数"), "{e}");
-    // 位宽越界（1..=8）
+    // 位宽超出类型容量（u8 ≤ 8）
     let e = semantic::parse_str(
         "t",
         r#"
@@ -1216,19 +1216,31 @@ func bad2(a=1) -> bytes {
 "#,
     )
     .unwrap_err();
-    assert!(e.to_string().contains("1..=8"), "{e}");
-    // bits 只配 u8 字段
+    assert!(e.to_string().contains("超出该类型容量 8"), "{e}");
+    // bits 超出 be16 容量（16 位）
+    let e = semantic::parse_str(
+        "t",
+        r#"
+#[proto]
+func bad2b(a=1) -> bytes {
+    concat(#[meta(name="a", bits=20)] be16(a))
+}
+"#,
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("超出该类型容量 16"), "{e}");
+    // bits 只配整型字段（u8/be16/be32/be64）
     let e = semantic::parse_str(
         "t",
         r#"
 #[proto]
 func bad3(a=1) -> bytes {
-    concat(#[meta(name="a", bits=4)] be16(a))
+    concat(#[meta(name="a", bits=4)] ip4(a))
 }
 "#,
     )
     .unwrap_err();
-    assert!(e.to_string().contains("只用于 u8"), "{e}");
+    assert!(e.to_string().contains("只用于整型字段"), "{e}");
     // bits 字段不能是 len 计算字段（len="auto"/len="目标"）
     let e = semantic::parse_str(
         "t",

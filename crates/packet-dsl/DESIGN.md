@@ -247,6 +247,56 @@ dns_name("example.com") ≡ tpl("%L", "example.com")  # 长度前缀 + 尾 0
 tpl("%d2:%d2", "5353:80")                          # 端口对 → 4 字节
 ```
 
+## 5.5 原语三族的边界（生成式 / proto-meta / proto-rule）
+
+三族原语分别回答包处理的三个问题——**生成式（值函数）"字节从哪来"、proto-meta
+"字节怎么排"、proto-rule "字节是谁的"**。放新原语前先判定它回答哪一问。
+
+| | 生成式（值函数） | proto-meta | proto-rule |
+|---|---|---|---|
+| 求值环境 | 参数 + 前序字段值 + globals/reply（经 env） | 字段表位置：**前序**字段值（vals）、自身实参、位游标、缓冲区 | **跨层**上下文（dport/proto/ethertype）+ 载荷前缀字节 + 已解码字段值 |
+| 位置概念 | 无（没有字节流游标） | 有（pos/bitpos，消费位数是产出之一） | 有（只看载荷起点，不管内部布局） |
+| 声明位置 | `func` / 值表达式，eng_lib 可声明 | concat 参数上的 `#[meta(...)]` → `FieldDecl` | proto 上的 `#[rule(...)]` → `RuleCond` |
+
+**方向性不对称（可逆性归属）**：
+
+- 生成式**只有正向**——`be16` 的"解析"不是 `be16()` 干的，是字段表 `Be16` 类型的
+  decode arm 干的。天生需要逆向的原语（如校验字读回比对）不该声明为值函数。
+- meta **双端对称**——每个键在 `eval.rs` 字段循环与 `proto.rs::decode_field` 各有
+  一份行为，由同一张 `FieldDecl` 驱动（可逆性守门结构）。
+- rule **双端不对称**——解析侧是识别门（`try_proto` 查注册表），构造侧只做层序
+  合法性检查（rule 载体集），从不参与字节编解码。
+
+**接触点（边界互相借用）**：
+
+1. 字段 = 生成式原语的调用点 + meta 原语的承载点（`#[meta(bits=4)] u8(tos)` 一行两族）；
+2. meta 借生成式的表达式语言当标量词汇——`bytes=`/`len expr`/`if=`/`switch` 判别子/
+   `list` 计数全部经 `eval_width`/`eval_value` 求值，值函数每加一个纯函数，meta
+   表达能力自动跟涨；
+3. rule 站在 meta 产物之上——`ne(qdcount, 0)`/`contains(in=字段名)` 引用的是解码结果；
+4. `switch(cases)` 与 rule 是同构思想在不同作用域的实例：**switch = 字段内的 rule**
+   （判据限前序字段值，`cases` 表是开放数据）；**rule = 层间的 switch**（判据跨层，
+   谓词是引擎闭集）。
+
+**扩展点差异**：生成式**开放**（`.pkt` func 声明即可，eng_lib 具名包装即此）；meta/rule
+键是**引擎闭集**（新增 = 改 desugar/semantic/eval/proto 四件套，或 parse_cond/RuleCond/
+dissect）。设计杠杆 = 可变的（字节怎么算）放开放声明，不可变的（布局/分派语义）收进
+小闭集。
+
+**判定法则**：
+
+```text
+需求是什么？
+├─ 纯值计算，不关心"我在哪/我前面是谁"        → 生成式（值函数，可声明）
+├─ 描述本字段的线格式形状，需要构造+解析双端   → meta（改 FieldDecl 四件套）
+├─ 决定"这段载荷该选谁"，判据跨层             → rule（改谓词闭集）
+└─ 只在解析/构造之间搬运信息（回填/校验注记）  → 引擎骨架，不做成原语
+```
+
+三族之外是引擎**遍历骨架**（dissect dispatch 链 / checksum 验证 / IR 回填 / 位组
+对齐假设）——声明在 eng_lib、遍历在 Rust；新原语只扩表、不动骨架（switch/if/bits
+即零骨架改动接入的范例）。
+
 ## 6. 值类型与转换（类型表）
 
 > 权威定义。DSL 是**字节本位**设计："类型"是**值 → 字节编码边界的转换规则**，不是值
@@ -488,6 +538,29 @@ func arp(htype=1, ptype=0x0800, hlen=6, plen=4, op=request(), sha="00:00:00:00:0
 - **字段即参数**：位置参数按字段序、命名参数按名（命名覆盖位置）；未传 → `= 默认值`
   （在字段环境求值，可引用前序字段）；既未传也无默认 → 报错（`len` 计算字段除外）。
 - **`bytes` 字段（`#[meta(bytes=宽度)]`）**：宽度表达式引用前序字段；构造侧校验实参长度 == 宽度。
+- **窗口内重复（`bytes=宽度` + `rest=子proto` 同设，类型 = Bytes）**：宽度界定的字节
+  窗口里循环单发反解子 proto（每次须消费 ≥1 字节，0 消费即停防死循环）——恰好耗尽 →
+  子命中进 `ProtoHit.subs`；未耗尽/未注册 → 整窗不透明字节降级（字段恒占整个窗口，
+  `rest=` 只描述窗口内的解释方式）。**中部重复区**的解法——TCP options 由 data_offset
+  界定窗口、元素无计数、带内哨兵不可靠（NOP kind 字节任意值都能"解析成功"），
+  `rest=` 的尾部假设（吃到失败/末尾）在此失效；元素为自描述 TLV 时 val 长度引用
+  同 proto 前序字段（`bytes="sub(len, 2)"`），无需跨 proto 传值。与 `list=` 计数互斥
+  （窗口本身就是停止条件）。
+- **`switch` 判别式分派字段（`#[meta(switch="前序字段", cases=[[值, "子proto"], ...])]`）**：
+  线格式上的**按值选型**——解析时读前序字段值（判别子）查判别表选子 proto，在其字节
+  窗口上单发反解（子 proto 恰好消费整个窗口 → 子命中进 `ProtoHit.subs`）；窗口 =
+  `#[meta(bytes=宽度)]` 声明（如 DNS rdata 按 rdlen：未命中/反解失败/部分消费 →
+  **整窗不透明字节优雅降级**，与 `bytes="rdlen"` 直通升级前行为一致）或无宽度 =
+  到缓冲区末尾（此时无法降级 → 整体回退）；构造侧值 = 字节直喂（同 rest 字段先例）；
+  类型固定 Bytes，`switch` 必配 `cases`（判别值互异），与重复区/位字段/len 互斥。
+- **`if` 条件在场守卫（`#[meta(if="整型表达式")]`）**：可选字段——表达式（`band`/`shr`
+  等现有算术/位运算组合引用前序字段与参数，**非零 = 在场**，不引入布尔/比较运算）为假时
+  解析消费 0 位、构造不编码、实参可省略（GRE 可选字段/key 等）；条件求不出（引用
+  未解析字段）→ 解析回退；与 bits/len/rest 互斥。
+- **`bits` 位字段（整型容量内）**：`#[meta(bits=N)]` 容量随类型放宽——u8 ≤8 /
+  be16 ≤16 / be32 ≤32 / be64 ≤64；同一位组按声明顺序大端位序填充、组总位宽 %8==0
+  （IPv4 version+ihl = 8 位一字节；IPv6 version+TC+flow-label = 4+8+20 位跨 4 字节
+  组）；构造/解析同表驱动（`pack_fields` 位拼接 ↔ `decode_field` 位提取）。
 - **`len` 计算字段**：`len="auto"` = 后续字段编码字节数、`len="目标"` = 目标字段字节数
   （原 @auto/@len 统一为 len 目标），用字段自身类型编码（如
   `#[meta(len="auto", codec="prefix", ...)] length`）；反向填充（后填先算，前面的可依赖后面的宽度）。
@@ -518,8 +591,10 @@ func arp(htype=1, ptype=0x0800, hlen=6, plen=4, op=request(), sha="00:00:00:00:0
   `engine --pcap` 反解成字段（第一个"eng_lib 可造即可解析"的协议）；
   proto 可导出（eng_lib prelude 依赖）。
 - **M4 层头全量 proto 化 + 语义回填**：`eng_lib/headers.pkt` 的 **6 层头迁为 proto**
-  （eth/arp/ipv4/ipv6/icmp/udp，`#[layer(...)]` 注解），tcp/http/dns 保持 func
-  （tcp 选项布局、dns/http 可变结构不适配字段表）；构造字节与旧 func 逐字节一致
+  （eth/arp/ipv4/ipv6/icmp/udp，`#[layer(...)]` 注解），tcp/http/dns 随后也全部
+  迁为 proto（tcp `data_offset` 的 `len="auto"+expr` 联动与 `bytes=窗口` 选项字段、
+  dns/http 可变结构经 list/rest/dns_name 表达；dns/http 另挂 `#[rule]` 分派）；
+  构造字节与旧 func 逐字节一致
   （`tests/proto_func.rs` 对比测试）。`typed_layer` 按字段名把值回填 IR 语义字段：
   src/dst（含 `src_host`/`dst_host` 域名标注，`dst=dns(example.com->ip)` 展示）、
   sport/dport、type/code/id/seq、ttl/proto/flags、src_mac/dst_mac/ethertype 等——
@@ -538,7 +613,8 @@ func arp(htype=1, ptype=0x0800, hlen=6, plen=4, op=request(), sha="00:00:00:00:0
   - `#[meta]` 逐字段标注（**一个注解可多个键值对**）：`#[meta(len="auto")]` /
     `#[meta(name="first", len="dcid", bytes="dcid_len")]`——项：`name`（字段名）/
     `len`（计算长度目标：`"auto"` = 后续全部 / 字段名 = 目标字段，原 @auto/@len 统一）/
-    `bytes`（宽度，字符串按值表达式子解析，如 `bytes="band(first, 3) + 1"`）/ `rest`（可带子 proto）；
+    `bytes`（宽度，字符串按值表达式子解析，如 `bytes="band(first, 3) + 1"`）/ `rest`（可带子 proto）/
+    `switch`+`cases`（判别式分派）/ `if`（条件在场守卫）/ `bits`（位字段）——见下三条；
   - **字面量宽度自动推导**：`#[meta(name="first4")] hex("60000000")` = 固定 4 字节
     （值长度即宽度）——内置类型化调用（u8/be16/mac/ip4/ip6/dns_name/line；变长整数 =
     vint codec）宽度自带，无需 `bytes` 标注；`bytes` 宽度机制只留给变长

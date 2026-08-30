@@ -353,20 +353,26 @@ fn packed_sizes(enc: &[Vec<u8>], bits: &[Option<u8>]) -> Vec<usize> {
 /// 字节对齐（语义阶段已保证）。`bits` 字段的编码片段取低 N 位。
 fn pack_fields(enc: &[Vec<u8>], bits: &[Option<u8>]) -> Vec<u8> {
     let mut out = Vec::with_capacity(enc.iter().map(|b| b.len()).sum());
-    let mut pending: u8 = 0;
+    let mut acc: u128 = 0;
     let mut bitpos = 0usize;
     for (i, b) in enc.iter().enumerate() {
         match bits[i] {
             Some(n) => {
                 let n = n as usize;
-                let mask = ((1u16 << n) - 1) as u8; // n=8 → 0xFF
-                pending |= (b[0] & mask) << (8 - bitpos - n);
-                bitpos += n;
-                if bitpos == 8 {
-                    out.push(pending);
-                    pending = 0;
-                    bitpos = 0;
+                // 位段值 = 编码字节的低 N 位（u8 位字段 = 单字节掩码；be32/be64
+                // 多字节位字段 = 整值低 N 位，如 20 位 flow ⊂ be32 编码）
+                let mut val: u128 = 0;
+                for x in b {
+                    val = (val << 8) | *x as u128;
                 }
+                val &= (1u128 << n) - 1;
+                acc = (acc << n) | val;
+                bitpos += n;
+                while bitpos >= 8 {
+                    out.push((acc >> (bitpos - 8)) as u8);
+                    bitpos -= 8;
+                }
+                acc &= (1u128 << bitpos) - 1; // 清掉已刷新位（acc 只保留未刷位）
             }
             None => {
                 debug_assert_eq!(bitpos, 0, "普通字段前位组未对齐（语义应已拦截）");
@@ -899,6 +905,16 @@ impl EvalCtx<'_> {
                     len_idx.push((i, target.clone()));
                     continue;
                 }
+                // if 条件在场守卫：整型表达式非零 = 字段存在；条件为假 → 不编码
+                //（enc 压空占位保持与 schema 下标对齐；实参可省略，已给则忽略）
+                if let Some(cond) = &f.if_cond {
+                    let cv = self.eval_value(module, cond)?;
+                    let ci = int_of(Some(&cv), "if 条件", f.span)?;
+                    if ci == 0 {
+                        enc.push(Vec::new());
+                        continue;
+                    }
+                }
                 // 值 = 实参 > 默认值（字段环境求值，可引用前序字段与值参数）
                 let v: Value = match arg_map.get(f.name.as_str()) {
                     Some(v) => v.clone(),
@@ -981,10 +997,11 @@ impl EvalCtx<'_> {
                         validated = true;
                     }
                 }
-                // bits（位字段）：值必须在 0..=2^bits-1（编码取低 N 位）
+                // bits（位字段）：值必须在 0..=2^bits-1（编码取低 N 位；
+                // bits=64 时上限即 i64 本身）
                 if let Some(b) = f.bits {
                     let n = int_of(Some(&v), "位字段", f.span)?;
-                    let max = (1i64 << b) - 1;
+                    let max = if b >= 64 { i64::MAX } else { (1i64 << b) - 1 };
                     if !(0..=max).contains(&n) {
                         return Err(Diagnostic::at(
                             format!(

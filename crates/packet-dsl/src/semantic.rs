@@ -1207,12 +1207,29 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                             .with_file(file.clone()));
                         }
                     }
-                    // bits（位字段）：只配 u8、不与 len 组合、len 目标不能是位字段
+                    // bits（位字段）：只配整型字段（容量 u8≤8 / be16≤16 / be32≤32 /
+                    // be64≤64）、不与 len 组合、len 目标不能是位字段
                     if let Some(b) = f.bits {
-                        if f.ty != crate::ast::FieldType::U8 {
+                        let cap = match f.ty {
+                            crate::ast::FieldType::U8 => 8,
+                            crate::ast::FieldType::Be16 => 16,
+                            crate::ast::FieldType::Be32 => 32,
+                            crate::ast::FieldType::Be64 => 64,
+                            _ => {
+                                return Err(Diagnostic::at(
+                                    format!(
+                                        "proto `{}`：字段 `{}` 的 `#[meta(bits={b})]` 只用于整型字段（u8/be16/be32/be64；位组按大端位序填充，总位宽须为 8 的倍数）",
+                                        f.name, f.name
+                                    ),
+                                    f.span,
+                                )
+                                .with_file(file.clone()));
+                            }
+                        };
+                        if b as usize > cap {
                             return Err(Diagnostic::at(
                                 format!(
-                                    "proto `{}`：字段 `{}` 的 `#[meta(bits={b})]` 只用于 u8 字段（位字段承载在 u8 内）",
+                                    "proto `{}`：字段 `{}` 的 `#[meta(bits={b})]` 超出该类型容量 {cap} 位",
                                     f.name, f.name
                                 ),
                                 f.span,
@@ -1230,7 +1247,12 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                             .with_file(file.clone()));
                         }
                     }
-                    if f.ty == crate::ast::FieldType::Bytes && f.width.is_none() {
+                    // bytes 字段须有宽度——switch 分派字段豁免（无宽度 = 窗口到
+                    // 缓冲区末尾，如 ICMP 变体按 type 分派到报文尾）
+                    if f.ty == crate::ast::FieldType::Bytes
+                        && f.width.is_none()
+                        && f.switch_field.is_none()
+                    {
                         return Err(Diagnostic::at(
                             format!(
                                 "proto `{}`：`bytes` 字段 `{}` 缺少宽度：`#[meta(bytes=字段名)]` 或 `#[meta(bytes=n)]`",
@@ -1253,10 +1275,106 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                         )
                         .with_file(file.clone()));
                     }
+                    // 重复区：Rest 类型 = 尾部重复（吃到失败/末尾）；
+                    // Bytes + width = 窗口内重复（`bytes= 窗口` + `rest= 子proto`——
+                    // 窗口里循环反解到耗尽，如 TCP options 的 data_offset 界定窗口）
                     if f.rest_proto.is_some() && f.ty != crate::ast::FieldType::Rest {
+                        if f.ty == crate::ast::FieldType::Bytes {
+                            if f.list_count.is_some() {
+                                return Err(Diagnostic::at(
+                                    format!(
+                                        "proto `{}`：窗口内重复字段 `{}`（`bytes= 窗口` + `rest= 子proto`）不与 `list=` 计数同设——窗口本身就是停止条件",
+                                        f.name, f.name
+                                    ),
+                                    f.span,
+                                )
+                                .with_file(file.clone()));
+                            }
+                        } else {
+                            return Err(Diagnostic::at(
+                                format!(
+                                    "proto `{}`：重复区字段 `{}` 必须是 rest 类型（`#[meta(rest=\"子proto\")]` / `#[meta(list=..., item=\"子proto\")]`；`bytes= 窗口` + `rest= 子proto` 为窗口内重复）",
+                                    f.name, f.name
+                                ),
+                                f.span,
+                            )
+                            .with_file(file.clone()));
+                        }
+                    }
+                    // switch 判别式分派：cases 表须齐全非空且判别值互异（重复值
+                    // 首个生效、其余不可达）；与重复区/位字段/len 计算字段互斥
+                    if f.switch_field.is_some() {
+                        if f.rest_proto.is_some() || f.bits.is_some() || f.len_of.is_some() {
+                            return Err(Diagnostic::at(
+                                format!(
+                                    "proto `{}`：switch 分派字段 `{}` 与重复区（rest/list）/位字段（bits）/len 计算字段互斥",
+                                    f.name, f.name
+                                ),
+                                f.span,
+                            )
+                            .with_file(file.clone()));
+                        }
+                        let cases = f.cases.as_ref().ok_or_else(|| {
+                            Diagnostic::at(
+                                format!(
+                                    "proto `{}`：switch 分派字段 `{}` 缺少 `#[meta(cases=...)]` 判别表",
+                                    f.name, f.name
+                                ),
+                                f.span,
+                            )
+                            .with_file(file.clone())
+                        })?;
+                        if cases.is_empty() {
+                            return Err(Diagnostic::at(
+                                format!(
+                                    "proto `{}`：switch 分派字段 `{}` 的 cases 判别表为空",
+                                    f.name, f.name
+                                ),
+                                f.span,
+                            )
+                            .with_file(file.clone()));
+                        }
+                        let mut seen = std::collections::HashSet::new();
+                        for (v, name) in cases {
+                            if !seen.insert(*v) {
+                                return Err(Diagnostic::at(
+                                    format!(
+                                        "proto `{}`：switch 分派字段 `{}` 的 cases 判别值 {v} 重复（首个生效、其余不可达）",
+                                        f.name, f.name
+                                    ),
+                                    f.span,
+                                )
+                                .with_file(file.clone()));
+                            }
+                            if name.is_empty() {
+                                return Err(Diagnostic::at(
+                                    format!(
+                                        "proto `{}`：switch 分派字段 `{}` 的 cases 子 proto 名为空",
+                                        f.name, f.name
+                                    ),
+                                    f.span,
+                                )
+                                .with_file(file.clone()));
+                            }
+                        }
+                    } else if f.cases.is_some() {
                         return Err(Diagnostic::at(
                             format!(
-                                "proto `{}`：重复区字段 `{}` 必须是 rest 类型（`#[meta(rest=\"子proto\")]` / `#[meta(list=..., item=\"子proto\")]`）",
+                                "proto `{}`：字段 `{}` 的 `#[meta(cases=...)]` 需要配合 `#[meta(switch=\"前序字段\")]` 使用",
+                                f.name, f.name
+                            ),
+                            f.span,
+                        )
+                        .with_file(file.clone()));
+                    }
+                    // if 条件在场守卫：只配普通字段，与位字段/len 计算字段/重复区互斥
+                    // （位字段条件会破坏位组对齐校验；len 字段必须恒在场）
+                    if f.if_cond.is_some()
+                        && (f.bits.is_some() || f.len_of.is_some() || f.rest_proto.is_some())
+                    {
+                        return Err(Diagnostic::at(
+                            format!(
+                                "proto `{}`：if 条件字段 `{}` 不能是位字段（bits）/len 计算字段/重复区（rest/list）",
                                 f.name, f.name
                             ),
                             f.span,

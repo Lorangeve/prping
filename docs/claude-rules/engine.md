@@ -290,10 +290,19 @@
   `VintCodec::encode`/`decode` 双向编解码；语义校验：prefix 表长 = 2^prefix_bits 且
   宽度严格递增、table 哨兵 > inline_max 且互异、两表等长、endian ∈ be/le）；
   vint 可作 `len` 计算字段（QUIC `#[meta(len="auto", codec="prefix", ...)] length` 即此）；
-  **`bits` 位字段**（`#[meta(bits=N)] u8(值)`，
-  1..=8 位：字节内按声明顺序高位→低位填充，连续位字段凑满 8 位成一字节——IPv4
-  version/ihl 各 4 位拆分；字面量默认 = 常量校验判别位、参数引用 = 可变字段；位组
-  总位宽须 %8==0）；默认值/宽度可引用前序字段与**值参数**
+  **`bits` 位字段**（`#[meta(bits=N)]`，
+  整型字段容量内：u8 ≤8 / be16 ≤16 / be32 ≤32 / be64 ≤64：同一位组按声明顺序
+  高位→低位填充，连续位字段凑满 8 的倍数位成整字节组——IPv4 version/ihl 各 4 位
+  拆分、IPv6 version+TC+flow = 4+8+20 位跨 4 字节组；字面量默认 = 常量校验判别位、
+  参数引用 = 可变字段）；
+  **`switch` 判别式分派**（`#[meta(switch="前序字段", cases=[[值, "子proto"], ...])]`，
+  类型固定 Bytes：解析时按前序字段值选子 proto 反解字节窗口（子命中恰好消费整窗 →
+  进嵌套 `subs`），有界窗口 `bytes=宽度` 未命中/失败 → 整窗不透明字节优雅降级
+  （如 DNS rdata 按 rdlen、未知 rtype 与升级前行为一致），无界窗口 → 整体回退；
+  构造侧值 = 字节直喂）；
+  **`if` 条件在场守卫**（`#[meta(if="整型表达式")]`——`band`/`shr` 等现有运算组合
+  引用前序字段/参数，**非零 = 在场**、不引入布尔运算：为假时解析消费 0 位、构造不编码、
+  实参可省略——GRE 可选字段；与 bits/len/rest 互斥）；默认值/宽度可引用前序字段与**值参数**
   （`func name(pnl=0, ...)`，只参与构造）；`bytes` 宽度构造侧校验实参长度
   （引用未算自动字段时跳过）；`len` 计算字段统一为单一目标：`len="auto"` = 后续全部
   字段字节数、`len="目标"` = 目标字段（后序）字节数（反向填充），都可配 **`expr` 表达式变换**
@@ -311,7 +320,8 @@
   注解可全缺（裸 proto 合法：构造产 Raw 层、可作
   `rest(子proto)` 解析目标）；proto 可导出（eng_lib prelude 依赖）。
 - **M2 解析侧**：`src/proto.rs`——`parse_proto` 同一声明反向解码（`bytes` 宽度（`#[meta(bytes=...)]`）引用
-  前序字段、`len` 计算字段正常读、`rest` 到末尾、规则掩码先验），产出通用字段表
+  前序字段、`len` 计算字段正常读、`rest` 到末尾（与 `bytes= 窗口` 同设 = 窗口内重复，
+  见 §12.5 窗口内重复条目 / GRAMMAR §3）、规则掩码先验），产出通用字段表
   `ProtoHit`；`#[rule]` 分派注册表（`set_proto_registry`，OnceLock）接入 dissect
   （tcp/udp 端口、ipv4 proto、ipv6 next_header、eth ethertype 各层查表，命中即解析、
   未命中/失败回退内容识别——协议识别以内容为准、端口只是可选提示），
@@ -392,13 +402,14 @@
     `bytes=...` 相应支持算术：`bytes="sub(mul(shr(data_offset, 4), 4), 20)"`（options
     宽度回算）。**`u8` 字段编码支持恰好 1 字节列表直通**（`flags=bor(syn(), ack())`
     位常量组合是字节列表，与值原语 `u8` 一致）。
-  - **`bits` 位字段（`#[meta(bits=N)] u8(值)`）**：半字节/位级布局声明——IPv4 首字节
+  - **`bits` 位字段（`#[meta(bits=N)]`，整型容量内）**：半字节/位级布局声明——IPv4 首字节
     version(4)+ihl(4) 用 `#[meta(bits=4)] u8(4)`（字面量 = 常量校验判别 version==4）+
     `#[meta(bits=4)] u8(ihl)`（参数引用 = 可变读出）；ihl 因此成为可引用字段，options
     宽度 `bytes="sub(mul(ihl, 4), 20)"` 按它回算——**带选项的 IPv4 头也走注册表**。
-    构造侧位打包（`pack_fields`：位组压缩后字节数参与 len 计算）与解析侧位
-    读取（`decode_field` 位游标）对称；位组总位宽 %8==0（语义阶段校验，普通字段
-    从字节边界开始；`len="目标"` 目标不能是位字段）。
+    容量随类型放宽：u8 ≤8 / be16 ≤16 / be32 ≤32 / be64 ≤64（IPv6 version+TC+flow-label
+    = 4+8+20 位跨 4 字节组即此）。构造侧位打包（`pack_fields`：位组压缩后字节数参与
+    len 计算）与解析侧位读取（`decode_field` 位游标，可跨字节）对称；位组总位宽
+    %8==0（语义阶段校验，普通字段从字节边界开始；`len="目标"` 目标不能是位字段）。
 - **② 递归解析（rest 子 proto + 常量判别）**：`rest(子proto)` 末尾递归——剩余字节
   按子 proto 解码成嵌套 `ProtoHit.subs`（quic_initial.data: rest(quic_crypto)）；
   子 proto 用常量默认值字段作线格式判别（`frame_type: u8 = 0x06`）——解析侧校验
@@ -412,11 +423,20 @@
   自动推导** = 4 字节）、`#[meta(bytes="dcid_len")] dcid` / `#[meta(rest="quic_crypto")] payload`
   （裸标识符类型来自 meta）、`dns_name(name)`（DNS 名字字段）；
   项：`name` / `len`（计算长度目标：`"auto"` = 后续全部 / 字段名 = 目标字段字节数，
-  按值表达式子解析，如 `bytes="band(first, 3) + 1"`）/ `rest`（可带子 proto）/
+  按值表达式子解析，如 `bytes="band(first, 3) + 1"`）/ `rest`（可带子 proto；
+  与 `bytes=宽度` 同设 = **窗口内重复**——Bytes 类型窗口里循环单发反解子 proto
+  到耗尽，恰好耗尽 → 子命中进 subs，未耗尽/未注册 → 整窗不透明字节降级；
+  TCP options 等 data_offset 界定的中部重复区；与 `list=` 计数互斥）/
    `expr`（len 表达式变换，`expr="shl(div(len, 4) + 5, 4)"`，`len` = 基准值）/
    `list`+`item`（重复字段：计数表达式 + 元素子 proto）/
-   `codec`+`prefix_bits`+`widths`+`inline_max`+`sentinels`+`endian`（vint 方案）/ `bits`（位字段
-  位宽 1..=8，仅 u8 字段）；`line("...")` 文本行字段（到 `\r\n`，HTTP 头行）。
+   `codec`+`prefix_bits`+`widths`+`inline_max`+`sentinels`+`endian`（vint 方案）/
+   `switch`+`cases`（判别式分派：`switch="前序字段"` + `cases=[[1, "rdata_a"], [28, "rdata_aaaa"]]`——
+   类型固定 Bytes，解析按前序字段值选子 proto 反解字节窗口（有界 `bytes=宽度`
+   未命中/失败 → 整窗不透明字节降级），构造侧值 = 字节直喂）/
+   `if`（条件在场守卫：`if="band(shr(flags, 1), 1)"` 等现有运算组合，非零 = 在场——
+   为假解析 0 位 / 构造不编码 / 实参可省）/
+  `bits`（位字段
+  位宽，整型字段容量内：u8 ≤8 / be16 ≤16 / be32 ≤32 / be64 ≤64）；`line("...")` 文本行字段（到 `\r\n`，HTTP 头行）。
   内置类型化调用（u8/be16/mac/ip4/ip6/dns_name/line；变长整数 = vint codec）宽度自带，`bytes` 宽度机制只
   留给变长场合；body 必须扁平 concat（嵌套/hex 等不可逆片段报错）；body 的 `layer("kind", ...)`
    形态已移除——层身份一律用 `#[proto(kind=...)]` 注解。
@@ -434,9 +454,21 @@
   算法（count/cksum）由引擎原语提供，语言保持最小、求值保证终止；`+` 是唯一
   运算符。已移除运算符（`=>`/`==`/`&&`/`!` 等）在词法层报清晰错误，`true`/`false`
   退化为普通 IDENT。
+- **原语三族边界判定**（放新原语前先分类；详细论证 → packet-dsl `DESIGN.md` §5.5）：
+  - **生成式（值函数）** = "字节从哪来"：纯值计算、无字节流游标、只有正向（可逆性归
+    meta）——不关心"我在哪/我前面是谁"的需求落这里；eng_lib func 声明即可扩展（开放集）；
+  - **proto-meta** = "字节怎么排"：本字段的宽度/在场性/位布局/重复/分派，构造与解析
+    双端同表驱动（`FieldDecl`）——需要"字段身份 + 双端行为"的需求落这里（引擎闭集）；
+  - **proto-rule** = "字节是谁的"：跨层分派判据（上下文原子/字节模式/字段约束），
+    解析侧识别门、构造侧层序合法性（引擎闭集）。
+  - 接触点：meta 借值表达式当标量词汇（`bytes=`/`if=`/`switch` 判别子都经 `eval_width`）；
+    rule 站在解码产物之上；`switch(cases)` = 字段内的 rule（表驱动开放数据），
+    rule = 层间的 switch（谓词闭集）。
+  - 判别测试：需要字节游标或字段身份 → 当不了值函数；天生要逆向（校验字读回比对）→
+    是 meta/字段级不是值函数；只在双端搬运信息（回填/校验注记）→ 引擎骨架，不做成原语。
 - **字节原语**（值位置，引擎实现；DSL 无字节运算，这些是 hex/raw 之上"一步"）：
   `concat` / `u8` / `be16` / `be32` / `be64` / `le16` / `le32` / `le64` /
-  `tpl` / `count` / `len` / `cksum` / `md5` / `sha1` / `sha256` /
+  `tpl` / `count` / `cksum` / `md5` / `sha1` / `sha256` /
   `rand16` / `rand8` / `rand_bytes` / `pad` / `dns`；
   `raw` 是**双位置**原语（层 = Raw 载荷层，值 = UTF-8 字节，≡ Python `b"..."`，与 hex 对称）。
   **变长整数**（已下沉，非内置原语）：`varint(n)` = protobuf base-128/LEB128（≤9B）、

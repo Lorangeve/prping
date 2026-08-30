@@ -674,7 +674,119 @@ fn parse_list_sequence(
     Some(consumed)
 }
 
-/// 解码一个字段：返回 (值, 消费**位数**——bits 字段 < 8，普通字段为 8 的倍数)；
+/// 位字段容量（bits 的类型上限：u8≤8 / be16≤16 / be32≤32 / be64≤64）。
+fn bits_capacity(ty: crate::ast::FieldType) -> usize {
+    match ty {
+        crate::ast::FieldType::U8 => 8,
+        crate::ast::FieldType::Be16 => 16,
+        crate::ast::FieldType::Be32 => 32,
+        crate::ast::FieldType::Be64 => 64,
+        _ => 0,
+    }
+}
+
+/// switch 判别式分派字段反解：读前序字段值（判别子）查 `cases` 表选子 proto，
+/// 在字节窗口上反解。
+///
+/// - 窗口：`#[meta(bytes=宽度)]` 声明时固定（如 DNS rdata 按 rdlen）；
+///   无宽度 = 到缓冲区末尾（如 ICMP 变体分派到报文尾）。
+/// - 结构化命中：子 proto 须**恰好消费整个窗口**（部分消费 → 降级，防止
+///   子命中与字段窗口不对齐）；子命中进 `subs`，字段值 = 窗口字节。
+/// - 优雅降级：有界窗口下判别子未命中 / 子 proto 反解失败 → 整窗按不透明
+///   字节保留（如未知 rtype——与升级前 `bytes="rdlen"` 行为一致）；无界窗口
+///   长度未知，无法降级 → None（整体回退）。
+#[allow(clippy::too_many_arguments)]
+fn decode_switch(
+    f: &crate::ast::FieldDecl,
+    bytes: &[u8],
+    full: &[u8],
+    base: usize,
+    pos: usize,
+    vals: &std::collections::HashMap<String, i64>,
+    subs: &mut Vec<ProtoHit>,
+) -> Option<(ProtoVal, usize)> {
+    // 窗口长度：bytes= 宽度表达式（引用前序字段，如 rdlen）或到缓冲区末尾
+    let bounded = match &f.width {
+        Some(w) => match eval_width(w, vals)? {
+            n if n >= 0 => Some(n as usize),
+            _ => return None, // 负宽度 → 解析失败
+        },
+        None => None,
+    };
+    let wlen = bounded.unwrap_or(bytes.len() - pos);
+    let window = bytes.get(pos..pos.checked_add(wlen)?)?;
+    // 判别子求值 → cases 查表 → 注册表按名找子 proto → 窗口上单发反解
+    let hit = eval_width(f.switch_field.as_ref()?, vals)
+        .and_then(|d| {
+            f.cases
+                .iter()
+                .flat_map(|c| c.iter())
+                .find(|(v, _)| *v == d)
+                .map(|(_, name)| name.clone())
+        })
+        .and_then(|name| proto_registry().iter().find(|p| p.name == name))
+        .and_then(|sub| parse_consumed_at(sub, window, full, base + pos));
+    match hit {
+        Some((h, n)) if n == wlen => {
+            subs.push(h);
+            Some((ProtoVal::Bytes(window.to_vec()), wlen * 8))
+        }
+        // 未命中 / 反解失败 / 部分消费：有界 → 不透明降级；无界 → 失败
+        _ if bounded.is_some() => Some((ProtoVal::Bytes(window.to_vec()), wlen * 8)),
+        _ => None,
+    }
+}
+
+/// 窗口内重复反解：`#[meta(bytes="窗口", rest="子proto")]`——在宽度界定的字节
+/// 窗口里循环单发反解子 proto（每次须消费 ≥1 字节，0 消费即停防死循环）。
+///
+/// - 恰好耗尽窗口 → 子命中进 `subs`（如 TCP options 的元素序列）；
+/// - 未注册子 proto / 元素中途失败 / 部分消费 → 整窗按不透明字节保留（优雅
+///   降级——字段在格式上恒占整个窗口，`rest=` 只描述窗口内的解释方式）；
+/// - 空窗口（宽度 0）→ 空字节、无子命中。
+#[allow(clippy::too_many_arguments)]
+fn decode_windowed_rest(
+    f: &crate::ast::FieldDecl,
+    bytes: &[u8],
+    full: &[u8],
+    base: usize,
+    pos: usize,
+    vals: &std::collections::HashMap<String, i64>,
+    subs: &mut Vec<ProtoHit>,
+) -> Option<(ProtoVal, usize)> {
+    let n = match eval_width(f.width.as_ref()?, vals)? {
+        n if n >= 0 => n as usize,
+        _ => return None, // 负宽度 → 解析失败
+    };
+    let window = bytes.get(pos..pos.checked_add(n)?)?;
+    let mut hits: Vec<ProtoHit> = Vec::new();
+    let mut off = 0usize;
+    if let Some(name) = f.rest_proto.as_deref()
+        && let Some(sub) = proto_registry().iter().find(|p| p.name == name)
+    {
+        while off < n {
+            let Some(slice) = window.get(off..) else {
+                break;
+            };
+            let Some((hit, consumed)) = parse_consumed_at(sub, slice, full, base + pos + off)
+            else {
+                break; // 元素反解失败 → 停止循环（窗口未耗尽 → 不透明降级）
+            };
+            if consumed == 0 {
+                break; // 0 消费防死循环
+            }
+            hits.push(hit);
+            off += consumed;
+        }
+    }
+    if off == n {
+        subs.extend(hits);
+    }
+    // 字段恒消费整个窗口（值 = 窗口字节）；是否结构化取决于是否恰好耗尽
+    Some((ProtoVal::Bytes(window.to_vec()), n * 8))
+}
+
+/// 解码一个字段：返回 (值, 消费**位数**——bits 字段 ≤ 类型容量，普通字段为 8 的倍数)；
 /// `rest(子proto)` 时递归填充 `subs`。
 ///
 /// 常量校验：字段类型为定宽（数值/MAC/IP）且默认值是**字面量**（Int/Hex/Str）时，
@@ -696,18 +808,40 @@ fn decode_field(
         let end = pos.checked_add(n)?;
         bytes.get(pos..end)
     };
-    // bits（位字段）：字节内取 N 位（大端：按声明顺序高位在前），不跨字节。
+    // switch 判别式分派字段：按前序字段值查 cases 表选子 proto 反解字节窗口
+    if f.switch_field.is_some() {
+        return decode_switch(f, bytes, full, base, pos, vals, subs);
+    }
+    // if 条件在场守卫：整型表达式非零 = 字段存在；为假 → 消费 0 位（缺席，
+    // 值 = 空字节）；条件求值失败（引用未解析字段）→ 整体回退
+    if let Some(cond) = &f.if_cond {
+        match eval_width(cond, vals) {
+            Some(0) => return Some((ProtoVal::Bytes(Vec::new()), 0)),
+            Some(_) => {}
+            None => return None,
+        }
+    }
+    // bits（位字段）：按声明顺序大端位序取 N 位，可跨字节（位组总位宽 %8==0
+    // 由语义保证，字段的字节跨度 = ceil((bitpos+N)/8)，恰落在组内）。
     // 与普通字段一样走下方的常量校验（字面量默认 = 判别位）。
     let decoded: Option<(ProtoVal, usize)> = if let Some(n) = f.bits {
         let n = n as usize;
-        if f.ty != U8 || bitpos + n > 8 {
-            None
-        } else {
-            let b = *bytes.get(pos)?;
-            let shift = (8 - bitpos - n) as u32;
-            let v = ((b >> shift) as i64) & ((1i64 << n) - 1);
-            Some((ProtoVal::Int(v), n))
+        match f.ty {
+            U8 | Be16 | Be32 | Be64 => {}
+            _ => return None,
         }
+        if n > bits_capacity(f.ty) {
+            return None;
+        }
+        let total = bitpos + n;
+        let nbytes = total.div_ceil(8);
+        let mut acc: u64 = 0;
+        for i in 0..nbytes {
+            acc = (acc << 8) | *bytes.get(pos + i)? as u64;
+        }
+        let shift = (nbytes * 8 - total) as u32;
+        let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+        Some((ProtoVal::Int(((acc >> shift) & mask) as i64), n))
     } else {
         // 普通字段：字节对齐（位组须凑满整字节，语义阶段已保证）
         if bitpos != 0 {
@@ -782,6 +916,11 @@ fn decode_field(
                 ))
             }
             Bytes => {
+                // 窗口内重复：bytes= 窗口宽度 + rest= 子proto——窗口里循环反解
+                // 子 proto 到耗尽（TCP options：data_offset 界定的中部重复区）
+                if f.rest_proto.is_some() {
+                    return decode_windowed_rest(f, bytes, full, base, pos, vals, subs);
+                }
                 let w = eval_width(f.width.as_ref()?, vals)?;
                 if w < 0 {
                     return None;
@@ -980,6 +1119,9 @@ mod tests {
                     rest_proto: None,
                     list_count: None,
                     vint: None,
+                    switch_field: None,
+                    cases: None,
+                    if_cond: None,
                     span,
                 },
                 crate::ast::FieldDecl {
@@ -994,6 +1136,9 @@ mod tests {
                     rest_proto: None,
                     list_count: None,
                     vint: None,
+                    switch_field: None,
+                    cases: None,
+                    if_cond: None,
                     span,
                 },
             ],

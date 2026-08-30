@@ -1048,11 +1048,15 @@ fn desugar_proto_arg(
     let mut inline_max: Option<u8> = None;
     let mut sentinels: Option<Vec<u8>> = None;
     let mut endian: Option<String> = None;
+    // switch 判别式分派 / if 条件在场（字段级声明，双端同一张表驱动）
+    let mut switch_field: Option<Value> = None;
+    let mut cases: Option<Vec<(i64, String)>> = None;
+    let mut if_cond: Option<Value> = None;
     for a in &arg.attrs {
         if a.name != "meta" {
             return Err(Diagnostic::at(
                 format!(
-                    "`#[proto]` 函数 `{proto_name}`：concat 参数前的注解只支持 `#[meta(...)]`（支持项 name / len / bytes / rest / expr / list / item / bits / codec / prefix_bits / widths / inline_max / sentinels / endian；得到 `#[{}]`）",
+                    "`#[proto]` 函数 `{proto_name}`：concat 参数前的注解只支持 `#[meta(...)]`（支持项 name / len / bytes / rest / expr / list / item / bits / codec / prefix_bits / widths / inline_max / sentinels / endian / switch / cases / if；得到 `#[{}]`）",
                     a.name
                 ),
                 a.span,
@@ -1098,22 +1102,27 @@ fn desugar_proto_arg(
                         // 重复到失败的哨兵形态已并入 rest(子proto)
                         rest_proto = Some(meta_name(proto_name, value, *span)?);
                     }
-                    "bits" => bits = Some(meta_bits(proto_name, value, *span)?),
+                    "bits" => bits = Some(meta_bits(proto_name, value, *span, 64)?),
                     // vint codec：`codec` = 模型名（le128/prefix/table），类型 = Vint；
                     // 模型参数 prefix_bits/widths/inline_max/sentinels/endian 按模型消费
                     "codec" => {
                         meta_ty = Some(FieldType::Vint);
                         codec_name = Some(meta_name(proto_name, value, *span)?);
                     }
-                    "prefix_bits" => prefix_bits = Some(meta_bits(proto_name, value, *span)?),
+                    "prefix_bits" => prefix_bits = Some(meta_bits(proto_name, value, *span, 8)?),
                     "widths" => widths = Some(meta_u8_list(proto_name, value, *span)?),
                     "inline_max" => inline_max = Some(meta_u8(proto_name, value, *span)?),
                     "sentinels" => sentinels = Some(meta_u8_list(proto_name, value, *span)?),
                     "endian" => endian = Some(meta_name(proto_name, value, *span)?),
+                    // switch 判别式分派：`switch="前序字段"` + `cases=[[值, "子proto"], ...]`
+                    "switch" => switch_field = Some(meta_width(proto_name, value, *span)?),
+                    "cases" => cases = Some(meta_cases(proto_name, value, *span)?),
+                    // if 条件在场守卫：整型表达式非零 = 字段存在
+                    "if" => if_cond = Some(meta_width(proto_name, value, *span)?),
                     k => {
                         return Err(Diagnostic::at(
                             format!(
-                                "`#[proto]` 函数 `{proto_name}`：未知 `#[meta({k}=...)]` 项（支持 name / len / bytes / rest / expr / list / item / bits / codec / prefix_bits / widths / inline_max / sentinels / endian）"
+                                "`#[proto]` 函数 `{proto_name}`：未知 `#[meta({k}=...)]` 项（支持 name / len / bytes / rest / expr / list / item / bits / codec / prefix_bits / widths / inline_max / sentinels / endian / switch / cases / if）"
                             ),
                             *span,
                         ));
@@ -1251,6 +1260,42 @@ fn desugar_proto_arg(
             (None, Some(other))
         }
     };
+    // 窗口内重复：`bytes= 窗口宽度` + `rest= 子proto` 同设 → 类型固定 Bytes
+    //（窗口里循环反解子 proto 到耗尽，如 TCP options）——Rest 类型留给
+    // "吃到失败/末尾"的尾部重复；后置修正，与属性书写顺序无关
+    if rest_proto.is_some() && width.is_some() {
+        meta_ty = Some(FieldType::Bytes);
+    }
+    // switch 字段：字节窗口上的判别式分派——类型固定 Bytes（值 = 窗口字节），
+    // 与显式类型调用冲突报错；`switch` 必配 `cases`
+    if switch_field.is_some() {
+        if let Some(t) = call_ty
+            && t != FieldType::Bytes
+        {
+            return Err(Diagnostic::at(
+                format!(
+                    "`#[proto]` 函数 `{proto_name}`：`switch` 分派字段类型须为字节窗口（裸标识符 + `#[meta(switch=...)]`），与显式类型调用冲突"
+                ),
+                span,
+            ));
+        }
+        meta_ty = Some(FieldType::Bytes);
+        if cases.is_none() {
+            return Err(Diagnostic::at(
+                format!(
+                    "`#[proto]` 函数 `{proto_name}`：`#[meta(switch=...)]` 必须配合 `#[meta(cases=[[值, \"子proto\"], ...])]` 判别表"
+                ),
+                span,
+            ));
+        }
+    } else if cases.is_some() {
+        return Err(Diagnostic::at(
+            format!(
+                "`#[proto]` 函数 `{proto_name}`：`#[meta(cases=...)]` 需要配合 `#[meta(switch=\"前序字段\")]` 使用"
+            ),
+            span,
+        ));
+    }
     let ty = call_ty.or(meta_ty).ok_or_else(|| {
         Diagnostic::at(
             format!(
@@ -1312,18 +1357,83 @@ fn desugar_proto_arg(
         rest_proto,
         list_count,
         vint,
+        switch_field,
+        cases,
+        if_cond,
         span,
     })
 }
 
-/// meta 的 `bits`：位宽 1..=8 整数（字符串或数字字面量）。
-fn meta_bits(proto_name: &str, v: &ast::Value, span: Span) -> PktResult<u8> {
+/// meta 的 `cases`：判别表 `[[值, "子proto"], ...]`（值 = 整数字面量/0x 十六进制，
+/// 子 proto 名 = 字符串）。
+fn meta_cases(proto_name: &str, v: &ast::Value, span: Span) -> PktResult<Vec<(i64, String)>> {
+    let ast::Value::List(items) = v else {
+        return Err(Diagnostic::at(
+            format!(
+                "`#[proto]` 函数 `{proto_name}`：`#[meta(cases=...)]` 需要列表 `[[值, \"子proto\"], ...]`，得到 {}",
+                crate::registry::describe(v)
+            ),
+            span,
+        ));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        let ast::Value::List(pair) = it else {
+            return Err(Diagnostic::at(
+                format!(
+                    "`#[proto]` 函数 `{proto_name}`：`#[meta(cases=...)]` 每项须为 `[值, \"子proto\"]` 二元列表，得到 {}",
+                    crate::registry::describe(it)
+                ),
+                span,
+            ));
+        };
+        if pair.len() != 2 {
+            return Err(Diagnostic::at(
+                format!(
+                    "`#[proto]` 函数 `{proto_name}`：`#[meta(cases=...)]` 每项须为 `[值, \"子proto\"]` 二元列表（得到 {} 项）",
+                    pair.len()
+                ),
+                span,
+            ));
+        }
+        let val = match &pair[0] {
+            ast::Value::Int(i) => *i,
+            ast::Value::Hex(h) => *h as i64,
+            other => {
+                return Err(Diagnostic::at(
+                    format!(
+                        "`#[proto]` 函数 `{proto_name}`：`#[meta(cases=...)]` 判别值须为整数字面量，得到 {}",
+                        crate::registry::describe(other)
+                    ),
+                    span,
+                ));
+            }
+        };
+        let ast::Value::Str(name) = &pair[1] else {
+            return Err(Diagnostic::at(
+                format!(
+                    "`#[proto]` 函数 `{proto_name}`：`#[meta(cases=...)]` 子 proto 名须为字符串，得到 {}",
+                    crate::registry::describe(&pair[1])
+                ),
+                span,
+            ));
+        };
+        out.push((val, name.clone()));
+    }
+    Ok(out)
+}
+
+/// meta 的 `bits`/`prefix_bits`：1..=max 整数（字符串或数字字面量）。
+/// `bits` 位宽上限 64（类型容量由语义阶段按字段类型校验）；vint `prefix_bits`
+/// 上限 8（前缀表 = 2^prefix_bits 项）。
+fn meta_bits(proto_name: &str, v: &ast::Value, span: Span, max: u8) -> PktResult<u8> {
+    let limit = format!("1..={max}");
     let n = match v {
         ast::Value::Int(i) => *i,
         ast::Value::Str(s) => s.parse::<i64>().map_err(|_| {
             Diagnostic::at(
                 format!(
-                    "`#[proto]` 函数 `{proto_name}`：`#[meta(bits=...)]` 需要 1..=8 的整数，得到 `{s}`"
+                    "`#[proto]` 函数 `{proto_name}`：`#[meta(bits=...)]` 需要 {limit} 的整数，得到 `{s}`"
                 ),
                 span,
             )
@@ -1331,14 +1441,14 @@ fn meta_bits(proto_name: &str, v: &ast::Value, span: Span) -> PktResult<u8> {
         other => {
             return Err(Diagnostic::at(
                 format!(
-                    "`#[proto]` 函数 `{proto_name}`：`#[meta(bits=...)]` 需要 1..=8 的整数，得到 {}",
+                    "`#[proto]` 函数 `{proto_name}`：`#[meta(bits=...)]` 需要 {limit} 的整数，得到 {}",
                     crate::registry::describe(other)
                 ),
                 span,
             ))
         }
     };
-    if !(1..=8).contains(&n) {
+    if !(1..=max as i64).contains(&n) {
         return Err(Diagnostic::at(
             format!(
                 "`#[proto]` 函数 `{proto_name}`：`#[meta(bits=...)]` 需要 1..=8（每字节最多 8 位），得到 {n}"

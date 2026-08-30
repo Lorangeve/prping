@@ -247,9 +247,10 @@ pub struct FieldDecl {
     pub ty: FieldType,
     /// `#[meta(bytes=...)]` 的宽度表达式（引用前序字段名或字面量；其余类型为 None）。
     pub width: Option<Value>,
-    /// `#[meta(bits=N)]` 位宽（1..=8，仅 u8 字段）：字段只占字节内 N 位——
-    /// 同一字节内按声明顺序从高位到低位填充（大端位序），连续 bits 字段
-    /// 凑满 8 位即成一字节（如 IPv4 version+ihl 各 4 位 = 0x45）。
+    /// `#[meta(bits=N)]` 位宽（整型字段：u8 ≤8 / be16 ≤16 / be32 ≤32 / be64 ≤64）：
+    /// 字段只占位组内 N 位——同一组内按声明顺序从高位到低位填充（大端位序），
+    /// 连续 bits 字段凑满 8 的倍数位即成整字节组（如 IPv4 version+ihl 各 4 位
+    /// = 0x45；IPv6 version+TC+flow = 4+8+20 位跨 4 字节组）。
     pub bits: Option<u8>,
     /// `= 默认值`（未传参数时求值；可引用前序字段与参数）。
     pub default: Option<Value>,
@@ -271,6 +272,16 @@ pub struct FieldDecl {
     pub list_count: Option<Value>,
     /// 变长整数方案（`ty == Vint` 时必填；`#[meta(codec=...)]` 声明，无调用糖）。
     pub vint: Option<VintCodec>,
+    /// `#[meta(switch="字段")]` 判别式分派：解析时读前序字段值，按 `cases` 表
+    /// 选子 proto 反解本字段的字节窗口；构造侧值 = 字节直喂（同 rest 字段先例）。
+    /// 类型固定 [`FieldType::Bytes`]（值 = 窗口字节）。
+    pub switch_field: Option<Value>,
+    /// `#[meta(cases=[[值, "子proto"], ...])]` 判别表（`switch` 必配；值须互异）。
+    pub cases: Option<Vec<(i64, String)>>,
+    /// `#[meta(if="表达式")]` 条件在场守卫：整型表达式非零 = 字段存在——
+    /// 解析消费 0 位、构造不编码、实参可省略；表达式引用前序整型字段/参数
+    /// （`band`/`shr` 组合，非零语义，不引入布尔运算）。
+    pub if_cond: Option<Value>,
     pub span: Span,
 }
 

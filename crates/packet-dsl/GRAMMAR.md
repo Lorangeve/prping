@@ -103,9 +103,11 @@ proto_arg      = { meta_attr nl } value ;
                         `len` 的**表达式变换**（expr 里 `len` = 基准值——后续/
                         目标字节数；TCP data_offset 联动；`+`/mul/div/sub/shl/shr 可用）；
                       - `hex("60000000")` 等字面量：宽度自动推导（= 字节数），无需 bytes *)
-                       - `#[meta(bits=4)] u8(4)`：**位字段**（1..=8 位，仅 u8 字段）——
-                         同一字节内按声明顺序从高位到低位填充（大端位序），连续位字段
-                         凑满 8 位即成一字节（IPv4 version+ihl 各 4 位 = 0x45）；字面量
+                       - `#[meta(bits=4)] u8(4)`：**位字段**（整型字段容量内：u8 ≤8 /
+                         be16 ≤16 / be32 ≤32 / be64 ≤64 位）——
+                         同一位组内按声明顺序从高位到低位填充（大端位序），连续位字段
+                         凑满 8 的倍数位即成整字节组（IPv4 version+ihl 各 4 位 = 0x45；
+                         IPv6 version+TC+flow = 4+8+20 位跨 4 字节组）；字面量
                          默认值 = 常量校验（判别位），参数引用默认值 = 可变字段；
                        - `#[meta(codec="le128")] n` /
                          `#[meta(codec="prefix", prefix_bits=2, widths=[1,2,4,8])] len` /
@@ -127,14 +129,28 @@ meta_item      = "rest" | "list" | ident "=" value ;
                        `len` = 计算长度目标（`"auto"` = 后续全部字段字节数，原 @auto；
                        字段名 = 目标字段字节数，原 @len——两者统一为 len 目标）、
                       `bytes` = 宽度（字符串按值表达式子解析：`bytes="band(first, 3) + 1"`）、
-                      `rest` = rest 类型（可带子 proto：`rest="quic_crypto"`）、
+                      `rest` = rest 类型（可带子 proto：`rest="quic_crypto"`；
+                       与 `bytes=宽度` 同设 = **窗口内重复**——类型 = Bytes，
+                       窗口里循环单发反解子 proto 到耗尽（每次 ≥1 字节），
+                       恰好耗尽 → 子命中进 subs，未耗尽/未注册 → 整窗不透明
+                       字节降级——TCP options 等 data_offset 界定的中部重复区）、
                       `expr` = len 表达式变换（`expr="shl(div(len, 4) + 5, 4)"`，
                       `len` = 基准值）、`list` = 重复计数表达式 + `item` = 元素子 proto
                       （`#[meta(list="qdcount", item="dns_question")]`，两项须齐全；
                        重复到失败的哨兵形态已并入 `rest="子proto"`）、
                       
-                      `bits` = 位字段位宽（1..=8，仅 u8 字段；连续位字段须凑满整字节——
+                      `bits` = 位字段位宽（整型字段容量内：u8 ≤8 / be16 ≤16 /
+                      be32 ≤32 / be64 ≤64；连续位字段须凑满整字节——
                       位组总位宽 %8==0 才可接普通字段/结尾）、
+                      `switch` = 判别式分派（`switch="前序字段"`，类型固定 Bytes：
+                      解析时读前序字段值按 `cases` 表选子 proto 反解字节窗口，
+                      构造侧值 = 字节直喂）+ `cases` = 判别表
+                      （`cases=[[1, "rdata_a"], [28, "rdata_aaaa"]]`，值互异；
+                      有界窗口 `bytes=宽度` 下未命中/反解失败 → 整窗不透明字节
+                      降级，无界窗口 → 整体回退）+
+                      `if` = 条件在场守卫（`if="整型表达式"`——`band`/`shr` 组合
+                      引用前序字段，非零 = 字段存在：解析消费 0 位、构造不编码、
+                      实参可省略；与 bits/len/rest 互斥）、
                        `codec` = vint 方案名（le128/prefix/table，类型 = Vint）+
                        `prefix_bits`（1..=8）+ `widths`（整数列表，各 1..=8）+
                        `inline_max`（0..=255）+ `sentinels`（整数列表）+ `endian`（"be"/"le"）：

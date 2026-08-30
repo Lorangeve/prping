@@ -914,8 +914,9 @@ prping engine --pcap x.pcap --to-pkt dir/ --threads 8       # 8 线程并行解�
   1=Ethernet/101=Raw）只能 `raw` 存档，头注释会提示。
 - **语义结构化（A2，`--structured`）**：`dissect` 反解层栈 → 可读可编辑的 DSL 源码
   （`eth`/`arp`/`ipv4`/`ipv6`/`icmp`/`tcp`/`udp` 语义字段 + `bor(syn(), ack())` 等
-  位常量；`dns`/`http` 及语义无法表达的层——IPv4/TCP 选项头、TCP URG 指针、IPv6
-  traffic class/flow label——整段 `*_bytes(hex(...))` 字节直喂）。合法捕获经
+  位常量；`dns`/`http` 及转码器语义字段集尚未覆盖的层（DSL 原语已能表达，转码渲染逐层
+  跟进）——IPv4/TCP 选项头、TCP URG 指针、IPv6 traffic class/flow label——整段
+  `*_bytes(hex(...))` 字节直喂）。合法捕获经
   层序反转 + 每层 raw 头字节，重序列化**字节级一致**（roundtrip 保真）；有
   `remaining`（以太网填充/未知协议载荷）或无法反解时整条退回 A1（`fallback`）。
   头注释带层栈与 dissect 注记（如 checksum 错）。

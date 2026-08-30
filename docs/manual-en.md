@@ -939,9 +939,11 @@ Two routes:
   `raw` only, with a header comment.
 - **Semantic structured (A2, `--structured`)**: dissects the layer stack into
   readable, editable DSL source (`eth`/`arp`/`ipv4`/`ipv6`/`icmp`/`tcp`/`udp`
-  semantic fields plus bit constants like `bor(syn(), ack())`; layers the DSL
-  cannot express — IPv4/TCP option headers, the TCP URG pointer, IPv6 traffic
-  class/flow label — plus `dns`/`http` are fed byte-exact via `*_bytes(hex(...))`).
+  semantic fields plus bit constants like `bor(syn(), ack())`; layers beyond the
+  transcoder's semantic field set — IPv4/TCP option headers, the TCP URG pointer,
+  IPv6 traffic class/flow label (expressible in the DSL now that the field
+  primitives landed; renderer coverage to follow) — plus `dns`/`http` are fed
+  byte-exact via `*_bytes(hex(...))`).
   For valid captures, re-serialization is **byte-identical** (roundtrip fidelity via
   layer-order reversal + per-layer raw header bytes); records with leftover
   `remaining` bytes (Ethernet padding / unknown payloads) or that cannot be
