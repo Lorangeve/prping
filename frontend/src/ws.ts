@@ -1,0 +1,114 @@
+// prping web —— WS 信封传输层。
+//
+// 一条 WebSocket 上跑两种消息（服务端 crates/prping-core/src/web/ws.rs）：
+//   { type: "lsp",    message }            LSP JSON-RPC 双向透传
+//   { type: "result", id, ok, data|error } request() 的应答
+//   { type: "error",  message }            服务端拒绝（坏信封等）
+// request() 以自增 id 关联应答；断线自动重连（指数退避），重连后由上层重建
+// LSP 会话（initialize/didOpen 重放）。
+
+export type Status = "connected" | "connecting" | "closed";
+
+export class PrpingClient {
+  private ws: WebSocket | null = null;
+  private seq = 0;
+  private pending = new Map<number, (v: any) => void>();
+  private retry = 0;
+  private closedByUs = false;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  /** LSP JSON-RPC 消息回调（服务端 → 客户端方向）。 */
+  onLsp: ((message: any) => void) | null = null;
+  onStatus: ((s: Status) => void) | null = null;
+
+  connect(): void {
+    this.closedByUs = false;
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    this.setStatus("connecting");
+    const ws = new WebSocket(`${proto}//${location.host}/ws`);
+    this.ws = ws;
+    ws.onopen = () => {
+      this.retry = 0;
+      this.setStatus("connected");
+    };
+    ws.onmessage = (ev) => {
+      let env: any;
+      try {
+        env = JSON.parse(ev.data as string);
+      } catch {
+        return;
+      }
+      if (env.type === "lsp") {
+        this.onLsp?.(env.message);
+      } else if (env.type === "result" && typeof env.id === "number") {
+        const resolve = this.pending.get(env.id);
+        this.pending.delete(env.id);
+        resolve?.(env);
+      }
+      // type === "error"：无 id 关联，忽略（上层以超时兜底）
+    };
+    ws.onclose = () => {
+      this.ws = null;
+      this.setStatus("closed");
+      // 挂起的请求以失败收场，避免调用方永久悬挂
+      for (const resolve of this.pending.values()) resolve({ ok: false, error: "disconnected" });
+      this.pending.clear();
+      if (this.closedByUs) return;
+      // 指数退避重连：0.5s → 1s → 2s → 4s（上限）
+      const delay = Math.min(500 * 2 ** this.retry, 4000);
+      this.retry += 1;
+      this.timer = setTimeout(() => this.connect(), delay);
+    };
+    ws.onerror = () => ws.close();
+  }
+
+  close(): void {
+    this.closedByUs = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.ws?.close();
+    this.ws = null;
+  }
+
+  get isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  private setStatus(s: Status): void {
+    this.onStatus?.(s);
+  }
+
+  private sendRaw(obj: Record<string, unknown>): void {
+    this.ws?.send(JSON.stringify(obj));
+  }
+
+  /** 发送带 id 的信封并等待 result 应答。 */
+  request(payload: Record<string, unknown>): Promise<any> {
+    return new Promise((resolve) => {
+      if (!this.isConnected) {
+        resolve({ ok: false, error: "disconnected" });
+        return;
+      }
+      const id = ++this.seq;
+      this.pending.set(id, resolve);
+      this.sendRaw({ ...payload, id });
+    });
+  }
+
+  /** LSP JSON-RPC 消息出方向（通知或请求，服务端原样透传给会话）。 */
+  lspSend(message: Record<string, unknown>): void {
+    this.sendRaw({ type: "lsp", message });
+  }
+
+  /** 内存文本分析（engine --json 同构文档）。 */
+  analyze(uri: string, text: string, params: Record<string, string> = {}): Promise<any> {
+    return this.request({ type: "analyze", uri, text, params });
+  }
+
+  listLibs(): Promise<any> {
+    return this.request({ type: "list" });
+  }
+
+  readLib(name: string): Promise<any> {
+    return this.request({ type: "read", name });
+  }
+}

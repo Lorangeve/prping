@@ -34,6 +34,12 @@
     - `format.rs` — 随机数（`rand_u16`/`rand_u32`）、载荷填充（`echo_fill`）、时间戳（`unix_ts`）、字节格式化（`format_bytes`）、UDP 触发协议（`udp_receive_trigger`）
     - `interrupt.rs` — Ctrl+C 中断标志（`interrupted`/`set_interrupted`/`reset_interrupt`）+ `Run` 循环控制（按次数/时长/中断停止）
   - **`engine/`** — 包构造引擎（LSP/pcap/转码/配方），子模块 `eng/`（display/lsp）、`pkg/`（send/recipe/sniffer/raw/listen/listen_raw）
+  - **`web/`** — 内嵌 Web 编辑器服务器（`prping web`；异步 `serve_web` + `WebConfig`）
+    - `mod.rs` — 单端口入口：accept 循环（连接 task 分派 + Ctrl+C 轮询）+ 监听横幅 + `--open` 浏览器（open crate）
+    - `http.rs` — 极简 HTTP/1.1 GET/HEAD 响应（请求头 CRLFCRLF 截断、keep-alive、Content-Length；内嵌资源精确键匹配，免疫路径穿越）
+    - `ws.rs` — WebSocket 会话（仅 `/ws`，手工 101 + `from_raw_socket`）：信封协议（lsp 透传 / analyze / list / read）+ Content-Length 分帧解包（FrameDecoder，畸形/超限帧防御）+ 库文件只读浏览（纯文件名校验）
+    - `pipe.rs` — 异步↔阻塞字节桥（`smol::channel` 实现 `io::Read`/`io::Write`，EOF = 发送端 drop），LSP 阻塞线程跑现有 `run_lsp_on`（零改动复用）
+    - `assets.rs` — rust-embed 内嵌 `frontend/dist`（debug 运行期直读 / release 编译期内嵌）
   - **`stats.rs`** — 统计收集（min/max/avg/stddev/percentile/jitter）+ 直方图计算/渲染 + JSON/文本输出
   - **`drive.rs`** — `Probe` trait + 统一 ping 循环骨架（间隔/预热/统计/JSONL/收尾），icmp/tcp/udp/latency 共用
   - **`output.rs`** — 终端颜色（termcolor）+ 服务端连接日志 + 缩进工具函数（`indent`/`spaces`/`pad_to`）
@@ -117,6 +123,7 @@ prping trace [OPTIONS] HOST[:PORT] Traceroute（ICMP echo 默认；带端口自�
 prping engine [OPTIONS] FILE.pkt|.pktl  引擎：分析/LSP/--ls/--hex/--pcap/配方概览（无扩展名参数自动定位 pktl：先 `<arg>.pktl`，再同名文件夹 `<arg>/<arg>.pktl`；--ls 自动分页）
 prping packet [OPTIONS] FILE.pkt|.pktl [HOST:PORT]  构建发送/配方执行（--raw/--wait[SECS]/--fuzz/--out；裸 --wait = 持续监听回显，--wait --raw = 链路层监听按应答模板应答）
 prping document [SECTION]   使用手册（全文 / 章节跳转）
+prping web [--addr ADDR] [--port N] [--open] [--lib PATH]  内嵌 Web 编辑器（SolidJS SPA + CodeMirror + LSP；默认 127.0.0.1、端口自动分配；--open 打开浏览器；--lib 附加包库目录）
 prping -s ADDR|IFACE ...    指定源地址/网卡（测量子命令内）
 顶层 --version / --lang（任意位置）由 main() pre-scan 处理，不占子命令位
 ```
@@ -146,6 +153,7 @@ server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 16. 配方 `.pktl` — 多个 `.pkt` 按顺序发出，global 跨步骤存储 / extract / wait / raw 步骤开关 / on_error（细节 → `docs/claude-rules/engine.md`）
 17. 反向 DNS — `--reverse-dns`（`-R`）对探测结果中的 IP 地址进行反向 DNS 查询，`-R` 启用反向查询（增加延迟），输出中显示域名（如 `192.168.1.1 (gateway.example.com)`）
 18. engine/packet `--json` — `engine FILE.pkt/.pktl --json` 输出单个 JSON 文档（.pkt 结构化分析：sources→packets→层栈字段/hex/警告/raw_only；.pktl 配方概览：globals/params/steps/extract）；`packet FILE.pkt/.pktl --json` 输出 JSONL（每包一行 + 汇总行；配方模式含 step/extract 行）
+19. `prping web` 内嵌 Web 编辑器 — SolidJS SPA（CodeMirror 6）+ engine LSP（WS 信封桥接 `run_lsp_on`：诊断/补全/悬停）+ 实时层栈/HEX 预览（`analyze_text_json` 内存分析）+ eng_lib 只读浏览；`--open` 自动开浏览器；前端构建由 build.rs 自动执行（pnpm/npm，`just build-web` 单独构建，`PRPING_SKIP_WEB_BUILD=1` 跳过；产物内嵌二进制，发布目录另有 `web/` 副本）
 
 ## 协议学习资源
 
@@ -206,7 +214,7 @@ server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 ## 编码约定
 
 - Rust edition 2024
-- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --workspace --all-targets` 全通过（494 tests）
+- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --workspace --all-targets` 全通过
 - 用户可见输出英文，注释中文
 - 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端连接日志用 `output::print_server_log`）；bin 侧错误用红色、警告用橙色（lib re-export `output::{stderr, writeln_red, writeln_orange}` 给 bin 用）
 - 参数校验分层：子命令选项集结构性互斥 + `validate_*` 只留真校验 + lib `run` 管 config 级不变式

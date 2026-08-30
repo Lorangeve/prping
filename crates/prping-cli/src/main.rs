@@ -20,6 +20,7 @@ const SUBCOMMANDS: &[&str] = &[
     "engine",
     "packet",
     "document",
+    "web",
 ];
 
 /// Parse "host:port" string.
@@ -271,6 +272,16 @@ struct DocumentArgs {
     section: Option<String>,
 }
 
+/// web 子命令（内嵌 Web 编辑器：SolidJS SPA + CodeMirror + LSP 桥）
+#[derive(Clone)]
+struct WebArgs {
+    addr: Option<String>,
+    port: Option<u16>,
+    open: bool,
+    lib: Vec<String>,
+    lang: Option<String>,
+}
+
 /// 顶层命令枚举（子命令分发）。
 enum Command {
     Ping(PingArgs),
@@ -281,6 +292,7 @@ enum Command {
     Engine(EngineArgs),
     Packet(PacketArgs),
     Document(DocumentArgs),
+    Web(WebArgs),
 }
 
 fn ping_cmd() -> impl Parser<Command> {
@@ -544,7 +556,33 @@ fn document_cmd() -> impl Parser<Command> {
     .map(Command::Document)
 }
 
-/// 顶层解析器：8 个子命令平行组合（bpaf 要求子命令是首个 token）。
+/// web 子命令（内嵌 Web 编辑器：单端口 HTTP + WebSocket，--open 打开浏览器）
+fn web_cmd() -> impl Parser<Command> {
+    construct!(WebArgs {
+        addr(long("addr")
+            .argument::<String>("ADDR")
+            .help(t!("help.options.web_addr").as_ref())
+            .optional()),
+        port(long("port")
+            .argument::<u16>("N")
+            .help(t!("help.options.web_port").as_ref())
+            .optional()),
+        open(long("open").switch().help(t!("help.options.web_open").as_ref())),
+        lib(long("lib")
+            .argument::<String>("PATH")
+            .help(t!("help.options.lib").as_ref())
+            .many()),
+        lang(opt_lang()),
+    })
+    .to_options()
+    .usage(t!("help.usage_web").as_ref())
+    .descr(t!("cmd.web").as_ref())
+    .footer(t!("help.footer_web").as_ref())
+    .command("web")
+    .map(Command::Web)
+}
+
+/// 顶层解析器：9 个子命令平行组合（bpaf 要求子命令是首个 token）。
 fn cmd() -> impl Parser<Command> {
     construct!([
         ping_cmd(),
@@ -555,6 +593,7 @@ fn cmd() -> impl Parser<Command> {
         engine_cmd(),
         packet_cmd(),
         document_cmd(),
+        web_cmd(),
     ])
 }
 
@@ -957,6 +996,25 @@ fn run_server(a: ServerArgs) -> anyhow::Result<()> {
         )
     );
     Ok(())
+}
+
+/// web 子命令分发（内嵌 Web 编辑器服务器；监听行由 serve_web 打印）。
+fn run_web(a: WebArgs) -> anyhow::Result<()> {
+    apply_lang(&a.lang);
+    let addr = match &a.addr {
+        Some(s) => s
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| anyhow::anyhow!(t!("errors.invalid_bind", addr = s.as_str())))?,
+        // 默认仅回环：页面可触发引擎能力（读库/分析），不默认暴露到网络
+        None => std::net::IpAddr::from([127, 0, 0, 1]),
+    };
+    let cfg = prping_core::WebConfig {
+        addr,
+        port: a.port.unwrap_or(0),
+        libs: resolve_libs(&a.lib),
+        open_browser: a.open,
+    };
+    smol::block_on(prping_core::serve_web(cfg))
 }
 
 fn run_trace(a: TraceArgs) -> anyhow::Result<()> {
@@ -1502,6 +1560,7 @@ fn main() -> anyhow::Result<()> {
         Command::Engine(a) => run_engine(a),
         Command::Packet(a) => run_packet(a),
         Command::Document(a) => run_document(a),
+        Command::Web(a) => run_web(a),
     }
 }
 

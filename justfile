@@ -137,10 +137,31 @@ build-linux-all: build-release build-linux-32 build-linux-arm build-linux-arm64
 # 全平台产物（本机 + Windows + Linux 交叉）
 build-all: build-release build-windows build-linux-all
 # （与二进制同目录分发）。用法：just dist target/release
+# web/ = prping web 前端构建产物副本（二进制内已 rust-embed 内嵌同一份，
+# 此目录便于直接以任意静态服务器分发 UI 或核对产物）。
 dist DIR:
     mkdir -p {{DIR}}/lib {{DIR}}/examples
     cp -r eng_lib/* {{DIR}}/lib/
     cp -r examples/* {{DIR}}/examples/
+    if [ -f frontend/dist/index.html ]; then mkdir -p {{DIR}}/web && cp -r frontend/dist/. {{DIR}}/web/; else echo "警告: frontend/dist 未构建（just build-web），产物目录不含 web/"; fi
+
+# ── Web 编辑器（prping web）───────────────────────────────
+
+# 构建前端（SolidJS + CodeMirror）到 frontend/dist。cargo build 会经
+# prping-core/build.rs 自动执行同一构建（pnpm 优先、npm 兜底）；此配方用于
+# 单独刷新前端产物或 CI 缓存预热。开发模式：`prping web --port 8788` 起后端，
+# `pnpm --dir frontend dev` 起 Vite 热更新（/ws 与 /config.json 已配代理）。
+[script]
+build-web:
+    cd frontend
+    if command -v pnpm >/dev/null 2>&1; then
+        pnpm install --silent
+        pnpm build
+    else
+        npm install --no-audit --no-fund --silent
+        npm run build
+    fi
+    echo "前端产物：frontend/dist/（cargo build 自动内嵌进 prping 二进制）"
 
 # 下载并解压 Windows 链接库（Npcap SDK 的 wpcap.lib + windows-sys 0.36 的
 # windows.lib x64/x86）。用法：Windows 目标构建前先跑一次 `just fetch-npcap-sdk`。
@@ -177,7 +198,7 @@ publish-impl:
 # 发布：本机 release 构建 + eng_lib/examples 复制为 target/release/{lib/,examples/}。
 # 发布后从 target/release/ 运行 prping --eng x.pkt 会自动命中 lib/（默认库目录）
 publish: publish-impl (dist "target/release")
-    @echo "发布产物：target/release/{prping,lib/,examples/}"
+    @echo "发布产物：target/release/{prping,lib/,examples/,web/}"
 
 # ── 质量检查 ──────────────────────────────────────────────
 

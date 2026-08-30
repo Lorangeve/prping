@@ -174,6 +174,7 @@ cmd:
   engine: 'Packet engine: analyze .pkt/.pktl, LSP, --ls/--hex/--pcap'
   packet: Build packets from a .pkt/.pktl file and send
   document: 'Show the full user manual or jump to a specific chapter'
+  web: 'Embedded web editor: packet DSL with CodeMirror + LSP, live layer/hex preview'
 help:
   group:
     mode: Mode (auto-detected)
@@ -214,7 +215,7 @@ help:
     fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkt)
     out: Save built packets to a pcap file (like scapy wrpcap, with --pkt)
     summary: 'Summary mode: print a single result line (packet count, target, sent/failed); suppress per-packet detail'
-    ls: List all builtin layer functions with fields and auto behavior, paged (with --eng)
+    ls: List all builtin primitives and library protos with fields and auto behavior, paged (with --eng)
     hex: Dissect and show raw bytes from a hex string (with --eng)
     pcap: Read a pcap file and dissect every record (with --eng)
     to_pkt: Convert a pcap to per-record .pkt/.pktl files (with --pcap; lossless by default)
@@ -239,6 +240,9 @@ help:
     capture_filter: "Show only frames matching this tcpdump-style expression (requires -a): arp/icmp/tcp/udp/ip/ip6, port N, host IP, and/or/not, parentheses — plus eng_lib dissectable protocols (e.g. dns/http/quic_initial). Examples: \"arp or icmp\", \"tcp port 53\", \"dns\""
     version: Show version
     help_pkg: Full manual (paged); document SECTION jumps to a chapter (number or title)
+    web_addr: 'bind address (default: 127.0.0.1, loopback only)'
+    web_port: 'TCP port (default: auto-pick a free port)'
+    web_open: 'open the browser after startup'
   usage_ping: 'prping ping [OPTIONS] <HOST[:PORT]>'
   usage_latency: 'prping latency [OPTIONS] <HOST:PORT>'
   usage_bandwidth: 'prping bandwidth [OPTIONS] <HOST:PORT>'
@@ -287,6 +291,17 @@ help:
       prping document                  Full manual (paged)
       prping document 17               Jump to chapter 17 (Traceroute)
       prping document mtu              Jump to chapter about MTU
+  usage_web: 'prping web [--addr ADDR] [--port N] [--open] [--lib PATH]'
+  footer_web: |-
+    Serves the embedded web editor on 127.0.0.1 (loopback only by default):
+    packet DSL editing with CodeMirror (diagnostics / completion / hover via the
+    engine LSP), live layer stack + hex preview, and read-only eng_lib browsing.
+
+    Examples:
+      prping web                       Serve, print URL (port auto-picked)
+      prping web --open                Serve and open the browser
+      prping web --port 9000 --open    Fixed port
+      prping web --lib ./mylib --open  Extra packet library directory
   overview: |-
     prping — ping, latency, bandwidth measurement utility
 
@@ -305,6 +320,7 @@ help:
        trace       Traceroute (ICMP echo + increasing TTL)
        engine      Packet engine: analyze .pkt/.pktl, LSP, --ls/--hex/--pcap
        packet      Build packets from a .pkt/.pktl file and send
+       web         Embedded web editor (CodeMirror + LSP)
     Examples:
       prping ping 8.8.8.8                      ICMP ping (infinite)
       prping ping -n 10 -gp 8.8.8.8            ICMP, 10 pings, ploot graph
@@ -318,3 +334,4 @@ help:
       prping trace 8.8.8.8                     Traceroute
       prping engine file.pkt                   Analyze a packet script
       prping packet file.pkt 192.168.1.1:9000  Build and send packets
+      prping web --open                        Web editor (auto-open browser)

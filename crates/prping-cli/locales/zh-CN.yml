@@ -174,6 +174,7 @@ cmd:
   engine: 包引擎：分析 .pkt/.pktl、LSP、--ls/--hex/--pcap
   packet: 从 .pkt/.pktl 文件构建并发送网络包
   document: 显示完整使用手册或跳转到指定章节
+  web: 内嵌 Web 编辑器：packet DSL（CodeMirror + LSP），实时层栈/HEX 预览
 help:
   group:
     mode: 模式（自动识别）
@@ -212,7 +213,7 @@ help:
     fuzz: 发送前把未填字段全部随机化（对标 scapy fuzz()，配合 --pkt）
     out: 把构建的包存成 pcap 文件（对标 scapy wrpcap，配合 --pkt）
     summary: 摘要模式：只打印一行结果（包数、目标、发送/失败数），隐藏逐包详情
-    ls: 列出全部内置层函数的字段表与自动行为，分页显示（配合 --eng）
+    ls: 列出全部内置原语与库 proto 的字段表和自动行为，分页显示（配合 --eng）
     hex: 反解并展示十六进制字符串对应的包（配合 --eng）
     pcap: 读取 pcap 文件并逐条反解展示（配合 --eng）
     to_pkt: 把 pcap 逐条转码为 .pkt/.pktl（配合 --pcap；缺省无损字节级）
@@ -237,6 +238,9 @@ help:
     capture_filter: 只显示匹配该 tcpdump 风格表达式的帧（需 -a）：arp/icmp/tcp/udp/ip/ip6、port N、host IP、and/or/not、括号——另支持 eng_lib 可反解协议（如 dns/http/quic_initial）。如 "arp or icmp"、"tcp port 53"、"dns"
     version: 显示版本号
     help_pkg: 使用手册（分页）；document 章节标题 跳转（编号或标题）
+    web_addr: '监听地址（默认 127.0.0.1，仅回环）'
+    web_port: 'TCP 端口（默认自动分配空闲端口）'
+    web_open: '启动后自动打开浏览器'
   usage_ping: 'prping ping [选项] <HOST[:PORT]>'
   usage_latency: 'prping latency [选项] <HOST:PORT>'
   usage_bandwidth: 'prping bandwidth [选项] <HOST:PORT>'
@@ -285,6 +289,17 @@ help:
       prping document                  完整手册（分页）
       prping document 17               跳转第 17 章（路由跟踪）
       prping document mtu              跳转 MTU 相关章节
+  usage_web: 'prping web [--addr ADDR] [--port N] [--open] [--lib PATH]'
+  footer_web: |-
+    在 127.0.0.1 上伺服内嵌 Web 编辑器（默认仅回环）：
+    CodeMirror 编辑 packet DSL（经引擎 LSP 提供诊断/补全/悬停）、
+    实时层栈 + HEX 预览，以及 eng_lib 协议库只读浏览。
+
+    示例:
+      prping web                       启动并打印 URL（端口自动分配）
+      prping web --open                启动并打开浏览器
+      prping web --port 9000 --open    固定端口
+      prping web --lib ./mylib --open  附加包库目录
   overview: |-
     prping — ping, 延迟, 带宽测量工具
 
@@ -303,6 +318,7 @@ help:
        trace       路由跟踪（ICMP echo + 递增 TTL）
        engine      包引擎：分析 .pkt/.pktl、LSP、--ls/--hex/--pcap
        packet      从 .pkt/.pktl 构建并发送网络包
+       web         内嵌 Web 编辑器（CodeMirror + LSP）
     示例:
       prping ping 8.8.8.8                      ICMP ping（无限）
       prping ping -n 10 -gp 8.8.8.8            ICMP，10 次，ploot 图
@@ -316,3 +332,5 @@ help:
       prping trace 8.8.8.8                    路由跟踪
       prping engine file.pkt                  分析包脚本
       prping packet file.pkt 192.168.1.1:9000 构建并发送网络包
+      prping web --open                        Web 编辑器（自动打开浏览器）
+      prping web --open                        Web 编辑器（自动打开浏览器）

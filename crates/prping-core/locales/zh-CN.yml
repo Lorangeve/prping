@@ -438,3 +438,15 @@ help:
       prping trace 8.8.8.8                    路由跟踪
       prping engine file.pkt                  分析包脚本
       prping packet file.pkt 192.168.1.1:9000 构建并发送网络包
+
+web:
+  listening: 'web 编辑器: %{url}  （Ctrl+C 退出）'
+  opening: '正在打开浏览器: %{url}'
+  open_failed: '无法打开浏览器（%{err}）——请手动访问 %{url}'
+  exit_hint: 'Ctrl+C 停止'
+  frontend_missing: |-
+    前端资源未构建——先执行一次:
+      just build-web            （或: cd frontend && pnpm install && pnpm build）
+  read_bad_name: '库名不合法（只能是纯文件名）'
+  read_failed: '读取库文件失败: %{err}'
+  read_not_found: '未找到库文件: %{name}'

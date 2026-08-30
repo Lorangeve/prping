@@ -391,6 +391,16 @@ pub fn run_lsp_on<R: io::Read, W: io::Write>(
     lsp::run_lsp_on(reader, writer, libs)
 }
 
+/// 按编辑器 URI（`file://` 形式）解析内存文本（web analyze 复用 LSP 的
+/// uri → (模块名, 目录) 规则，供相对 import / 错误定位）。
+pub(crate) fn parse_editor_source(
+    uri: &str,
+    text: &str,
+    libs: &[PathBuf],
+) -> Result<packet_dsl::semantic::Module, packet_dsl::diag::Diagnostic> {
+    lsp::try_parse(text, uri, libs)
+}
+
 /// 列出全部内置原语与库层头函数的字段表（对标 scapy `ls()`）。
 /// 输出自动分页（tty 时使用 $PAGER，非 tty 时确保完整输出）。
 pub fn ls_builtins(libs: &[PathBuf]) -> anyhow::Result<()> {
@@ -594,12 +604,26 @@ fn analyze_file_json(
     libs: &[PathBuf],
     params: &[(String, String)],
 ) -> anyhow::Result<()> {
+    let doc = analyze_sources_doc(&path.display().to_string(), sources, total, libs, params)?;
+    serde_json::to_writer(&mut *w, &doc)?;
+    writeln!(w)?;
+    Ok(())
+}
+
+/// sources → 结构化 JSON 文档（`engine --json` 与 web analyze 共用）。
+fn analyze_sources_doc(
+    file_label: &str,
+    sources: &[(PacketSource, Vec<PacketSpec>)],
+    total: usize,
+    libs: &[PathBuf],
+    params: &[(String, String)],
+) -> anyhow::Result<Value> {
     let ser = DefaultSerializer::new();
     let mut doc = Map::new();
     doc.insert("tool".into(), json!("prping"));
     doc.insert("cmd".into(), json!("engine"));
     doc.insert("mode".into(), json!("analyze"));
-    doc.insert("file".into(), json!(path.display().to_string()));
+    doc.insert("file".into(), json!(file_label));
     doc.insert("total".into(), json!(total));
     doc.insert("libs".into(), json!(libs_display(libs)));
     let pm: Map<String, Value> = params
@@ -635,9 +659,28 @@ fn analyze_file_json(
         srcs.push(json!({ "kind": kind, "name": name, "packets": pk_arr }));
     }
     doc.insert("sources".into(), json!(srcs));
-    serde_json::to_writer(&mut *w, &Value::Object(doc))?;
-    writeln!(w)?;
-    Ok(())
+    Ok(Value::Object(doc))
+}
+
+/// 内存文本分析（web 编辑器用）：与 `engine --json` 同构的结构化文档。
+///
+/// `uri` 用 `file:///` 形式（供相对 import 与错误定位）；`params` 为运行时
+/// 参数；`libs` 为附加库目录（烘焙 eng_lib 自动生效）。解析/求值失败返回 Err
+/// （诊断文本与 CLI 一致）。
+pub fn analyze_text_json(
+    uri: &str,
+    text: &str,
+    params: &[(String, String)],
+    libs: &[PathBuf],
+) -> anyhow::Result<Value> {
+    let libs = effective_libs(libs);
+    let module = parse_editor_source(uri, text, &libs).map_err(|d| anyhow::anyhow!("{d}"))?;
+    let p: packet_dsl::Params = params.iter().cloned().collect();
+    let sources =
+        packet_dsl::resolve_sources_with_globals(&module, &p, &packet_dsl::Globals::new())
+            .map_err(|d| anyhow::anyhow!("{d}"))?;
+    let total: usize = sources.iter().map(|(_, p)| p.len()).sum();
+    analyze_sources_doc(uri, &sources, total, &libs, params)
 }
 
 pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {

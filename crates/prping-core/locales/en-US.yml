@@ -441,3 +441,15 @@ help:
       prping trace 8.8.8.8                     Traceroute
       prping engine file.pkt                   Analyze a packet script
       prping packet file.pkt 192.168.1.1:9000  Build and send packets
+
+web:
+  listening: 'web editor: %{url}  (Ctrl+C to exit)'
+  opening: 'opening browser: %{url}'
+  open_failed: 'could not open browser (%{err}) — open %{url} manually'
+  exit_hint: 'Ctrl+C to stop'
+  frontend_missing: |-
+    frontend assets not built — run once:
+      just build-web            (or: cd frontend && pnpm install && pnpm build)
+  read_bad_name: 'invalid library file name (bare file name only)'
+  read_failed: 'failed to read library file: %{err}'
+  read_not_found: 'library file not found: %{name}'

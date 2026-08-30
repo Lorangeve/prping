@@ -614,7 +614,8 @@ impl LspServer {
 }
 
 /// 解析文档（带 import 根）；URI 无法定位文件时退化为纯单文件解析。
-fn try_parse(text: &str, uri: &str, libs: &[PathBuf]) -> Result<Module, Diagnostic> {
+/// 解析内存文本（web analyze 复用；`file://` URI → 模块名/目录，其余按 untitled）。
+pub(crate) fn try_parse(text: &str, uri: &str, libs: &[PathBuf]) -> Result<Module, Diagnostic> {
     match uri_info(uri) {
         Some((name, dir)) => packet_dsl::parse_source_at_with_libs(&name, &dir, text, libs),
         None => packet_dsl::parse_str("untitled", text),

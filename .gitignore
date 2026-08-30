@@ -4,3 +4,7 @@
 /yak_linux_amd64
 /.cargo-home
 .xwin-cache/
+# prping web 前端：node_modules 与构建产物不入库（dist 由 build.rs/just build-web 生成，仅保留占位目录）
+frontend/node_modules/
+frontend/dist/*
+!frontend/dist/.gitkeep

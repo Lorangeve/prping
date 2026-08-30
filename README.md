@@ -75,6 +75,8 @@ prping engine FILE.pkt          # .pkt 分析（层栈 + hexdump）
 prping engine --lsp             # .pkt 语言服务器（JSON-RPC over stdio）
 prping packet FILE.pkt [HOST:PORT]  # 构建并发送（目标可省略）
 prping engine --pcap x.pcap --to-pkt dir/  # pcap → 每记录一个 .pkt + .pktl 配方（--structured 语义化）
+# Web 编辑器（内嵌进二进制，浏览器即用）：
+prping web --open               # 启动并自动打开浏览器（CodeMirror + LSP + 实时层栈/HEX 预览）
 ```
 
 ### 选项（按子命令分组）
@@ -145,9 +147,10 @@ use(payload) |> ipv4(bytes=hex("4500001c0001000040010000...")) |> eth(bytes=hex(
 
 ### pkglang 标准库（eng_lib → 发布为 `lib/`）
 
-packet-dsl 引擎内置只保留字节原语（`hex`/`raw` + `concat`/`be16`/`cksum`/`ip4`/... 与
-`layer(kind, bytes)` 层标注原语）；层头函数（`eth`/`arp`/`ipv4`/`ipv6`/`icmp`/`tcp`/`udp`/`http`/
-`dns`）与组合/数据组装函数统一放标准库 [eng_lib/](eng_lib/)（`headers.pkt`：层头函数；
+packet-dsl 引擎内置只保留字节原语（`hex`/`raw` + `concat`/`be16`/`count`/`cksum`/... 与
+`layer(kind, bytes)` 层标注原语）；层头自表示协议（`eth`/`arp`/`ipv4`/`ipv6`/`icmp`/`tcp`/`udp`/`http`/
+`dns`，`#[proto]` 字段表双端驱动：构造编码 + 反解）与组合/数据组装函数统一放标准库
+[eng_lib/](eng_lib/)（`headers.pkt`：层头 proto（可反解）；
 `bytes.pkt`：`*_bytes` 层标注包装；`net.pkt`：net4/net6 一次生成 IP+Eth 层；`data.pkt`：
 `eth_frame`/`ip4_packet`/`net4_packet`/`net6_packet` 把 raw/hex 字节载荷直接组装成包）。
 `hex("...")` 也可在参数值位置使用（hex 字符串 → 字节列表）。
@@ -222,6 +225,11 @@ LSP / pcap）集成在 prping 同一 binary 中（与测量模式互斥）。
 [docs/manual-en.md](docs/manual-en.md)，随 `--lang` 选择）：26 章覆盖全部模式/选项/
 统计（含 jitter）/JSON/MTU/`-s`/退出码/FAQ/示例。长文在 tty 下经 `less` 自动分页，
 文档头部有目录，`prping document <编号或标题>` 直接跳转章节学习。
+
+## 设计文档
+
+- [docs/design-web-editor.md](docs/design-web-editor.md) — `prping web` 内嵌 Web 编辑器
+  （总体架构、WS 信封协议、LSP 桥、构建链、安全模型与路线图）
 
 ## 示例
 

@@ -79,6 +79,7 @@ pub(crate) mod ping;
 mod serve;
 mod stats;
 mod util;
+pub mod web;
 
 // ── 公开 API ─────────────────────────────────────────────────────────────
 // 注意：engine/pkg 路径（分析/LSP/pcap 转码/发送/配方/listen）随 CLI 一起公开——
@@ -103,10 +104,10 @@ pub use ping::trace::{DEFAULT_MAX_HOPS, TraceReport, traceroute};
 // 引擎模块
 pub use engine::convert::{ConvertOptions, ConvertReport, convert_pcap};
 pub use engine::eng::{
-    analyze_file, analyze_recipe, decode_hex, decode_pcap, dns_type_name, effective_libs,
-    ensure_proto_registry, layer_name, libs_display, ls_builtins, opt_bytes_len, render_dissected,
-    render_hexdump, render_layers, render_packet, render_packet_fields, run_lsp, run_lsp_on,
-    value_display,
+    analyze_file, analyze_recipe, analyze_text_json, decode_hex, decode_pcap, dns_type_name,
+    effective_libs, ensure_proto_registry, layer_name, libs_display, ls_builtins, opt_bytes_len,
+    render_dissected, render_hexdump, render_layers, render_packet, render_packet_fields, run_lsp,
+    run_lsp_on, value_display,
 };
 pub use engine::pcap::{LinkType, PcapRecord, linktype_of, read_pcap, write_pcap};
 pub use engine::pkg::{
@@ -117,6 +118,9 @@ pub use engine::pkg::{
 pub use engine::recipe::{
     Extract, ExtractAs, FromSpec, GlobalDecl, OnError, Recipe, Step, StepRaw, parse as parse_recipe,
 };
+
+// Web 编辑器服务器（`prping web`）
+pub use web::{WebConfig, serve_web};
 
 // ── 核心类型 ──────────────────────────────────────────────────────────────
 
