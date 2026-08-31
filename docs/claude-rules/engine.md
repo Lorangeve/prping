@@ -44,6 +44,17 @@
 - `prping engine FILE.pkt`：模块概览 + 逐包层栈（字段 + `auto` 标注）+ 字节 hexdump
   （`src/eng.rs`）；`engine --lsp`：.pkt LSP 服务器
   （JSON-RPC over stdio，`run_lsp_on` 可测；诊断/补全/悬停/documentSymbol）。
+  补全按光标位置上下文出候选（`eng/lsp.rs::pkt_context`）：层位（`|>` 后/`|>` 续行/
+  def 值位 `name = ` 之后/函数体语句）只给 use+层函数+库函数、实参名位给所属函数未填的 `name=`（本地/库/内置参数表，hex/params
+  等位置实参原语不弹）、值位给值原语+作用域参数名+值函数并按 (函数,参数) 加权
+  （flags=→syn/ack…、dst=→ip4/mac…）、顶层语句位给语句关键字+注解、字符串/注释内不弹；
+  .pktl 配方与 import/export/sniffer/attr 各有专属分支。候选 `sortText` 分级且数组序一致，
+  前端（UI cm.ts）保序渲染，不重复实现位置判定；出口按光标部分词前缀过滤（`ud`→udp 系，
+  空词不过滤），孤立 `|`（`>` 未打）按层位出候选，未完调用名（已知名字的严格前缀）宁空勿噪。
+  诊断打词豁免（仅 LSP 路径，CLI 保持严格）：「未知/未定义名字」且名字是已知名字（本地
+  def/func 兜底扫描 + 库 + 内置 + 层类型 + 关键字，`use` 关键字等值例外）的严格前缀 → 本步不报；
+  前端另过滤末行「输入已结束」类 parse 错误（span 恒在 EOF，打字中间态必然存在），
+  「字符串未闭合」「非法 token」等精准中间态提示保留。
 - `prping packet FILE.pkt [HOST:PORT]`：构建并一次性发送全部变体包（`src/pkg.rs`）。
   目标优先级：显式 `HOST:PORT` > 包内最外层 IP 层 `dst` 推导（`derive_target`，
   payload 模式还需传输层 `dport`）> 省略。raw 模式端口无意义，允许裸 `HOST`

@@ -142,19 +142,46 @@ fn completion_offers_keywords_and_builtins() {
             2,
             "textDocument/completion",
             json!({
-                "textDocument": { "uri": URI }, "position": { "line": 0, "character": 1 }
+                // 语句关键字位（光标前无部分词；服务端按部分词前缀过滤候选）
+                "textDocument": { "uri": URI }, "position": { "line": 0, "character": 0 }
             }),
         ),
     ]);
     let items = &msgs[1]["result"]["items"];
     let items = items.as_array().unwrap();
     let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
-    for kw in ["export", "import", "use"] {
-        assert!(labels.contains(&kw), "缺少关键字 {kw}: {labels:?}");
+    // 顶层语句位：只给语句关键字与注解（该位不接受调用/原语）
+    for kw in ["use", "func", "export:", "import", "#[proto]"] {
+        assert!(labels.contains(&kw), "缺少语句关键字 {kw}: {labels:?}");
     }
-    // 引擎原语（raw/hex/layer）始终提供
+    assert!(
+        !labels.contains(&"tcp") && !labels.contains(&"u8"),
+        "顶层语句位不应混入调用名: {labels:?}"
+    );
+
+    // 层位（|> 之后）：层头/内置层原语/库导出都在
+    let msgs = run_session(vec![
+        notif(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": { "uri": URI, "languageId": "pkt", "version": 1,
+                                  "text": "a = tcp()\nfull = use(a) |>\n" }
+            }),
+        ),
+        req(
+            2,
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": URI }, "position": { "line": 1, "character": 16 }
+            }),
+        ),
+    ]);
+    let items = &msgs[1]["result"]["items"];
+    let items = items.as_array().unwrap();
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    // 引擎原语（raw/hex/layer）
     for b in ["raw", "hex", "layer"] {
-        assert!(labels.contains(&b), "缺少内置原语 {b}: {labels:?}");
+        assert!(labels.contains(&b), "层位缺少内置原语 {b}: {labels:?}");
     }
     // 层头函数与 *_bytes 具名包装来自 eng_lib 库导出（隐式可见，无需 import）
     for b in [
@@ -172,16 +199,43 @@ fn completion_offers_keywords_and_builtins() {
         "tcp_bytes",
         "dns_bytes",
     ] {
-        assert!(labels.contains(&b), "缺少库导出 {b}: {labels:?}");
+        assert!(labels.contains(&b), "层位缺少库导出 {b}: {labels:?}");
     }
-    // 合法文档时还提供元件名
-    assert!(labels.contains(&"a"), "缺少元件 a: {labels:?}");
     // tcp 是库函数：detail 带 func 签名
     let tcp = items.iter().find(|i| i["label"] == "tcp").unwrap();
     assert!(
         tcp["detail"].as_str().unwrap().contains("-> bytes tcp("),
         "tcp detail: {:?}",
         tcp["detail"]
+    );
+
+    // 值位（dport= 之后，光标在值前）：值原语与本地元件在列，层头不出现
+    let msgs = run_session(vec![
+        notif(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": { "uri": URI, "languageId": "pkt", "version": 1,
+                                  "text": "a = tcp()\nfull = use(a) |> udp(dport=53)\n" }
+            }),
+        ),
+        req(
+            2,
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": URI }, "position": { "line": 1, "character": 27 }
+            }),
+        ),
+    ]);
+    let items = &msgs[1]["result"]["items"];
+    let items = items.as_array().unwrap();
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    for b in ["hex", "raw", "u8", "params", "concat"] {
+        assert!(labels.contains(&b), "值位缺少值原语 {b}: {labels:?}");
+    }
+    assert!(labels.contains(&"a"), "值位应可引用本地元件 a: {labels:?}");
+    assert!(
+        !labels.contains(&"eth") && !labels.contains(&"ipv4"),
+        "值位不应有层头: {labels:?}"
     );
 }
 
@@ -216,6 +270,29 @@ fn hover_on_unknown_word_is_null() {
         notif(
             "textDocument/didOpen",
             json!({
+                "textDocument": { "uri": URI, "languageId": "pkt", "version": 1,
+                                  "text": "a = tcp()\nbogus_thing()\n" }
+            }),
+        ),
+        req(
+            4,
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": URI }, "position": { "line": 1, "character": 3 }
+            }),
+        ),
+    ]);
+    // 未知名字（非内置/本地/库/元件/参数）仍为无提示
+    assert_eq!(msgs[1]["result"], Value::Null);
+}
+
+#[test]
+fn hover_on_local_def_shows_component() {
+    // 本地元件悬停：定义 + 片段（此前恒为无提示）
+    let msgs = run_session(vec![
+        notif(
+            "textDocument/didOpen",
+            json!({
                 "textDocument": { "uri": URI, "languageId": "pkt", "version": 1, "text": "a = tcp()\n" }
             }),
         ),
@@ -227,7 +304,9 @@ fn hover_on_unknown_word_is_null() {
             }),
         ),
     ]);
-    assert_eq!(msgs[1]["result"], Value::Null);
+    let md = msgs[1]["result"]["contents"]["value"].as_str().unwrap();
+    assert!(md.contains("`a`") && md.contains("元件"), "{md}");
+    assert!(md.contains("a = tcp()"), "{md}");
 }
 
 #[test]

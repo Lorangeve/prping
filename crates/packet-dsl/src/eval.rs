@@ -74,7 +74,10 @@ fn layer_raw_bytes(l: &Layer) -> Option<Vec<u8>> {
 /// 值表达式：取位置 span（用于报错）。
 fn v_span(v: &Value) -> crate::ast::Span {
     match v {
-        Value::Call { span, .. } | Value::BinOp { span, .. } | Value::Ident { span, .. } => *span,
+        Value::Call { span, .. }
+        | Value::BinOp { span, .. }
+        | Value::Ident { span, .. }
+        | Value::Param { span, .. } => *span,
         _ => crate::ast::Span::new(0, 0, 0, 0),
     }
 }
@@ -1522,7 +1525,7 @@ impl EvalCtx<'_> {
                 // 环境值可能是 Param/嵌套值表达式 → 递归解析
                 self.eval_value(module, &v)
             }
-            Value::Param { name, default } => {
+            Value::Param { name, default, .. } => {
                 // 宿主注入值：按形状解析（0x 前缀/纯数字 → 数值，否则字符串）；
                 // 未注入：求值**默认值表达式**（可为 be16(...)/hex(...)/字面量/字节列表）；
                 // 两者都无：报错。

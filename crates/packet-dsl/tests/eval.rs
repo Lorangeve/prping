@@ -213,7 +213,7 @@ fn params_fill_string() {
     );
 }
 
-/// 缺失参数且无默认值 → 报错。
+/// 缺失参数且无默认值 → 报错；诊断定位到 `params(...)` 调用处（而非 0:0 兜底）。
 #[test]
 fn params_missing_is_error() {
     let m = parse_str(
@@ -223,6 +223,15 @@ fn params_missing_is_error() {
     .expect("解析成功");
     let err = packet_dsl::resolve_with_params(&m, &Params::new()).unwrap_err();
     assert!(err.message.contains("未提供"), "{}", err.message);
+    // `params(` 起始于第 2 行第 21 列；Display 前缀即 `2:21:`
+    let sp = err.span.expect("缺参诊断应带 span");
+    assert_eq!(sp.start.line, 2, "定位到调用行：{}", err);
+    assert_eq!(sp.start.col, 21, "定位到 params( 起始列：{}", err);
+    assert!(
+        err.to_string().starts_with("2:21: "),
+        "Display 应以真实位置开头：{}",
+        err
+    );
 }
 
 /// 参数用于地址字段。

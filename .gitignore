@@ -9,3 +9,7 @@ frontend/node_modules/
 frontend/dist/*
 !frontend/dist/.gitkeep
 # target/<profile>/UI（just build/build-release 同步的前端产物）已由 /target 覆盖
+
+# npm/playwright 本地缓存与临时工具目录（误生成不入库）
+.npm-cache/
+.pw-test/

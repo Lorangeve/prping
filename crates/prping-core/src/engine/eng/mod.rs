@@ -3,7 +3,6 @@
 //! - 精美输出：模块概览 → 逐来源逐包展示层栈（字段 + auto 标注）→ 字节 hexdump（带 ASCII）。
 //! - LSP：JSON-RPC over stdio（Content-Length 分帧），提供诊断 / 补全 / 悬停 / 文档符号。
 
-mod astdoc;
 mod display;
 mod lsp;
 
@@ -26,8 +25,6 @@ use crate::util::hex_str;
 use display::{
     describe_packet_layers, render_listen_template, render_module_header, stack_warning_messages,
 };
-
-pub use astdoc::{ast_text_json, blocks_json, schema_json};
 
 /// 列表项展示：字节项（0..=255 的 Int/Hex）→ 两位小写十六进制，其余递归 `value_display`。
 ///
@@ -61,7 +58,7 @@ pub fn value_display(v: &packet_dsl::ast::Value) -> String {
             let inner: Vec<String> = items.iter().map(byte_item_display).collect();
             format!("[{}]", inner.join(", "))
         }
-        packet_dsl::ast::Value::Param { name, default } => match default {
+        packet_dsl::ast::Value::Param { name, default, .. } => match default {
             Some(d) => format!("params(\"{name}\", {})", value_display(d)),
             None => format!("params(\"{name}\")"),
         },
@@ -169,7 +166,7 @@ fn walk_call_args(
 /// 遍历值表达式里的 params 节点。
 fn walk_value(v: &packet_dsl::ast::Value, out: &mut Vec<(String, Option<packet_dsl::ast::Value>)>) {
     match v {
-        packet_dsl::ast::Value::Param { name, default } => {
+        packet_dsl::ast::Value::Param { name, default, .. } => {
             out.push((name.clone(), default.as_deref().cloned()));
         }
         packet_dsl::ast::Value::Call { args, .. } => {

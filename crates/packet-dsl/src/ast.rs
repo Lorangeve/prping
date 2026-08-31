@@ -437,6 +437,8 @@ pub enum Value {
     Param {
         name: String,
         default: Option<Box<Value>>,
+        /// 整个 `params(...)` 调用的 span：缺参报错定位到调用处（而非 0:0 兜底）。
+        span: Span,
     },
     /// 函数参数引用：`dst=dst` 右侧的裸标识符，求值时从当前函数的参数环境取值。
     /// 未提供的参数（未设）在层参数位置表示省略（自动值），由求值阶段处理。

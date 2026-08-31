@@ -107,16 +107,6 @@ export class PrpingClient {
     return this.request({ type: "analyze", uri, text, params });
   }
 
-  /** AST 结构化导出（块视图 IR；解析/语义失败 → ok:false，块视图降级）。 */
-  ast(uri: string, text: string): Promise<any> {
-    return this.request({ type: "ast", uri, text });
-  }
-
-  /** 原语/库层 schema（块字段提示与文档；每次连接取一次）。 */
-  schema(): Promise<any> {
-    return this.request({ type: "schema" });
-  }
-
   listLibs(): Promise<any> {
     return this.request({ type: "list" });
   }

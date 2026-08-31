@@ -19,8 +19,6 @@
 //!   { "type": "workspace", "id": 9, "path": "/dir" }     打开自定义文件夹（"" 重置默认）
 //!   { "type": "browse",  "id": 11, "path": "/dir" }      浏览目录（文件夹选择对话框数据源；
 //!                                                        path 缺省 = 用户主目录）
-//!   { "type": "ast",     "id": 12, "uri": "file:///x.pkt", "text": "…" }  AST 导出（块视图 IR）
-//!   { "type": "schema",  "id": 13 }                      原语/库层 schema（块字段提示）
 //! server → client
 //!   { "type": "lsp", "message": {…publishDiagnostics/响应…} }
 //!   { "type": "result", "id": 1, "ok": true, "data": … | "ok": false, "error": "…" }
@@ -240,44 +238,6 @@ async fn dispatch(
                 let _ = tx.send(reply).await;
             })
             .detach();
-        }
-        Some("ast") => {
-            // 块视图 IR：AST 结构化导出（与 analyze 同一解析入口，原文保真切片）。
-            // 解析/语义失败 → ok:false（前端块视图降级为提示，文本视图不受影响）
-            let uri = env
-                .get("uri")
-                .and_then(Value::as_str)
-                .unwrap_or("file:///untitled.pkt")
-                .to_string();
-            let text = env
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let libs = sess.libs.clone();
-            let tx = reply_tx.clone();
-            smol::spawn(async move {
-                let reply = match smol::unblock(move || crate::blocks_json(&uri, &text, &libs))
-                    .await
-                {
-                    Ok(doc) => json!({ "type": "result", "id": id, "ok": true, "data": doc }),
-                    Err(e) => {
-                        json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
-                    }
-                };
-                let _ = tx.send(reply).await;
-            })
-            .detach();
-        }
-        Some("schema") => {
-            // 块字段提示/悬停文档（builtin_docs + eng_lib 层头函数；每次连接取一次）
-            let libs = sess.libs.clone();
-            let _ = reply_tx
-                .send(json!({
-                    "type": "result", "id": id, "ok": true,
-                    "data": crate::schema_json(&libs),
-                }))
-                .await;
         }
         Some("list") => {
             let _ = reply_tx

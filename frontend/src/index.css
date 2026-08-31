@@ -111,6 +111,36 @@ body {
   filter: brightness(1.1);
 }
 
+.reload-btn {
+  background: transparent;
+  color: var(--text-dim, #9aa3b2);
+  border: 1px solid #3a4152;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.reload-btn:hover {
+  color: var(--text, #e8ebf2);
+  border-color: #5a6478;
+}
+
+.draft-btn {
+  background: transparent;
+  color: var(--accent, #4da3ff);
+  border: 1px dashed #3a4152;
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.draft-btn:hover {
+  border-color: var(--accent, #4da3ff);
+}
+
 .file-msg {
   color: var(--err);
   font-size: 12px;
@@ -126,6 +156,76 @@ body {
   display: grid;
   grid-template-columns: minmax(210px, 250px) minmax(340px, 1fr) minmax(300px, 42%);
   min-height: 0;
+}
+
+/* Markdown 文档：诊断/层栈/HEX 侧栏不存在——编辑/渲染 + 大纲栏 */
+.main.main-md {
+  grid-template-columns: minmax(210px, 250px) minmax(340px, 1fr) minmax(150px, 190px);
+}
+
+/* ── Markdown 大纲栏（标题层级树，点击滚动/跳行）────────────────── */
+.md-outline {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--bg-panel);
+  padding: 8px 0;
+}
+
+.md-outline-head {
+  padding: 2px 12px 8px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.md-outline-item {
+  padding: 3px 12px 3px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.md-outline-item:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.md-outline-item.lv-1 { font-weight: 600; color: var(--text); }
+.md-outline-item.lv-2 { padding-left: 18px; }
+.md-outline-item.lv-3 { padding-left: 30px; }
+.md-outline-item.lv-4 { padding-left: 42px; }
+.md-outline-item.lv-5 { padding-left: 54px; }
+.md-outline-item.lv-6 { padding-left: 66px; }
+
+/* ── .pkt 大纲页签（documentSymbol：def/func/export/default）──────── */
+.outline-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.outline-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.outline-name {
+  color: var(--text);
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── 左栏文件管理（工作区 + eng_lib）────────────────── */
@@ -668,40 +768,12 @@ body {
 }
 
 
-/* ── 块视图（Blockly 只读预览）────────────────────────── */
+/* Markdown 渲染期间隐藏编辑器（.md 文件渲染/编辑切换） */
 .editor-pane.hidden {
   display: none;
 }
 
-.blocks-pane {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  border-right: 1px solid var(--border);
-  background: #16161d;
-}
-
-.blocks-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #8a8a9a;
-  font-size: 13px;
-  pointer-events: none;
-  background: #16161d;
-  z-index: 2;
-  padding: 0 24px;
-  text-align: center;
-}
-
-.blocks-overlay.blocks-error {
-  color: #e06c75;
-  pointer-events: auto;
-}
-
-/* 视图切换（text / blocks）——顶栏右侧一组小页签 */
+/* Markdown 渲染/编辑切换——顶栏右侧一组小页签 */
 .view-toggle {
   display: flex;
   margin-left: auto;
@@ -722,17 +794,6 @@ body {
 .view-toggle button.active {
   background: var(--accent);
   color: #10131a;
-}
-
-/* 块视图可编辑提示（右上角小字） */
-.blocks-hint {
-  position: absolute;
-  top: 6px;
-  right: 12px;
-  z-index: 3;
-  color: #8a8a9a;
-  font-size: 11px;
-  pointer-events: none;
 }
 
 /* Markdown 渲染视图（.md 文件的渲染/编辑切换——渲染态） */
@@ -833,18 +894,6 @@ body {
 
 .pkg-link:hover {
   text-decoration: underline;
-}
-
-/* analyze 失败横幅（参数缺失等构建错误——LSP 诊断不覆盖） */
-.analyze-error {
-  padding: 6px 10px;
-  border-bottom: 1px solid rgba(224, 108, 117, 0.35);
-  background: rgba(224, 108, 117, 0.08);
-  color: var(--err);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 /* 运行参数区（.pkt 文档）：一行一个参数（params('ip') 等注入预览） */

@@ -12,7 +12,6 @@
 作为 `engine` / `packet` 子命令的可视化补充：
 
 - **文本编辑**：CodeMirror 6 + 引擎现有 LSP（诊断 / 补全 / 悬停 / 文档符号）；
-- **低代码编辑**（规划中）：Blockly 积木视图，Scratch 风格（Zelos 渲染器）；
 - **实时反馈**：编辑即分析——层栈字段、字节数、hexdump、层序警告实时刷新；
 - **协议学习**：eng_lib 协议库（headers.pkt 等 21 个文件）只读浏览；
 - **文件管理**：左栏文件树——默认打开**启动目录**的 `examples/` 文件夹（发现方法与
@@ -86,7 +85,6 @@
 | 编辑器 | CodeMirror 6（state/view/language/lint/autocomplete/search/commands） | Lezer 生态可后续换正式语法；本期用 `StreamLanguage` 简易分词 |
 | LSP 客户端 | 自写薄封装（`src/lsp.ts`，~150 行） | 服务端仅 5 个能力（diagnostics/completion/hover/documentSymbol/definition），`codemirror-languageserver` 泛用封装反而重 |
 | Markdown 渲染 | 自写极简渲染器（`src/markdown.ts`） | LSP 文档只产出固定子集（标题/粗体/行内代码/列表/围栏代码块/段落）；先整体转义 HTML 实体再套标记，innerHTML 注入安全。落选 marked/markdown-it（为一个 tooltip 引整库不值） |
-| 低代码 | **规划：Blockly + Zelos 渲染器**（§10） | Zelos 即 Scratch 积木外观；Blockly vanilla JS 可包进 Solid。落选 scratch-blocks（停更）、Rete.js/Drawflow（节点画布适合拓扑图，pkt DSL 是层栈+步骤序列，嵌套块更贴合） |
 | UI | 手写 CSS（深色，~300 行） | 单页三面板布局，引入 Tailwind/Kobalte 收益低 |
 | 包管理 | bun（build.rs/justfile 自动降级 npm） | bun 自带锁文件与脚本运行器、install 快；npm 随 node 附带兜底 |
 
@@ -189,8 +187,6 @@ LSP `ChanReader` 读到 EOF → `run_lsp_on` 返回 → `out_tx`（ChanWriter）
 { "type": "mkdir",  "id": 6, "name": "sub/dir" }  // 新建目录（父链自动创建）
 { "type": "workspace", "id": 7, "path": "…" }     // 打开/重置/查询工作区根（path 省略=查询）
 { "type": "browse", "id": 8, "path": "/dir" }     // 列子目录（文件夹选择对话框数据源；缺省=主目录）
-{ "type": "ast", "id": 9, "uri": "file:///x.pkt", "text": "…" }  // AST 结构化导出（块视图 IR；解析/语义失败 ok:false）
-{ "type": "schema", "id": 10 }                    // 原语/库层 schema（块字段提示与文档）
 ```
 
 服务端 → 客户端：
@@ -286,8 +282,9 @@ frontend/
     ├── cm.ts          CodeMirror 组装：高亮 + lint + 补全 + 悬停 + 深色主题 + 可编辑开关（Compartment）
     ├── markdown.ts    极简 Markdown → HTML（hover / 补全文档渲染；先转义后套标记）
     ├── pktlang.ts     StreamLanguage 分词（# 注释 / #[ 注解 / 关键字 / 0x 十六进制 / |> / 字段名）
-    ├── blocks.tsx     块视图（阶段 1 只读）：ast 信封 → Blockly(Zelos) 工作区，懒加载独立 chunk
-    ├── panels.tsx     诊断 / 层栈 / HEX 三面板
+    ├── panels.tsx     诊断 / 层栈 / HEX / 大纲 四面板（Markdown 文档侧栏不渲染——
+                       LSP/analyze 管线不适用，改为「内容 + 标题大纲栏」双栏；
+                       analyze 应答对 md 一律丢弃，`refreshAnalyze` 对 md 不调度）
     ├── sample.ts      空态兜底示例文档（无工作区/无可开文件时出现）
     └── index.css      深色样式（三栏：文件树 220px + 编辑器 + 面板）
 ```
@@ -338,39 +335,12 @@ frontend/
 
 | LSP 能力 | CodeMirror 呈现 |
 |---|---|
-| `publishDiagnostics` | `@codemirror/lint` `setDiagnostics`（severity 1→error，其余→warning；行/列 0 基 → doc offset） |
-| `textDocument/completion` | `autocompletion.override` 异步源；`insertText`（如 `tcp()`）原样展开；kind 3→function；documentation（markdown）经 `renderMarkdown` 懒渲染为 info 气泡（选中项才转 HTML） |
-| `textDocument/hover` | `hoverTooltip`，markdown `contents.value` 经 `markdown.ts` 渲染为 HTML（标题/粗体/行内代码/列表/围栏代码块；先整体转义，注入安全） |
+| `publishDiagnostics` | `@codemirror/lint` `setDiagnostics`（severity 1→error，其余→warning；行/列 0 基 → doc offset）。末行「输入已结束」类 parse 错误不展示——span 恒在 EOF，打字中间态必然存在；「字符串未闭合」「非法 token」等精准中间态提示保留。诊断统一归 Diagnostics 页签：LSP 诊断 + analyze 构建错误（运行期参数缺失等，作 `analyze` 来源的诊断行）同列表，页签计数含构建错误；Layers/Hex 空态给「Build failed — see the Diagnostics tab.」指向提示，不再用横幅盖在面板上 |
+| `textDocument/completion` | `autocompletion.override` 异步源；服务端按位置上下文（层位/实参名位/值位/语句位/import/export/sniffer/attr/配方/字符串注释）返回该位语法合法且 `sortText` 分级的候选，前端保序渲染（数组序轻衰减 boost）；`name()` 光标落括号内、`params("")` 光标落引号内并顺势弹下一级；kind 映射 function/keyword/property/namespace；documentation（markdown）经 `renderMarkdown` 懒渲染为 info 气泡（选中项才转 HTML） |
+| `textDocument/hover` | `hoverTooltip`（hoverTime 400ms），markdown `contents.value` 经 `markdown.ts` 渲染为 HTML（标题/粗体/行内代码/列表/围栏代码块；先整体转义，注入安全）。**查询前同步全文必须去重**（`LspClient.lastSent`）：补全/悬停源内的 `lsp.change` 若在内容未变时仍发 didChange，服务端必回 publishDiagnostics → `applyDiagnostics` 视图更新 → CM hover 的 `update()` 重启 hover（20ms），异步源 pending 被顶掉、应答永远过期——tooltip 永不出现（headless Chrome + CDP 帧捕获定位） |
+| `textDocument/documentSymbol` | Outline 页签（.pkt：component def / func / export / 默认导出，点击 `revealLine` 跳行）；Markdown 文档侧栏为标题大纲栏（与渲染器同规则解析 `#`，围栏内不算；渲染模式滚动定位、编辑模式行跳转） |
 
 补全/悬停均为「编辑器位置 → LSP 0 基行列」的轻适配；超时 3s 兜底返回 null 不卡 UI。
-
-### 5.4 块视图（低代码）与文本的边界
-
-**文本是单一事实源**：块编辑器是视图而非平行存储。已落地阶段 0+1+2（可编辑回写）：
-
-- **`ast` 信封 = 块视图 IR**（`eng/eng/astdoc.rs`）：直接序列化 AST（def/pipeline/
-  func/proto/import/sniffer，节点带 1 基 span），调用实参按 span 从源码**原文切片**
-  （保留 0x/引号/表达式原样）。注意 analyze 的 `fields` 是渲染后的展示串
-  （len/checksum 已求值、raw 层从字节反解），做不了编辑 IR——只够只读层栈面板；
-- **前端 `blocks.tsx`**：ast → Blockly(Zelos) 工作区（层=块、字段=输入行、管线=next
-  链、proto/func/import/sniffer=信息卡）；顶栏 text/blocks 切换；Blockly 动态 import
-  懒加载成独立 chunk（~746KB），文本视图首屏不受影响；
-- **编辑与回写（阶段 2）**：仅工作区文件可编辑（eng_lib 只读注入 readOnly 工作区）。
-  字段值/层名（下拉，`schema` 信封供候选）提交即按 **call span** 重生成该调用文本；
-  结构操作走右键菜单——加/删字段、后插层、删层、删语句、新建语句——按 **item span**
-  重生成整句。回写 = App 侧按 span 拼接 `text()` → `setDoc` → 既有 LSP/analyze/ast
-  防抖刷新闭环（脏标记/Ctrl+S 照常）。**astText 过期守卫**：文本已变（ast 未跟上）
-  时丢弃块编辑并刷新，杜绝旧 span 写坏新文本；
-- **语法边界**（GRAMMAR：管线必须以 `use(...)` 开头）：`def = call`（纯内容）的层块
-  不提供「后插层」（`def = call |> x` 非法），改提供 **Wrap in new statement**——追加
-  `name_wrapped = use(name) |> layer()` 新语句（即 examples 的 get/full 惯用法）；
-- **已知限制**：被编辑语句内部的换行续行折叠为单行（语句外格式/注释全保留）；跨行
-  值只读；use 名单暂不可在块里编辑；func/proto/import/sniffer 信息卡不可编辑；
-- **阶段 3（配方 .pktl）已实现**：`blocks_json` 按扩展名路由——.pktl 返回 recipe
-  形态（global 项 + 步骤，行区间 + 文件 token fileSpan），块视图一个 .pkt 一个块
-  （改名/加步/删步行级拼接）；右侧 Recipe/Globals 面板（数据表视图）与块视图共存；
-- 一个函数一个块：层块类型由 schema 信封动态注册（`pkt_fn_<层名>`，参数行 = schema
-  参数 + 默认值；源里省略的参数显示默认，提交时显式化）；未知层回退通用 `pkt_card`；
 
 ---
 
@@ -456,7 +426,7 @@ Ctrl+C 提示只在 listening 行尾出现一次，`--open` 的 opening 行不�
 （`open_failed` 例外——手动访问需要完整地址）；
 CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web_*`，
 `help.usage_line` 摘要与 `build-web` 输出同步双语）。前端 UI 文案当前为英文
-（MVP；面板文案少，随块编辑器一并接前端 i18n）。
+（MVP；面板文案少）。
 
 ---
 
@@ -472,7 +442,6 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 | `ws.rs` | FrameDecoder（整帧/单字节碎帧/畸形头不卡死/超限丢弃）、params 形状、`read` 路径穿越拒绝 |
 | `workspace.rs` | 路径校验（穿越/特殊段/Windows 保留名；扩展名开/关两模式）、符号链接逃逸拒绝、save（父目录自动创建/覆盖写/临时文件清理）/read/delete（目录递归删除）/rename（改名+跨目录移动+目标存在拒绝）/mkdir（嵌套+已存在拒绝）往返、二进制文件读拒绝、目录树排序/全部普通文件/隐藏跳过/深度截断、browse（排序/隐藏跳过/父链/缺失路径报错）、open_folder 存在性校验、选择器输出三态解析（unix） |
 | `eng/mod.rs` | `analyze_text_json` 与 CLI `--json` 同构（随 engine 既有测试回归） |
-| `eng/astdoc.rs` | `ast_text_json`：源码顺序（span 升序）、def/pipeline/use 结构、实参原文保真（0x/引号/跨行切片）、空文档、语义错误 Err；`schema_json`：builtins + eng_lib 层头（icmp proto 含 type 参数） |
 
 ### 9.2 端到端验证记录（Node `WebSocket` 客户端，对真实服务端）
 
@@ -501,18 +470,6 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 6. analyze 以真实 `file://` URI（examples 子目录文件）→ ok，import 解析正常；
 7. HTTP：`/` 200 text/html、`/config.json` 200、未知路径 404。
 
-块视图阶段 0+1 端到端（Node `WebSocket` 客户端对真实服务端，9/9 通过）；阶段 2 编辑
-闭环（字段/改名/插删层/删语句 round-trip）与阶段 3 配方块（渲染/改名/加删步）同法
-验证通过：
-
-1. `ast` 合法文档 → ok，items 按源码顺序（def 在前、顶层 pipeline 在后）；
-2. def 实参原文保真：`type=8,id=0x1234,seq=1`（0x 前缀原样）；
-3. 管线层序内→外（`ipv4|>eth`）、use 名单、引号值原样（`"127.0.0.1"`）；
-4. `schema` → builtins 34 项 + libLayers 含 icmp proto（`type` 参数在列）；
-5. `ast` 未知名（语义错误）→ ok:false，错误文案与 CLI 一致（块视图降级依据）；
-6. 前端构建：Blockly 懒加载独立 chunk（主包 429KB / 块 chunk 746KB gzip 201KB），
-   `tsc --noEmit` 对新增文件零错误；`/` 与 `/config.json` 200（UI 目录模式）。
-
 资源分发双模式端到端（curl 对真实服务端）：
 
 1. 默认构建 + 启动目录 `UI/`：`/` 200 text/html、`/assets/*.js` 200、`/config.json` 200、
@@ -528,7 +485,6 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 
 | 项 | 现状 | 计划 |
 |---|---|---|
-| 低代码编辑 | **阶段 0+1+2+3 已实现**：`ast`/`schema` 信封 + Blockly(Zelos) 积木视图——.pkt 按 layer 一块（可编辑：字段值/层名下拉/右键加删字段/插删层/删语句/新建语句，按 call/item span 拼接回写 + astText 过期守卫；use 管线后插层按语法门控，纯内容 def 走 Wrap in new statement）；.pktl 按步骤一块（`blocks_json` recipe 形态：步骤行区间 + 文件 token fileSpan，改名/加步/删步行级拼接；global 信息卡）；eng_lib 只读；懒加载独立 chunk | use 名单块内编辑；语句内格式保留（续行不折叠）；global 项编辑 |
 | 发送/监听 | 无 | 「Run」按钮 → 服务端复用 `packet` 发送路径（SendMode/PkgOptions 现成），进度/结果走新信封类型回传 |
 | 文件保存 | 已实现：左栏文件管理（工作区 = 默认 examples/ 或自定义目录）tree/save/read/delete（目录递归）/rename/mkdir 信封 + 路径逐段校验 + 根内断言 + Ctrl+S 保存/新建/删除/改名/移动 + 目录树折叠（默认全收起，展开集跟踪）+ 右键菜单（打开/改名/删除/新建/刷新） | URL 随机 token 鉴权（与下方「鉴权」行合并推进，发送能力上线时必做） |
 | 鉴权 | 无（仅回环） | URL 随机 token（`prping web` 打印带 token 的 URL），发信封校验——发送能力上线时必做 |
@@ -549,10 +505,14 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
    EOF 语义 = 发送端 drop，全链路无 OS 管道、无平台差异。
 4. **前端构建挂 core 的 build.rs**——rust-embed 读盘时机在 core 编译期，构建逻辑
    必须先行（详见 §7.1）；bun→npm 降级保证 CI/裸环境可编译。
-5. **文本为单一事实源**——块编辑器是视图而非平行存储；块视图 IR 取 **AST 导出**
-   （`ast_text_json`：节点 span + 实参原文切片）而非 analyze 的渲染结果——后者
-   字段已求值（checksum/len/auto）且无位置信息，只读展示够用、编辑会失真。
-   求值结果永远由 analyze 面板呈现，块视图只管结构。
+5. **移除低代码积木视图（原 Blockly 块编辑器，2026-09）**——曾以 `ast`/`schema` 信封 +
+   `eng/astdoc.rs`（AST 结构化导出：节点 span + 实参原文切片）+ `frontend/blocks.tsx`
+   实现积木编辑/回写（阶段 0+1+2+3），最终整体移除：DSL 语法面极小，拼包的难点在
+   协议语义而非语法，积木消除的成本有限；而块视图要求每个 DSL 特性在第二表示里
+   再实现一遍（span 回写、过期守卫、语法门控、降级路径），维护税随 DSL 演进永久
+   累积。受众上，需要积木的新手往往没有 raw socket 权限，会拼包的用户已有 Scapy/hping。
+   移除后文本编辑器 + analyze 层栈/HEX 实时预览是唯一编辑面——求值结果
+   （checksum/len/auto）永远由 analyze 呈现，不引入平行存储。
 6. **资源默认不内嵌，`UI/` 目录兜底**——内嵌改成可选 `web-embed` feature（默认关）：
    前端产物与 Rust 编译零耦合（改前端不触发重编）、默认构建无需 node 工具链（离线/
    交叉/CI 零负担）、二进制小 ~2MB；分发形态 = 二进制 + `UI/` 目录（`just dist` 自带，

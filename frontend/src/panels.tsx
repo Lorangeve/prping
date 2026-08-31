@@ -42,7 +42,7 @@ function fieldsRows(fields: string): { k: string; v: string }[] {
   });
 }
 
-export type Panel = "diagnostics" | "layers" | "hex" | "recipe" | "globals";
+export type Panel = "diagnostics" | "layers" | "hex" | "recipe" | "globals" | "outline";
 
 /** .pktl 配方概览（服务端 parse_text 同构 JSON）。 */
 export interface RecipeDoc {
@@ -62,14 +62,18 @@ export interface RecipeDoc {
   }[];
 }
 
-/** 诊断列表（空态给一行提示）。 */
-export function DiagnosticsPanel(props: { diags: LspDiag[] }) {
+/** 诊断列表：LSP 诊断 + analyze 构建错误（运行期参数缺失等——LSP 诊断不覆盖）
+ *  一并列在本页签；空态给一行提示。 */
+export function DiagnosticsPanel(props: { diags: LspDiag[]; buildError?: string | null }) {
   return (
     <div class="panel-body">
-      <Show
-        when={props.diags.length > 0}
-        fallback={<div class="empty-hint">No diagnostics — document parses clean.</div>}
-      >
+      <Show when={props.buildError}>
+        <div class="diag diag-error">
+          <span class="diag-pos">analyze</span>
+          <span class="diag-msg">{props.buildError}</span>
+        </div>
+      </Show>
+      <Show when={props.diags.length > 0}>
         <For each={props.diags}>
           {(d) => (
             <div class={`diag ${d.severity <= 1 ? "diag-error" : "diag-warn"}`}>
@@ -77,6 +81,49 @@ export function DiagnosticsPanel(props: { diags: LspDiag[] }) {
                 {d.line + 1}:{d.character + 1}
               </span>
               <span class="diag-msg">{d.message}</span>
+            </div>
+          )}
+        </For>
+      </Show>
+      <Show when={!props.buildError && props.diags.length === 0}>
+        <div class="empty-hint">No diagnostics — document parses clean.</div>
+      </Show>
+    </div>
+  );
+}
+
+/** 文档大纲（LSP documentSymbol：component def / func / export / 默认导出）。
+ *  点击行号跳转（编辑器滚动到该行）。.pktl 配方无符号——页签不出现。 */
+export interface OutlineSym {
+  name: string;
+  kind: number; // 12=Function 13=Variable(def) 14=Constant(export) 2=Module(default)
+  detail: string;
+  line: number; // 0-based
+}
+
+const KIND_TAG: Record<number, string> = {
+  2: "default",
+  12: "func",
+  13: "def",
+  14: "export",
+};
+
+export function OutlinePanel(props: { symbols: OutlineSym[]; onJump: (line: number) => void }) {
+  return (
+    <div class="panel-body">
+      <Show
+        when={props.symbols.length > 0}
+        fallback={<div class="empty-hint">No definitions yet.</div>}
+      >
+        <For each={props.symbols}>
+          {(s) => (
+            <div
+              class="outline-item"
+              title={s.detail || s.name}
+              onClick={() => props.onJump(s.line)}
+            >
+              <span class="badge">{KIND_TAG[s.kind] ?? "sym"}</span>
+              <span class="outline-name">{s.name}</span>
             </div>
           )}
         </For>
@@ -128,14 +175,20 @@ function PacketMeta(props: { p: FlatPacket }) {
 
 /** 层栈视图：全部 sources → 全部 packets 逐个渲染（层字段键值 + raw 标注）；
  *  文件带 `sniffer:` 段时附匹配子句列表（顶层子句间隐式 OR）。解析/构建失败
- *  不在此展示——分析错误由面板顶部横幅承载（LSP 诊断不含运行期参数错误）。 */
-export function LayersPanel(props: { doc: AnalyzeDoc | null }) {
+ *  不在此展示——分析错误归 Diagnostics 页签（空态给指向提示）。 */
+export function LayersPanel(props: { doc: AnalyzeDoc | null; buildError?: string | null }) {
   const packets = createMemo(() => allPackets(props.doc));
   return (
     <div class="panel-body">
       <Show
         when={packets().length > 0 || (props.doc?.sniffer?.length ?? 0) > 0}
-        fallback={<div class="empty-hint">No packets yet — start typing a pipeline.</div>}
+        fallback={
+          <div class="empty-hint">
+            {props.buildError
+              ? "Build failed — see the Diagnostics tab."
+              : "No packets yet — start typing a pipeline."}
+          </div>
+        }
       >
         <For each={packets()}>
           {(p) => (
@@ -304,11 +357,20 @@ export function GlobalsPanel(props: { doc: RecipeDoc | null }) {
 }
 
 /** HEX 视图：全部包依次渲染（16 字节/行：offset + hex + ascii）。 */
-export function HexPanel(props: { doc: AnalyzeDoc | null }) {
+export function HexPanel(props: { doc: AnalyzeDoc | null; buildError?: string | null }) {
   const packets = createMemo(() => allPackets(props.doc));
   return (
     <div class="panel-body">
-      <Show when={packets().length > 0} fallback={<div class="empty-hint">No packet bytes.</div>}>
+      <Show
+        when={packets().length > 0}
+        fallback={
+          <div class="empty-hint">
+            {props.buildError
+              ? "Build failed — see the Diagnostics tab."
+              : "No packet bytes."}
+          </div>
+        }
+      >
         <For each={packets()}>
           {(p) => (
             <div class="pkt-block">
@@ -378,6 +440,7 @@ export function PanelTabs(props: {
           { id: "diagnostics" as Panel, label: "Diagnostics" },
           { id: "layers" as Panel, label: "Layers" },
           { id: "hex" as Panel, label: "Hex" },
+          { id: "outline" as Panel, label: "Outline" },
         ];
   return (
     <div class="tabs">

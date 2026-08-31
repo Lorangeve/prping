@@ -606,6 +606,9 @@ mod tests {
     #[test]
     fn browse_lists_dirs_sorted_skips_hidden_and_files() {
         let root = temp_root("browse");
+        // macOS 下 $TMPDIR 经 /var → /private/var 符号链接：先 canonicalize，
+        // 与 browse 返回的已解析路径同基（Linux /tmp 无链接，行为不变）
+        let root = std::fs::canonicalize(&root).unwrap();
         std::fs::create_dir_all(root.join("b_dir")).unwrap();
         std::fs::create_dir_all(root.join("a_dir")).unwrap();
         std::fs::create_dir_all(root.join(".hidden_dir")).unwrap();

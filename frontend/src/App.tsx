@@ -2,7 +2,7 @@
 // 数据流：编辑 →（防抖）→ LSP didChange + analyze 请求 → 诊断/层栈/HEX 更新。
 // 文件面：工作区（examples / 自定义文件夹）可编辑保存（Ctrl+S），eng_lib 只读。
 
-import { For, createEffect, onCleanup, onMount, createSignal, Show } from "solid-js";
+import { For, Index, createMemo, onCleanup, onMount, createSignal, Show } from "solid-js";
 
 /** analyze 应答带的运行参数声明（params("名", 默认)）。 */
 interface DeclParam {
@@ -10,7 +10,7 @@ interface DeclParam {
   default: string | null;
 }
 import type { EditorView } from "@codemirror/view";
-import { applyDiagnostics, createEditor, setDoc, setEditable } from "./cm";
+import { applyDiagnostics, createEditor, revealLine, setDoc, setEditable } from "./cm";
 import { FileSidebar, FolderDialog, type CurrentFile, type TreeEntry } from "./files";
 import { draftKey, Keys, kvDel, kvGet, kvSet } from "./store";
 import { LspClient, type LspDiagnostic } from "./lsp";
@@ -20,12 +20,13 @@ import {
   GlobalsPanel,
   HexPanel,
   LayersPanel,
+  OutlinePanel,
   PanelTabs,
   RecipePanel,
+  type OutlineSym,
   type RecipeDoc,
 } from "./panels";
 import { SAMPLE_DOC } from "./sample";
-import { BlocksView, type BlockDoc } from "./blocks";
 import { renderMarkdown } from "./markdown";
 import { PrpingClient, type Status } from "./ws";
 
@@ -37,9 +38,22 @@ export function App() {
   const [doc, setAnalyzeDoc] = createSignal<AnalyzeDoc | null>(null);
   // .pktl 配方概览（analyze 信封对配方文档返回配方结构而非层栈）
   const [recipeDoc, setRecipeDoc] = createSignal<RecipeDoc | null>(null);
-  // analyze 失败横幅（运行期参数缺失/构建错误——LSP 诊断不覆盖这类语义错误）
+  // analyze 失败错误（运行期参数缺失/构建错误——LSP 诊断不覆盖这类语义错误）。
+  // 不再作横幅盖在 Layers/Hex 上：统一进 Diagnostics 页签（诊断行 + 页签计数），
+  // Layers/Hex 空态给指向提示
   const [analyzeErr, setAnalyzeErr] = createSignal<string | null>(null);
-  // 面板顶的运行参数：文件声明过（params("名", 默认)）则渲染结构化输入行，
+  // 去重后的构建错误：解析/语义错误 LSP 与 analyze 都报（analyze 文案含文件路径，
+  // 通常包住 LSP 消息）——消息互相包含视为同源，只显示 LSP 行
+  const buildErrShown = () => {
+    const err = analyzeErr();
+    if (!err) return null;
+    return diags().some((d) => err.includes(d.message) || d.message.includes(err))
+      ? null
+      : err;
+  };
+  // 文档大纲（LSP documentSymbol；.pkt 编辑器 Outline 页签）
+  const [symbols, setSymbols] = createSignal<OutlineSym[]>([]);
+  // Layers 页签顶的运行参数：文件声明过（params("名", 默认)）则渲染结构化输入行，
   // 否则退回自由文本 k=v；值随每次 analyze 传给服务端构建
   const [runParams, setRunParams] = createSignal("");
   const [runValues, setRunValues] = createSignal<Record<string, string>>({});
@@ -48,15 +62,8 @@ export function App() {
   const [panel, setPanel] = createSignal<Panel>("layers");
   const [version, setVersion] = createSignal("");
 
-  // 块视图（阶段 1：只读预览）：ast IR + text/blocks 视图切换
-  const [viewMode, setViewMode] = createSignal<"text" | "blocks">("text");
   // Markdown 视图：渲染（renderMarkdown HTML）/ 编辑（源码）——仅 .md 文件用
   const [mdMode, setMdMode] = createSignal<"render" | "edit">("render");
-  const [astDoc, setAstDoc] = createSignal<BlockDoc | null>(null);
-  const [astErr, setAstErr] = createSignal<string | null>(null);
-  const [schema, setSchema] = createSignal<any>(null);
-  // ast 构建时的文本快照：块编辑回写前比对，过期（文本已变）则丢弃本次编辑
-  const [astText, setAstText] = createSignal<string | null>(null);
 
   // 文件管理：工作区树 / 当前文件 / 已保存文本（与编辑器文本比较得 dirty）
   const [wsRoot, setWsRoot] = createSignal<string | null>(null);
@@ -65,6 +72,11 @@ export function App() {
   const [text, setText] = createSignal(SAMPLE_DOC);
   const [savedText, setSavedText] = createSignal<string | null>(SAMPLE_DOC);
   const [fileMsg, setFileMsg] = createSignal<string | null>(null);
+  // 与磁盘不同的本地草稿：**默认不恢复**（磁盘为准），显式点击才载入——
+  // 此前草稿静默压过磁盘，被历史 bug 污染的草稿会让每次打开都错
+  const [pendingDraft, setPendingDraft] = createSignal<{ path: string; text: string } | null>(
+    null,
+  );
 
   let editorHost!: HTMLDivElement;
   let view: EditorView;
@@ -73,7 +85,6 @@ export function App() {
   let analyzeTimer: ReturnType<typeof setTimeout> | null = null;
   let changeTimer: ReturnType<typeof setTimeout> | null = null;
   let draftTimer: ReturnType<typeof setTimeout> | null = null;
-  let astTimer: ReturnType<typeof setTimeout> | null = null;
 
   const client = new PrpingClient();
   const lsp = new LspClient(client);
@@ -95,6 +106,8 @@ export function App() {
   const isMd = () => (current()?.path ?? "").toLowerCase().endsWith(".md");
   // .pktl 配方文档：侧栏切 Recipe/Globals 页签，analyze 返回配方概览
   const isPktl = () => (current()?.path ?? "").toLowerCase().endsWith(".pktl");
+  // 文档是否引用运行参数（params(...)）：完全没用就不渲染 params 输入区
+  const usesRunParams = () => /\bparams\s*\(/.test(text());
 
   client.onStatus = (s) => {
     setStatus(s);
@@ -104,31 +117,41 @@ export function App() {
       if (!isMd()) {
         lsp.start(lsp.documentUri, text());
         refreshAnalyze();
-        refreshAst();
       }
       refreshLibs();
       refreshTree();
-      // schema（块编辑的层名/字段候选）：每连接取一次
-      void client.schema().then((s) => {
-        if (s.ok) setSchema(s.data);
-      });
     }
   };
 
   function refreshAnalyze() {
+    // Markdown：不进 analyze 管线（引擎 LSP/analyze 不适用）
+    if (isMd()) return;
     if (analyzeTimer) clearTimeout(analyzeTimer);
     analyzeTimer = setTimeout(async () => {
+      void refreshSymbols(); // 大纲与 analyze 同节奏刷新（md/pktl 内部自清）
       // 请求时刻的文档：应答往返期间文件可能已切换，过期应答直接丢弃；
       // 配方判定也按请求时 URI（isPktl() 是应答到达时的状态，快速切换会灌错面板）
       const uri = lsp.documentUri;
       const res = await client.analyze(uri, text(), buildRunParams());
       if (uri !== lsp.documentUri) return; // 过期应答：文件已切换
-      // 声明的运行参数成功/失败应答都带：结构化输入行的数据源
+      if (isMd()) return; // 已切到 Markdown：面板已停用，不接收 analyze 结果
+      // 声明的运行参数成功/失败应答都带：结构化输入行的数据源。
+      // 声明未变（打参数值时最常见的情形）不替换——新数组会触发下游重建
       const decl = (res.data as { params?: DeclParam[] } | undefined)?.params;
-      if (decl) setDeclParams(decl);
+      if (decl) {
+        const prev = declParams();
+        const same =
+          prev.length === decl.length &&
+          prev.every((p, i) => p.name === decl[i].name && p.default === decl[i].default);
+        if (!same) setDeclParams(decl);
+      }
       if (!res.ok) {
-        // 构建失败（如 params('ip') 未提供）：LSP 不报这类错误，横幅就地呈现
+        // 构建失败（如 params('ip') 未提供）：LSP 不报这类错误——进 Diagnostics 页签。
+        // 上一次的成功结果同时清掉：Layers/Hex 空态显示「Build failed」指向提示，
+        // 不无声展示陈旧层栈
         setAnalyzeErr(res.error as string);
+        setAnalyzeDoc(null);
+        setRecipeDoc(null);
         return;
       }
       setAnalyzeErr(null);
@@ -143,23 +166,48 @@ export function App() {
     }, 250);
   }
 
-  function refreshAst() {
-    // .pktl 也走 ast 信封（blocks_json 的 recipe 形态）——块视图按步骤渲染
-    if (astTimer) clearTimeout(astTimer);
-    astTimer = setTimeout(async () => {
-      const uri = lsp.documentUri; // 应答期间文件可能已切换，过期应答丢弃
-      const snapshot = text();
-      setAstText(snapshot);
-      const res = await client.ast(uri, snapshot);
-      if (uri !== lsp.documentUri) return;
-      if (res.ok) {
-        setAstDoc(res.data as BlockDoc);
-        setAstErr(null);
-      } else {
-        // 解析/语义失败：块视图降级为提示（保留上次成功结果不动）
-        setAstErr(res.error as string);
-      }
-    }, 250);
+  /** 文档符号（Outline 页签）：md/配方无符号——清空即可。应答过期丢弃。 */
+  async function refreshSymbols() {
+    if (isMd() || isPktl()) {
+      setSymbols([]);
+      return;
+    }
+    const uri = lsp.documentUri;
+    const res = await lsp.documentSymbol();
+    if (uri !== lsp.documentUri || isMd() || isPktl()) return;
+    const arr = Array.isArray(res) ? res : [];
+    setSymbols(
+      arr.map((s: any) => ({
+        name: s.name ?? "",
+        kind: s.kind ?? 0,
+        detail: s.detail ?? "",
+        line: s.range?.start?.line ?? 0,
+      })),
+    );
+  }
+
+  /** Markdown 标题大纲：与渲染器同规则（围栏内 # 不算标题），index 对应渲染后
+   *  DOM 里 h1..h6 的出现序，点击滚动定位；编辑模式走编辑器行跳转。 */
+  const mdOutlineItems = createMemo(() => {
+    const out: { level: number; text: string; index: number; line: number }[] = [];
+    let inFence = false;
+    text().split("\n").forEach((line, ln) => {
+      if (line.startsWith("```")) inFence = !inFence;
+      if (inFence) return;
+      const m = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (m) out.push({ level: m[1].length, text: m[2].trim(), index: out.length, line: ln });
+    });
+    return out;
+  });
+
+  let mdRenderHost!: HTMLElement;
+  function jumpMdHeading(h: { index: number; line: number }) {
+    if (mdMode() === "render") {
+      const heads = mdRenderHost?.querySelectorAll("h1,h2,h3,h4,h5,h6");
+      heads[h.index]?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } else if (view) {
+      revealLine(view, h.line);
+    }
   }
 
   async function refreshLibs() {
@@ -208,7 +256,7 @@ export function App() {
 
   function onEditorUpdate(t: string) {
     setText(t);
-    // Markdown：无 LSP 全文同步 / 分析 / 块视图——只走草稿持久化
+    // Markdown：无 LSP 全文同步 / 分析——只走草稿持久化
     if (isMd()) {
       if (draftTimer) clearTimeout(draftTimer);
       draftTimer = setTimeout(() => {
@@ -221,7 +269,6 @@ export function App() {
     if (changeTimer) clearTimeout(changeTimer);
     changeTimer = setTimeout(() => lsp.change(t), 250);
     refreshAnalyze();
-    refreshAst();
     // 草稿持久化（防抖 1s；仅工作区文件——eng_lib 只读不产生差异）
     if (current()?.root === "ws") {
       if (draftTimer) clearTimeout(draftTimer);
@@ -268,13 +315,14 @@ export function App() {
     setFileMsg(null);
     setAnalyzeErr(null);
     setDeclParams([]); // 新文件的参数声明待首次 analyze 返回
+    setPendingDraft(null);
     setEditable(view, file.root === "ws");
     if (isMd()) {
       // Markdown：不进 LSP 会话（诊断/补全/悬停停用）；清残留诊断与面板
       setDiags([]);
       setAnalyzeDoc(null);
-      setAstDoc(null);
       setRecipeDoc(null);
+      setSymbols([]);
       setMdMode("render");
       // 从配方切来时页签组没有 recipe/globals，落回诊断
       if (panel() === "recipe" || panel() === "globals") setPanel("diagnostics");
@@ -285,7 +333,6 @@ export function App() {
       // 配方文档：侧栏切 Recipe 页签，清层栈残留
       setAnalyzeDoc(null);
       setRecipeDoc(null);
-      setAstDoc(null);
       setPanel("recipe");
     } else if (panel() === "recipe" || panel() === "globals") {
       // 配方 → 普通文档：页签组已换回 Layers/Hex，面板停在 recipe/globals
@@ -294,7 +341,6 @@ export function App() {
     }
     lsp.openDoc(uri, content);
     refreshAnalyze();
-    refreshAst();
   }
 
   async function openWsFile(path: string) {
@@ -307,10 +353,15 @@ export function App() {
     const disk = (res.data as { text: string }).text;
     // 草稿恢复：浏览器库里存有未落盘文本（≠ 磁盘）则恢复并标记未保存
     const draft = await kvGet<string>(draftKey("ws", path));
-    const content = draft != null && draft !== disk ? draft : disk;
+    if (draft != null && draft !== disk) {
+      setPendingDraft({ path, text: draft });
+      setFileMsg("draft from last session differs from disk — disk loaded; restore draft to switch");
+    } else {
+      setPendingDraft(null);
+    }
     applyOpen(
       { root: "ws", path },
-      content,
+      disk,
       root ? fileUri(root, path) : `file:///${path}`,
       disk,
     );
@@ -353,6 +404,25 @@ export function App() {
     void openWsFile(parts.join("/"));
   }
 
+  /** 丢弃编辑器内容与本地草稿，回到磁盘版本（草稿被污染时的逃生门）。 */
+  async function reloadFromDisk() {
+    const cur = current();
+    if (!cur || cur.root !== "ws") return;
+    void kvDel(draftKey("ws", cur.path));
+    setPendingDraft(null);
+    await openWsFile(cur.path); // 草稿已清 → 恢复磁盘内容
+  }
+
+  /** 载入挂起的本地草稿（覆盖编辑器内容；保存后草稿清除）。 */
+  function restoreDraft() {
+    const pd = pendingDraft();
+    const cur = current();
+    if (!pd || !cur || cur.root !== "ws" || cur.path !== pd.path) return;
+    setDoc(view, pd.text);
+    setText(pd.text);
+    setFileMsg("draft restored — Save keeps it");
+  }
+
   async function saveCurrent() {
     const cur = current();
     if (!cur || cur.root !== "ws") return;
@@ -361,6 +431,7 @@ export function App() {
       setSavedText(text());
       setFileMsg(null);
       void kvDel(draftKey("ws", cur.path)); // 已落盘，草稿不再需要
+      setPendingDraft(null);
       void refreshTree();
     } else {
       setFileMsg(`save failed: ${res.error}`);
@@ -496,77 +567,6 @@ export function App() {
     void kvSet(Keys.panel, p);
   }
 
-  // 切回文本视图时让 CodeMirror 重新测量（blocks 视图期间容器 display:none）
-  createEffect(() => {
-    if (viewMode() === "text" && view) view.requestMeasure();
-  });
-
-  // ── 块视图回写（阶段 2）────────────────────────────────
-
-  /** 1 基 (line, col) → 字节偏移；col 按字符计，越界取行尾（与 astdoc 切片一致）。 */
-  function spanOffset(text: string, line: number, col: number): number {
-    const lines = text.split("\n");
-    const li = Math.min(Math.max(line - 1, 0), lines.length - 1);
-    let off = 0;
-    for (let i = 0; i < li; i++) off += lines[i].length + 1;
-    const lineText = lines[li];
-    let cnt = 0;
-    for (const ch of lineText) {
-      if (cnt >= col - 1) break;
-      cnt++;
-      off += ch.length;
-    }
-    return off;
-  }
-
-  /** 块编辑回写：span 处替换 replacement（null = 删整行）；过期守卫（文本已变
-   *  则丢弃并刷新 ast）。写入走 setDoc → 既有 onEditorUpdate → LSP/analyze/ast
-   *  防抖刷新闭环（草稿/脏标记照常）。 */
-  function applyBlockEdit(span: { sl: number; sc: number; el: number; ec: number }, replacement: string | null) {
-    const cur = text();
-    if (astText() != null && cur !== astText()) {
-      (window as any).__lastBlockEdit = { discarded: true };
-      refreshAst(); // ast 过期：丢弃本次（界面随即重建为最新块）
-      return;
-    }
-    let a = spanOffset(cur, span.sl, span.sc);
-    let b = spanOffset(cur, span.el, span.ec);
-    if (b < a) return;
-    if (replacement === null) {
-      // 删语句：扩到整行（含换行），避免残留空行
-      const ls = spanOffset(cur, span.sl, 1);
-      const lineText = cur.slice(ls, b);
-      if (!lineText.trim()) {
-        // 理论不可达（span 非空），兜底直接删行
-      }
-      a = ls;
-      let eol = cur.indexOf("\n", b);
-      b = eol === -1 ? cur.length : eol + 1;
-    }
-    const next = cur.slice(0, a) + (replacement ?? "") + cur.slice(b);
-    (window as any).__lastBlockEdit = { a, b, discarded: false, len: next.length };
-    setDoc(view, next);
-    setText(next);
-  }
-
-  /** 新建语句：追加到文档末尾（ast 刷新后块视图重建出现新链）。 */
-  function appendBlockStmt(stmt: string) {
-    const cur = text();
-    const next = cur + (cur.endsWith("\n") || cur === "" ? "" : "\n") + stmt + "\n";
-    setDoc(view, next);
-    setText(next);
-  }
-
-  /** 配方加步骤：在第 line 行后插入一行文本（块视图右键 Add step after）。 */
-  function insertLineAfter(line: number, lineText: string) {
-    const lines = text().split("\n");
-    const idx = Math.min(Math.max(line, 0), lines.length); // 行号 1 基；EOF 追加
-    lines.splice(idx, 0, lineText);
-    const next = lines.join("\n");
-    setDoc(view, next);
-    setText(next);
-  }
-
   onMount(async () => {
     view = createEditor(editorHost, {
       doc: SAMPLE_DOC,
@@ -646,33 +646,30 @@ export function App() {
           )}
         </Show>
         <Show when={dirty()}>
+          <button
+            class="reload-btn"
+            onClick={() => void reloadFromDisk()}
+            title="discard editor content and draft, reload from disk"
+          >
+            ↺
+          </button>
           <button class="save-btn" onClick={() => void saveCurrent()} title="Ctrl+S">
             Save
+          </button>
+        </Show>
+        <Show
+          when={pendingDraft() && current()?.root === "ws" && current()?.path === pendingDraft()!.path}
+          keyed
+        >
+          <button class="draft-btn" onClick={restoreDraft} title="load the draft saved last session">
+            restore draft
           </button>
         </Show>
         <Show when={fileMsg()}>
           <span class="file-msg">{fileMsg()}</span>
         </Show>
-        <span class="view-toggle" role="tablist" title="editor view">
-          <Show
-            when={isMd()}
-            fallback={
-              <>
-                <button
-                  classList={{ active: viewMode() === "text" }}
-                  onClick={() => setViewMode("text")}
-                >
-                  text
-                </button>
-                <button
-                  classList={{ active: viewMode() === "blocks" }}
-                  onClick={() => setViewMode("blocks")}
-                >
-                  blocks
-                </button>
-              </>
-            }
-          >
+        <Show when={isMd()}>
+          <span class="view-toggle" role="tablist" title="markdown view">
             <button
               classList={{ active: mdMode() === "render" }}
               onClick={() => setMdMode("render")}
@@ -685,10 +682,10 @@ export function App() {
             >
               edit
             </button>
-          </Show>
-        </span>
+          </span>
+        </Show>
       </header>
-      <main class="main">
+      <main class="main" classList={{ "main-md": isMd() }}>
         <FileSidebar
           wsRoot={wsRoot()}
           entries={entries()}
@@ -713,9 +710,7 @@ export function App() {
         />
         <section
           class="editor-pane"
-          classList={{
-            hidden: viewMode() !== "text" || (isMd() && mdMode() === "render"),
-          }}
+          classList={{ hidden: isMd() && mdMode() === "render" }}
           ref={editorHost}
         />
         <Show when={isMd() && mdMode() === "render"}>
@@ -723,30 +718,44 @@ export function App() {
             class="editor-pane md-render"
             // renderMarkdown 先整体转义 HTML 再套标记——文件内容注入安全
             innerHTML={renderMarkdown(text())}
+            ref={mdRenderHost}
           />
         </Show>
-        <Show when={viewMode() === "blocks" && !isMd()}>
-          <BlocksView
-            ast={astDoc()}
-            error={astErr()}
-            editable={current()?.root === "ws"}
-            schema={schema()}
-            onEdit={applyBlockEdit}
-            onAppend={appendBlockStmt}
-            onInsertLine={insertLineAfter}
-          />
+        {/* Markdown 大纲栏：标题层级树，点击滚动定位（渲染）/行跳转（编辑） */}
+        <Show when={isMd()}>
+          <aside class="md-outline">
+            <div class="md-outline-head">Outline</div>
+            <For each={mdOutlineItems()}>
+              {(h) => (
+                <div
+                  class={`md-outline-item lv-${h.level}`}
+                  title={h.text}
+                  onClick={() => jumpMdHeading(h)}
+                >
+                  {h.text}
+                </div>
+              )}
+            </For>
+            <Show when={mdOutlineItems().length === 0}>
+              <div class="empty-hint">No headings.</div>
+            </Show>
+          </aside>
         </Show>
-        <aside class="side-pane">
+        {/* Markdown 文档：引擎 LSP/analyze 不适用——三个页签（诊断/层栈/HEX）
+            整个侧栏不存在，编辑/渲染占满其余宽度 */}
+        <Show when={!isMd()}>
+          <aside class="side-pane">
           <PanelTabs
             panel={panel()}
             setPanel={setPanelPersist}
-            diagCount={diags().length}
+            diagCount={diags().length + (buildErrShown() ? 1 : 0)}
             recipe={isPktl()}
           />
-          <Show when={analyzeErr()}>
-            <div class="analyze-error">{analyzeErr()}</div>
-          </Show>
-          <Show when={!isMd() && !isPktl() && (panel() === "layers" || panel() === "hex")}>
+          {/* 构建错误不再作横幅盖在 Layers/Hex 上——统一进 Diagnostics 页签
+              （诊断行 + 页签计数），Layers/Hex 空态给指向提示 */}
+          {/* 运行参数输入行只在 Layers 页签出现，且文档引用了 params(...) 才显示
+              （没用的文件不给一个永远无效的输入框）；Hex 只看字节 */}
+          <Show when={!isMd() && !isPktl() && panel() === "layers" && usesRunParams()}>
             <div class="params-box">
               <Show
                 when={declParams().length > 0}
@@ -766,38 +775,40 @@ export function App() {
                   </>
                 }
               >
-                <For each={declParams()}>
+                {/* Index（按位置复用 DOM）而非 For（按引用对账）：analyze 应答每次
+                    都带新数组的参数声明，For 会整表销毁重建 → 每键失焦 */}
+                <Index each={declParams()}>
                   {(p) => (
                     <label
                       class="param-item"
-                      title={p.default == null ? "required — no default" : `default ${p.default}`}
+                      title={p().default == null ? "required — no default" : `default ${p().default}`}
                     >
                       <span class="badge">param</span>
                       <span
                         class="param-name"
                         classList={{
-                          "param-missing": p.default == null && !runValues()[p.name],
+                          "param-missing": p().default == null && !runValues()[p().name],
                         }}
                       >
-                        {p.name}
+                        {p().name}
                       </span>
                       <input
                         class="param-input"
-                        placeholder={p.default ?? "required"}
-                        value={runValues()[p.name] ?? ""}
+                        placeholder={p().default ?? "required"}
+                        value={runValues()[p().name] ?? ""}
                         onInput={(e) => {
-                          setRunValues({ ...runValues(), [p.name]: e.currentTarget.value });
+                          setRunValues({ ...runValues(), [p().name]: e.currentTarget.value });
                           refreshAnalyze();
                         }}
                       />
                     </label>
                   )}
-                </For>
+                </Index>
               </Show>
             </div>
           </Show>
           <Show when={panel() === "diagnostics"}>
-            <DiagnosticsPanel diags={diags()} />
+            <DiagnosticsPanel diags={diags()} buildError={buildErrShown()} />
           </Show>
           <Show when={panel() === "recipe" && isPktl()}>
             <RecipePanel doc={recipeDoc()} onOpenPkg={openRecipePkg} />
@@ -806,12 +817,21 @@ export function App() {
             <GlobalsPanel doc={recipeDoc()} />
           </Show>
           <Show when={panel() === "layers" && !isPktl()}>
-            <LayersPanel doc={doc()} />
+            <LayersPanel doc={doc()} buildError={analyzeErr()} />
           </Show>
           <Show when={panel() === "hex" && !isPktl()}>
-            <HexPanel doc={doc()} />
+            <HexPanel doc={doc()} buildError={analyzeErr()} />
           </Show>
-        </aside>
+          <Show when={panel() === "outline" && !isPktl()}>
+            <OutlinePanel
+              symbols={symbols()}
+              onJump={(l) => {
+                if (view) revealLine(view, l);
+              }}
+            />
+          </Show>
+          </aside>
+        </Show>
       </main>
     </div>
   );

@@ -1006,7 +1006,7 @@ fn as_param<'a>(
     what: &str,
 ) -> PktResult<Option<Cow<'a, str>>> {
     match v {
-        Value::Param { name, default } => Ok(Some(Cow::Owned(param_value(
+        Value::Param { name, default, .. } => Ok(Some(Cow::Owned(param_value(
             params, name, default, span, what,
         )?))),
         _ => Ok(None),

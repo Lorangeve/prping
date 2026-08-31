@@ -154,9 +154,11 @@ fn value_parser<'src>() -> impl Parser<'src, ParserInput, Value, Extra<'src>> + 
             .then(comma_nl.clone().ignore_then(value.clone()).or_not())
             .then_ignore(nl0.clone())
             .then_ignore(just(Tok::RParen))
-            .map_with(|(name, default), _| Value::Param {
+            .map_with(|(name, default), e| Value::Param {
                 name,
                 default: default.map(Box::new),
+                // 整个 params(...) 调用的 span（与 value_call 同法）：缺参诊断定位
+                span: conv(e),
             });
         // 值位置 hex 调用：`hex("deadbeef")` / `hex("0x4242")` → 字节列表值（底层数据
         // 构建，如 `eth_frame(payload=hex("..."))`）；与层位置 `hex(...)`（Raw 载荷层）

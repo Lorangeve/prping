@@ -19,6 +19,8 @@ export class LspClient {
   private opened = false;
   private uri = "file:///scratch.pkt";
   private pendingText = "";
+  /** 最近一次同步到服务端的全文（冗余 didChange 去重——见 change 注释）。 */
+  private lastSent = "";
 
   /** publishDiagnostics 回调（LSP 诊断，0-based 行列）。 */
   onDiagnostics: ((diags: LspDiagnostic[]) => void) | null = null;
@@ -49,6 +51,7 @@ export class LspClient {
     this.uri = uri;
     this.docVersion = 0;
     this.opened = false;
+    this.lastSent = text;
     this.lspRequest("initialize", {
       processId: null,
       capabilities: {},
@@ -71,9 +74,18 @@ export class LspClient {
     });
   }
 
-  /** 全文变更（防抖 250ms，由调用方控制；这里只做版本管理）。 */
+  /**
+   * 全文同步（防抖 250ms，由调用方控制；补全/悬停源在查询前也会调用）。
+   *
+   * 内容未变时跳过——这不是省流量的优化，是修 hover 的关键：didChange 必然
+   * 引发服务端 publishDiagnostics → 前端 applyDiagnostics → 视图更新，而 CM
+   * hoverTooltip 在视图更新时会重启 hover（update() → 20ms 后 startHover），
+   * 异步源还没等到应答 pending 就被顶掉——tooltip 永远出不来。补全/悬停的
+   * 「先同步再查询」只在文本真的变过时才发。
+   */
   change(text: string): void {
-    if (!this.opened) return;
+    if (!this.opened || text === this.lastSent) return;
+    this.lastSent = text;
     this.pendingText = text;
     const version = ++this.docVersion;
     this.client.lspSend({
@@ -119,6 +131,13 @@ export class LspClient {
     return this.lspRequest("textDocument/hover", {
       textDocument: { uri: this.uri },
       position: { line, character },
+    });
+  }
+
+  /** 文档符号（大纲用）：component def / func / export / 默认导出。 */
+  documentSymbol(): Promise<any> {
+    return this.lspRequest("textDocument/documentSymbol", {
+      textDocument: { uri: this.uri },
     });
   }
 
