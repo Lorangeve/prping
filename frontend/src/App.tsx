@@ -28,6 +28,10 @@ export function App() {
   const client = new PrpingClient();
   const lsp = new LspClient(client);
 
+  // 服务端 → 客户端的 LSP 消息（initialize 应答 / publishDiagnostics / 补全悬停
+  // 应答）全部经此回调进入 LspClient——漏接则诊断与补全全哑
+  client.onLsp = (m) => lsp.handle(m);
+
   // 诊断推送 → 编辑器 squiggle + 右侧面板
   lsp.onDiagnostics = (d) => {
     setDiags(d);
@@ -37,9 +41,11 @@ export function App() {
   client.onStatus = (s) => {
     setStatus(s);
     if (s === "connected") {
-      // 重连成功：重建 LSP 会话并重放当前文档
+      // 首连与重连统一在此初始化（WS OPEN 后才可发送）：重建 LSP 会话并
+      // 重放当前文档、刷新分析与库列表
       lsp.start(lsp.documentUri, lastText);
       refreshAnalyze();
+      refreshLibs();
     }
   };
 
@@ -58,6 +64,14 @@ export function App() {
         setAnalyzeError(res.error as string);
       }
     }, 250);
+  }
+
+  async function refreshLibs() {
+    const list = await client.listLibs();
+    if (list.ok) {
+      setLibs(list.data.files as string[]);
+      setLibDirs(list.data.dirs as string[]);
+    }
   }
 
   function onEditorUpdate(text: string) {
@@ -100,14 +114,9 @@ export function App() {
       /* dev 代理未起时忽略 */
     }
 
+    // 连接成功后的 LSP 会话重建 / 分析刷新 / 库列表统一走 onStatus("connected")
+    // 钩子——此处立即发送会在 CONNECTING 状态撞 WebSocket DOMException
     client.connect();
-    lsp.start("file:///scratch.pkt", SAMPLE_DOC);
-
-    const list = await client.listLibs();
-    if (list.ok) {
-      setLibs(list.data.files as string[]);
-      setLibDirs(list.data.dirs as string[]);
-    }
   });
 
   onCleanup(() => client.close());

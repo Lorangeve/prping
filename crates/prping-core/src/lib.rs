@@ -217,7 +217,7 @@ pub fn run(
         return Err(PrpingError::InvalidInterval(cfg.interval));
     }
     if let Some(d) = cfg.duration
-        && (!d.is_finite() || d < 0.0 || d > MAX_DURATION_SECS)
+        && (!d.is_finite() || !(0.0..=MAX_DURATION_SECS).contains(&d))
     {
         return Err(PrpingError::InvalidDuration(d));
     }

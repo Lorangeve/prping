@@ -291,9 +291,11 @@ help:
       prping document mtu              跳转 MTU 相关章节
   usage_web: 'prping web [--addr ADDR] [--port N] [--open] [--lib PATH]'
   footer_web: |-
-    在 127.0.0.1 上伺服内嵌 Web 编辑器（默认仅回环）：
+    在 127.0.0.1 上伺服 Web 编辑器（默认仅回环）：
     CodeMirror 编辑 packet DSL（经引擎 LSP 提供诊断/补全/悬停）、
     实时层栈 + HEX 预览，以及 eng_lib 协议库只读浏览。
+    前端资源默认从二进制目录/启动目录的 UI/ 文件夹读取（just build-web 生成）；
+    cargo build -p prping --features web-embed 可内嵌进二进制（单文件分发）。
 
     示例:
       prping web                       启动并打印 URL（端口自动分配）

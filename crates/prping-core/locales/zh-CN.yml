@@ -441,12 +441,21 @@ help:
 
 web:
   listening: 'web 编辑器: %{url}  （Ctrl+C 退出）'
-  opening: '正在打开浏览器: %{url}'
+  opening: '正在打开浏览器…'
   open_failed: '无法打开浏览器（%{err}）——请手动访问 %{url}'
-  exit_hint: 'Ctrl+C 停止'
   frontend_missing: |-
-    前端资源未构建——先执行一次:
-      just build-web            （或: cd frontend && pnpm install && pnpm build）
+    前端资源未构建（web-embed 内嵌模式）——先执行一次:
+      just build-web            （或: cd frontend && bun install && bun run build）
+    然后重新 cargo build --features web-embed（资源在编译期内嵌，运行期不读磁盘）
+  ui_embedded: '内嵌（web-embed feature）'
+  ui_embedded_debug: '内嵌（web-embed feature，debug 直读 frontend/dist）'
+  ui_dir: '%{dir}'
+  ui_dir_missing: '未找到 UI 目录（<二进制目录>/UI 或启动目录/UI）——页面将返回 503 构建提示'
+  ui_missing: |-
+    前端资源未找到——默认构建不内嵌 UI，将前端产物放到以下任一位置后重启:
+      <prping 二进制目录>/UI/
+      <启动目录>/UI/
+    开发: just build（自动同步到 target/<profile>/UI）或 just build-web 后手动复制 frontend/dist
   read_bad_name: '库名不合法（只能是纯文件名）'
   read_failed: '读取库文件失败: %{err}'
   read_not_found: '未找到库文件: %{name}'

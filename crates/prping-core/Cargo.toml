@@ -12,6 +12,12 @@ license = "MIT"
 # 需系统安装 libpcap-dev。默认不启用——Linux 原生 raw socket 无需额外依赖。
 pcap = ["dep:pcap"]
 
+# Web 前端资源内嵌（rust-embed）：release 编译期内嵌 frontend/dist 进二进制
+# （单文件分发），debug 运行期直读磁盘（改前端重跑构建即生效）。默认不启用——
+# 运行期从二进制目录/启动目录的 `UI/` 文件夹读取前端产物（just build-web 生成），
+# 产物体积小、构建无需 node 工具链。
+web-embed = ["dep:rust-embed"]
+
 [dependencies]
 smol = "2"
 anyhow = "1"
@@ -24,7 +30,7 @@ ploot = "0.1"
 packet-dsl = { path = "../packet-dsl" }
 serde_json = "1"
 async-tungstenite = "0.35.0"
-rust-embed = "8.12.0"
+rust-embed = { version = "8.12.0", optional = true }
 open = "5.4.2"
 futures-util = { version = "0.3.34", default-features = false }
 mime_guess = "2.0.5"

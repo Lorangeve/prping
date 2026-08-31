@@ -293,9 +293,11 @@ help:
       prping document mtu              Jump to chapter about MTU
   usage_web: 'prping web [--addr ADDR] [--port N] [--open] [--lib PATH]'
   footer_web: |-
-    Serves the embedded web editor on 127.0.0.1 (loopback only by default):
+    Serves the web editor on 127.0.0.1 (loopback only by default):
     packet DSL editing with CodeMirror (diagnostics / completion / hover via the
     engine LSP), live layer stack + hex preview, and read-only eng_lib browsing.
+    Frontend assets are read from a UI/ folder next to the binary or in the
+    startup directory (just build-web); build with --features web-embed to embed.
 
     Examples:
       prping web                       Serve, print URL (port auto-picked)

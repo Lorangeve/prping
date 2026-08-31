@@ -358,7 +358,7 @@ just build-windows         # 全部 Windows 产物
 
 > 各平台产物构建配方统一在 `justfile`（需安装 [just](https://github.com/casey/just)）；不用 just 时等价命令见上。
 
-贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## License
 

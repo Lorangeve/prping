@@ -949,7 +949,10 @@ fn frame_keep(data: &[u8], filter: &Option<ServiceFilter>, expr: &Option<FilterE
 }
 
 /// 裸 IP（macOS lo0 DLT_NULL 剥头后）的 keep 判定，同上。
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
+/// 仅 pcap_loop（macOS / Linux pcap 多设备路径）调用——cfg 与其调用方一致；
+/// 此前误用 frame_keep 的宽 cfg，在 Linux 无 pcap / Windows 下引用不到
+/// matches_bare（其 cfg 窄于此），E0599 编译失败。
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
 fn bare_ip_keep(data: &[u8], filter: &Option<ServiceFilter>, expr: &Option<FilterExpr>) -> bool {
     match (filter, expr) {
         (Some(f), _) => f.matches_bare(data),
@@ -1073,7 +1076,7 @@ fn linux_loop(fd: libc::c_int, filter: Option<ServiceFilter>, expr: Option<Filte
         let frame = &buf[..n as usize];
         // 默认模式：只收本机入向（PACKET_HOST）且目的端口 == 监听端口；全帧模式：
         // --filter 只显示匹配帧，无 filter 显示一切（含广播/组播/出向回包）
-        let keep = if matches!(&filter, Some(_)) && sll.sll_pkttype != libc::PACKET_HOST {
+        let keep = if filter.is_some() && sll.sll_pkttype != libc::PACKET_HOST {
             false // 默认模式非本机入向直接丢弃
         } else {
             frame_keep(frame, &filter, &expr)

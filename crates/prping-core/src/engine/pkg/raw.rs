@@ -7,8 +7,6 @@ use std::net::SocketAddr;
 
 use packet_dsl::ir::PacketSpec;
 
-use rust_i18n::t;
-
 use super::SendOutcome;
 use super::sniffer::SnifferMatcher;
 
@@ -40,11 +38,12 @@ pub(crate) fn send_raw_bytes(
     #[cfg(target_os = "macos")]
     {
         if let Some(Layer::Ipv4(_)) = pkt.layers.last() {
-            let t =
-                target.ok_or_else(|| anyhow::anyhow!("{}", t!("engine.raw_ip4_need_target")))?;
+            let t = target.ok_or_else(|| {
+                anyhow::anyhow!("{}", rust_i18n::t!("engine.raw_ip4_need_target"))
+            })?;
             let v4 = match t.ip() {
                 std::net::IpAddr::V4(v4) => v4,
-                other => anyhow::bail!("{}", t!("engine.raw_ip4_not_v4", ip = other)),
+                other => anyhow::bail!("{}", rust_i18n::t!("engine.raw_ip4_not_v4", ip = other)),
             };
             // --wait：先开 raw ICMP socket 再发送（回包先于 socket 存在会被内核丢弃）
             let reply_fd = if wait.is_some() && (sniffer.is_some() || icmp_echo_ids(pkt).is_some())
@@ -53,8 +52,9 @@ pub(crate) fn send_raw_bytes(
             } else {
                 None
             };
-            let sent = crate::util::socket::inject_ip4(bytes, v4)
-                .map_err(|e| anyhow::anyhow!("{}", t!("engine.raw_ip4_send_fail", err = e)))?;
+            let sent = crate::util::socket::inject_ip4(bytes, v4).map_err(|e| {
+                anyhow::anyhow!("{}", rust_i18n::t!("engine.raw_ip4_send_fail", err = e))
+            })?;
             let reply = match reply_fd {
                 Some(fd) => {
                     let secs = wait.expect("reply_fd 仅在 --wait 时打开");
@@ -150,7 +150,8 @@ pub(crate) fn send_raw_bytes(
 }
 
 /// 发包最外层 IP 版本（eth 帧向内找第一个 IP 层）：决定 raw `--wait` 的回包 socket。
-#[cfg(target_os = "linux")]
+/// 仅 Linux 非 pcap 内核栈路径调用（调用点在 `not(any(windows, macos, pcap))` 块内）。
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 fn reply_is_v6(pkt: &PacketSpec) -> bool {
     pkt.layers
         .iter()
@@ -183,7 +184,8 @@ fn open_raw_icmp4() -> anyhow::Result<libc::c_int> {
 
 /// Linux raw ICMPv6 socket（IPv6 包 `--wait` 的回包接收；raw v6 收包不含 IPv6 头，
 /// 回包是裸 ICMPv6——匹配见 `wait_icmp_reply` 的 type 129 手工分支）。
-#[cfg(target_os = "linux")]
+/// 仅 Linux 非 pcap 内核栈路径调用（同 `reply_is_v6`）。
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
 fn open_raw_icmp6() -> anyhow::Result<libc::c_int> {
     let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_RAW, libc::IPPROTO_ICMPV6) };
     if fd < 0 {

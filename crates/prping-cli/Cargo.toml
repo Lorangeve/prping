@@ -9,6 +9,12 @@ license = "MIT"
 name = "prping"
 path = "src/main.rs"
 
+[features]
+# 透传 prping-core 的 web-embed（rust-embed 内嵌 Web 前端；默认不嵌入，
+# 运行期读二进制目录/启动目录的 UI/ 文件夹）。
+# 用法：cargo build -p prping --features web-embed（workspace 根需包名限定）
+web-embed = ["prping-core/web-embed"]
+
 [dependencies]
 prping-core = { path = "../prping-core" }
 packet-dsl = { path = "../packet-dsl" }

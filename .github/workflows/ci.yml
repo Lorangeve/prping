@@ -47,6 +47,12 @@ jobs:
           sudo apt-get install -y libpcap-dev
           just check-pcap
 
+      # Web 内嵌 feature（rust-embed）路径：内嵌模式 lookup/503 提示编译 + clippy
+      # （首次会经 build.rs 构建前端，runner 自带 node/npm）
+      - name: Web embed feature check
+        if: matrix.os == 'ubuntu-latest'
+        run: just check-web-embed
+
   bench:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest

@@ -1,64 +1,26 @@
 # prping
 
-跨平台 psping 复刻，使用 Rust 实现。**本项目同时作为网络协议学习资源**，在 `eng_lib/` 目录中包含完整的协议头部定义和详细注释。
+跨平台 psping 复刻（Rust）。**同时作为网络协议学习资源**：`eng_lib/` 内含带详细注释的协议头定义库。
 
 ## 技术选型
 
-- **异步运行时**: [smol](https://github.com/smol-rs/smol) — 轻量级，组件化
-- **ICMP**: 手写 raw socket (socket2) + smol::Async，无第三方 ICMP 依赖
-- **CLI**: [bpaf](https://github.com/pacak/bpaf) — 轻量级，编译快
-- **错误处理**: lib 层 thiserror（`PrpingError` 分派层枚举 + IO/anyhow 透传），bin 层 anyhow 做胶水
-- **代码结构**: workspace 双 crate — `crates/prping-core/`（核心库：协议实现 + 引擎 + 工具）+ `crates/prping-cli/`（CLI：bpaf 子命令解析 → run()/serve() → 渲染）。公开面最小化，lib.rs 只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告。
-  - **`lib.rs`** — 公开 API 入口 + `run()` 模式分派（ICMP/TCP/UDP/latency/bandwidth/MTU/traceroute）+ 核心类型（`OutcomeKind`/`BandwidthReport`/`PrpingWarning`/`PrpingError`）
-  - **`serve/`** — TCP/UDP 服务端回显 + 接收模式触发协议
-    - `mod.rs` — 服务端主循环（TCP 回显/接收 + UDP 回显/触发 + 并发控制 + verbose dissect）
-    - `capture.rs` — 服务端 verbose 完整帧抓包（AF_PACKET / Npcap / BPF，仅 serve 使用；Linux 默认 AF_PACKET 单 socket 全接口、启动行显示「全接口」，开 `--features pcap` 时改走与 macOS 同款 libpcap 多设备路径、启动行显示接口列表）；`-a` 全帧模式不过滤，显示 ARP/ICMP/广播/出向等所有可见帧（Linux 按接口逐个开混杂，需 CAP_NET_ADMIN；lo 上 AF_PACKET 双投递出向+入向），摘要行支持非 TCP-UDP 帧；`--filter` tcpdump 风格子集表达式（所有协议令牌按注册表/dissect 匹配：内置 arp/icmp/icmp6/tcp/udp/ip/ip6 归一化为层名，加固定层 eth/ipv4/ipv6/http/dns/raw 或带 #[rule] 的如 dns/http/quic_initial；port/host 限定取自反解层；三平台一致）
-  - **`ping/`** — 网络测量功能（ICMP/TCP/UDP ping、latency、bandwidth、MTU、traceroute）
-    - `icmp.rs` — ICMP echo ping（raw socket + ICMP.DLL Windows 路径）；导出 `build_v4`/`build_v6`/`icmp_cksum` 供 MTU/trace 复用
-    - `tcp.rs` / `udp.rs` — TCP connect / UDP echo ping
-    - `latency.rs` — TCP/UDP latency 测试（echo 协议）
-    - `bandwidth.rs` — TCP/UDP bandwidth 测试（独立循环 + 进度条，不用 drive）
-    - `mtu.rs` — ICMP DF + 变长载荷二分 MTU 探测
-    - `trace/` — 路由跟踪
-      - `mod.rs` — 入口分派 + 共享类型（`Hop`/`TraceReport`）+ hop 渲染（文本/JSON）
-      - `icmp.rs` — ICMP echo 逐跳（raw socket 收发 + 内嵌报文解析）
-      - `tcp.rs` — TCP SYN 逐跳（Unix raw TCP 发 + raw TCP/raw ICMP 双 socket 收，poll）
-      - `udp.rs` — 经典 UDP 逐跳（UDP 发 + raw ICMP 收 Time Exceeded/Port Unreachable）
-      - `tcpwin.rs` — Windows TCP SYN 逐跳（Npcap 注入完整帧 + 抓包收回复，仅 IPv4）
-      - `dns.rs` — 反向 DNS 查询（Unix libc / Windows ws2_32 getnameinfo，限时）
-  - **`util/`** — 共享基础设施（按职责拆分子模块）
-    - `config.rs` — `PingConfig` 测试参数结构体
-    - `dns.rs` — DNS 解析（`resolve`/`resolve_vec`/`resolve_source`/`print_resolving`）+ Linux 网卡名查询
-    - `net.rs` — UDP socket 创建/收发（`bind_udp`/`udp_send`/`udp_recv`）、TCP 连接（`connect_timeout`/`connect_first`，含 Win7 select workaround）、executor 配置、`drain_after_send`
-    - `socket.rs` — raw socket 基础设施（`create_icmp_socket`/`create_tcp_socket`/`create_udp_socket`/`set_ttl`/`icmp_offset_v4`/`raw_socket_error`）
-    - `format.rs` — 随机数（`rand_u16`/`rand_u32`）、载荷填充（`echo_fill`）、时间戳（`unix_ts`）、字节格式化（`format_bytes`）、UDP 触发协议（`udp_receive_trigger`）
-    - `interrupt.rs` — Ctrl+C 中断标志（`interrupted`/`set_interrupted`/`reset_interrupt`）+ `Run` 循环控制（按次数/时长/中断停止）
-  - **`engine/`** — 包构造引擎（LSP/pcap/转码/配方），子模块 `eng/`（display/lsp）、`pkg/`（send/recipe/sniffer/raw/listen/listen_raw）
-  - **`web/`** — 内嵌 Web 编辑器服务器（`prping web`；异步 `serve_web` + `WebConfig`）
-    - `mod.rs` — 单端口入口：accept 循环（连接 task 分派 + Ctrl+C 轮询）+ 监听横幅 + `--open` 浏览器（open crate）
-    - `http.rs` — 极简 HTTP/1.1 GET/HEAD 响应（请求头 CRLFCRLF 截断、keep-alive、Content-Length；内嵌资源精确键匹配，免疫路径穿越）
-    - `ws.rs` — WebSocket 会话（仅 `/ws`，手工 101 + `from_raw_socket`）：信封协议（lsp 透传 / analyze / list / read）+ Content-Length 分帧解包（FrameDecoder，畸形/超限帧防御）+ 库文件只读浏览（纯文件名校验）
-    - `pipe.rs` — 异步↔阻塞字节桥（`smol::channel` 实现 `io::Read`/`io::Write`，EOF = 发送端 drop），LSP 阻塞线程跑现有 `run_lsp_on`（零改动复用）
-    - `assets.rs` — rust-embed 内嵌 `frontend/dist`（debug 运行期直读 / release 编译期内嵌）
-  - **`stats.rs`** — 统计收集（min/max/avg/stddev/percentile/jitter）+ 直方图计算/渲染 + JSON/文本输出
-  - **`drive.rs`** — `Probe` trait + 统一 ping 循环骨架（间隔/预热/统计/JSONL/收尾），icmp/tcp/udp/latency 共用
-  - **`output.rs`** — 终端颜色（termcolor）+ 服务端连接日志 + 缩进工具函数（`indent`/`spaces`/`pad_to`）
-  - **`manual.rs`** — `document` 子命令的手册分页渲染（顶层 `--help-pkg` 已废弃）
-- **终端颜色**: [termcolor](https://github.com/BurntSushi/termcolor)，颜色函数统一在 `output.rs`（客户端与服务端一致）
-- **直方图**: 默认 ASCII `#`（内置）；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot) 渲染 Unicode 柱状图与 Braille 散点时间线（非 tty 自动剥离 ANSI）；`-H` 支持桶数或逗号分隔阈值（ms）
-- **i18n**: [rust-i18n](https://github.com/longfangsong/rust-i18n) — `locales/en-US.yml` + `locales/zh-CN.yml`，自动检测 locale：`--lang` 显式指定优先；全平台统一 `$LANG` 优先（如 `en_US.UTF-8` → en-US）；macOS/Windows 在 `$LANG` 缺失时用系统 UI 语言兜底（macOS 系统设置 → 语言与地区，经 `CFLocaleCopyCurrent`）；未知 locale 回退英文
-- **信号处理**: Ctrl+C 优雅退出 — Unix `libc::signal` / Windows `kernel32::SetConsoleCtrlHandler`（首次停止输出统计、再次强制退出）；`--json` 模式在 Unix 运行期关 stdin tty 的 `ECHOCTL` 隐藏终端回显的 `^C`（退出时恢复）
-- **DNS 解析**: `smol::unblock` + `std::net::ToSocketAddrs`，统一在 `util/dns.rs`（`resolve_vec` 返回全部、`resolve` 取首个；解析横幅 `util::print_resolving`）
-- **ping 循环驱动器**: icmp/tcp/udp/latency 共用 `drive.rs::drive`（间隔/预热/统计/JSONL/收尾），各模式实现 `Probe` trait 只做「一次探测」与人读行
-- **次数/时长**: `-n 10` 固定次数，`-n 10s` 按秒运行（`util::Run` 统一控制循环）
-- **带宽测试并发**: 多连接 `--parallel`，smol::Task 池 + 全局配额（总量精确等于 count）
-- **多线程**: `util::configure_executor_threads` 按 CPU 核数设置 `SMOL_THREADS`（smol 全局 executor 默认单线程）
-- **UDP**: socket2 大收发缓冲（4MB）+ smol::Async（`util::bind_udp`），避免突发丢包；客户端打印头部提示（目标/负载/迭代数）与回显要求说明（目标需 `prping server` 回显才回包）
-- **UDP 接收模式**: 触发包协议 `[0xFF, 0xFF, size(2B), count(4B)]`，服务端回送 count 个 size 字节数据报；回显计入聚合统计、触发包打印即时接收日志（不逐包打印）
-- **JSON/退出码**: `--json` 机器可读统计（`stats::set_json`）抑制人读输出；`run()` 返回 `OutcomeKind`（Ping(Stats)/Bandwidth(report)/Mtu(report)/Traceroute(report)），bin 依 `Stats::has_loss()` 或 `TraceReport::reached` 返回 1
-- **IPv6**: `-4`/`-6` 全支持；**TCP_NODELAY**: 默认关闭 Nagle
+- **异步运行时**: [smol](https://github.com/smol-rs/smol)（**不引入 tokio**）；ICMP 手写 raw socket（socket2）+ smol::Async，无第三方 ICMP 依赖
+- **CLI**: [bpaf](https://github.com/pacak/bpaf)（编译快）；**错误**: lib 层 thiserror（`PrpingError`），bin 层 anyhow
+- **代码结构**: workspace 双 crate —— `crates/prping-core/`（协议实现 + 引擎 + 工具）+ `crates/prping-cli/`（bpaf 子命令解析 → run()/serve() → 渲染）。lib.rs 公开面最小化：只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告
+- **模块地图**（逐文件细节看代码注释与 docs/claude-rules/，此处只列职责）：
+  - `lib.rs` — `run()` 模式分派（ICMP/TCP/UDP/latency/bandwidth/MTU/traceroute）+ 核心类型（`OutcomeKind`/`BandwidthReport`/`PrpingWarning`/`PrpingError`）
+  - `serve/` — TCP/UDP 回显/触发服务端；`capture.rs` verbose 完整帧抓包（AF_PACKET/Npcap/BPF，`--features pcap` 走 libpcap 多设备路径）+ `-a` 全帧 + `--filter` tcpdump 风格表达式（三平台一致）
+  - `ping/` — icmp（导出 `build_v4`/`build_v6`/`icmp_cksum` 供 MTU/trace 复用）/tcp/udp、latency、bandwidth（独立循环+进度条）、mtu（DF+变长二分）、`trace/`（icmp / tcp / udp / tcpwin[Win+Npcap] / dns 反解）
+  - `util/` — config、dns、net（`bind_udp` 4MB 缓冲、`connect_timeout` 含 Win7 workaround）、socket（raw 基础设施）、format、interrupt（`Run`：按次数或 `-n 10s` 按时长）
+  - `engine/` — 包构造引擎：`eng/`（display/lsp）、`pkg/`（send/recipe/sniffer/raw/listen/listen_raw）、`rawpcap/`（pcap feature 兼容层）
+  - `web/` — Web 编辑器服务器（`prping web`，单端口 HTTP+WS，smol）：`http.rs` 极简 GET/HEAD、`ws.rs` 信封协议（lsp 透传/analyze/list/read）+ FrameDecoder 防御、`pipe.rs` 异步↔阻塞桥（零改动复用 `run_lsp_on`）、`assets.rs` 静态资源双模式——**默认运行期读 `UI/` 目录（二进制所在目录优先，其次启动目录）**；`--features web-embed` 时 rust-embed（debug 直读 dist / release 编译期内嵌）；键名逐段校验（空段/点段/反斜杠/冒号拒绝）
+  - `stats.rs` 统计/直方图/JSON 输出；`drive.rs` `Probe` trait 统一 ping 循环（间隔/预热/统计/JSONL）；`output.rs` 终端颜色 + 服务端日志 + 缩进工具；`manual.rs` 手册分页
+- **直方图**: 默认 ASCII `#`；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot)（非 tty 剥 ANSI）；`-H` 桶数或逗号阈值（ms）
+- **i18n**: rust-i18n（`locales/{en-US,zh-CN}.yml`）；`--lang` > `$LANG` > macOS/Windows 系统 UI 语言兜底 > 英文
+- **信号**: Ctrl+C 优雅退出（首次停并出统计，再次强杀）；`--json` 下 Unix 隐藏 tty 的 `^C` 回显（退出恢复）
+- **JSON/退出码**: `--json` 抑制人读输出；`run()` 返回 `OutcomeKind`，bin 依丢包/`TraceReport::reached` 返回 1
+- **其他**: IPv6 全支持；TCP_NODELAY 默认关 Nagle；UDP 触发协议 `[FF FF size(2B) count(4B)]`；带宽并发 `--parallel`（Task 池+全局配额）；`util::configure_executor_threads` 按 CPU 设 `SMOL_THREADS`
 - **Windows 7 构建 / Npcap / ICMP.DLL 等平台细节** → `docs/claude-rules/windows-build.md`
-- **Windows API**: [windows-sys](https://github.com/microsoft/windows-rs)（微软官方）— `Win32_Networking_WinSock`（reverse_dns / getnameinfo 等）
 
 ## 平台支持
 
@@ -74,163 +36,60 @@
 | **Linux ARM (32-bit)** | `armv7-unknown-linux-gnueabihf` | `prping` | `just build-linux-arm` |
 | **Linux ARM64** | `aarch64-unknown-linux-gnu` | `prping` | `just build-linux-arm64` |
 
-> **全部产物一览**：`just artifacts`  
-> **全平台语法检查**：`just check-all`
+> 全部产物：`just artifacts`；全平台检查：`just check-all`
 
-### Linux 可选 pcap feature（`--features pcap`）
+### 可选 feature
 
-Linux 默认 raw 后端是原生 socket（AF_PACKET / IPPROTO_RAW / raw ICMP），零额外依赖。
-开 `-F pcap`（Cargo feature；编译需系统 libpcap-dev，运行仍需 cap_net_raw——libpcap
-底层是 AF_PACKET socket）后，**raw 发送与 `server -v` 抓包**改走与 Windows/macOS 完全
-相同的 libpcap 路径（`engine/rawpcap.rs` 兼容层 + `serve/capture.rs` 多设备路径），语义
-对齐、可交叉验证。**其余功能完全不变**：ping/latency/bandwidth/MTU/`trace HOST:PORT`
-（TCP SYN，Linux 仍走 raw TCP）、engine 的 pcap 文件读写（`--pcap`/`--out`/`--to-pkt` 是文件
-格式，与 feature 无关）。受影响仅两处：
-
-1. **`packet --raw` 发送**（`engine/pkg/raw.rs` 按 feature 分派，pcap 委托 `rawpcap.rs`）：
-   - 默认：eth 帧 → AF_PACKET（`--iface` 是 Linux 网卡名，默认 lo，无目标也可发——帧内
-     MAC 直发）；裸 IPv4 → IPPROTO_RAW + IP_HDRINCL 直发（无 MAC 层）；裸 IPv6 → raw
-     socket 全支持；`--wait` 先开 raw ICMP socket 再发送（只收 ICMP echo 回显，无自匹配
-     问题）。
-   - pcap：`pcap_sendpacket` 链路层注入。`--iface` 改匹配 pcap 设备名（不区分大小写）/描述
-     子串；设备按目标选择（回环 → 回环设备，其余 → 首个非回环）；裸 IPv4 自动以太网封装
-     （src MAC = getifaddrs + AF_PACKET 取接口 MAC，dst MAC = 1 字节 UDP 触发 ARP + 查
-     `/proc/net/arp`，失败广播 MAC 兜底并警告）；裸 IPv6 **仅回环 ::1**（跨链路需 ND
-     邻居解析，暂报错）；`--wait` 先开抓包句柄再发送，`direction(In)` 过滤 + 跳过与发送帧
-     逐字节相同的帧（pcap 会回读自己注入的帧，防假阳性）；设备须 EN10MB 链路类型。
-2. **`server -v` 抓包**（`serve/capture.rs`）：
-   - 默认：AF_PACKET 单 socket 绑全接口（`sll_ifindex=0`），启动行显示「全接口」；只收
-     PACKET_HOST 入向；`-a` 才尽力开混杂（逐接口 PACKET_MR_PROMISC，需 CAP_NET_ADMIN）；
-     lo 上 AF_PACKET 双投递出向+入向（`-a` 模式各显示一次）。
-   - pcap：libpcap 多设备路径（与 macOS 同款）——通配绑定 0.0.0.0/:: 开全部设备、每设备
-     一个抓包线程，启动行显示真实接口名列表；恒开混杂 promisc(true)；lo 经 libpcap 是
-     EN10MB（假 MAC，无 macOS lo0 的 DLT_NULL 剥头问题），出向/入向双投递由底层
-     AF_PACKET 决定、与默认路径一致（`-a` 下同样各显示一次）。默认模式的端口/IP 过滤、
-     `-a` 全帧、`--filter` 表达式三平台一致。
-- 门禁：`just check-pcap`（`cargo check` + clippy `-D warnings`，`-F pcap`）；CI ubuntu
-  job 装 libpcap-dev 后执行。改动涉及 pcap 路径后跑 `just check-pcap`。
+- **`pcap`**（Linux，`--features pcap`，默认关）：默认 raw 后端是原生 socket（AF_PACKET/IPPROTO_RAW/raw ICMP），零额外依赖。开启后**仅两处**改走 libpcap（与 Windows/macOS 同路径语义、可交叉验证）：`packet --raw` 发送（`engine/pkg/raw.rs` 分派：`--iface` 匹配设备名/描述子串、裸 IPv4 自动以太网封装、裸 IPv6 仅回环）与 `server -v` 抓包（`serve/capture.rs`：多设备多线程、恒开混杂）。其余功能不变；pcap **文件读写**（`--pcap/--out/--to-pkt`）与 feature 无关。
+- **`web-embed`**（`--features web-embed`，默认关）：rust-embed 编译期内嵌前端进二进制（单文件分发）。默认不内嵌：运行期读二进制同目录 `UI/`。前端构建两条路径：① web-embed 下由 `crates/prping-core/build.rs` 执行（rust-embed 读盘在 core 编译期，构建逻辑必须先行）；② 默认模式下由 justfile 的 `web-dist` 保障配方按需自动构建（dist 缺失或前端源码更新时，`just build`/`just build-release` 的依赖；产物新鲜零开销）。两条路径同为 bun 优先、npm 降级、`PRPING_SKIP_WEB_BUILD=1` 跳过、无 node 仅警告。
 
 ## CLI 设计
 
-子命令组织全部功能（bpaf `command()` 平行组合），子命令可用任意**唯一前缀**缩写
-（`src/main.rs::expand_subcommand_prefix` 在解析前展开；歧义如 `p` → ping/packet 报错列候选）：
+子命令组织全部功能（bpaf `command()` 平行组合），可用任意**唯一前缀**缩写
+（`src/main.rs::expand_subcommand_prefix`；歧义如 `p` → ping/packet 报错列候选）：
 ```
 prping ping HOST[:PORT]     ICMP ping（无端口）/ TCP ping（有端口）/ UDP（-u）/ MTU 探测（-m）
 prping latency [OPTIONS] HOST:PORT   Latency test（-l 缺省 64；-u UDP；-r 接收）
 prping bandwidth [OPTIONS] HOST:PORT Bandwidth test（-l 缺省 8k；--parallel 并发；-u/-r）
-prping server ADDR:PORT     Server（同时服务 latency/bandwidth；-v 抓包 dissect；-a 全帧抓包显示所有可见帧，需显式 -v；--filter 表达式过滤帧，需显式 -a）
-prping trace [OPTIONS] HOST[:PORT] Traceroute（ICMP echo 默认；带端口自动 TCP SYN（无 --tcp 标志）；-u/--udp 经典 UDP 33434 起递增；-m 最大跳数 / -d 免 DNS / --json）
-prping engine [OPTIONS] FILE.pkt|.pktl  引擎：分析/LSP/--ls/--hex/--pcap/配方概览（无扩展名参数自动定位 pktl：先 `<arg>.pktl`，再同名文件夹 `<arg>/<arg>.pktl`；--ls 自动分页）
+prping server ADDR:PORT     Server（同时服务 latency/bandwidth；-v 抓包 dissect；-a 全帧抓包，需显式 -v；--filter 表达式，需显式 -a）
+prping trace [OPTIONS] HOST[:PORT] Traceroute（ICMP 默认；带端口自动 TCP SYN；-u/--udp 经典 UDP 33434 起递增；-m 最大跳数 / -d 免 DNS / --json）
+prping engine [OPTIONS] FILE.pkt|.pktl  引擎：分析/LSP/--ls/--hex/--pcap/配方概览（无扩展名自动定位 pktl；--ls 自动分页）
 prping packet [OPTIONS] FILE.pkt|.pktl [HOST:PORT]  构建发送/配方执行（--raw/--wait[SECS]/--fuzz/--out；裸 --wait = 持续监听回显，--wait --raw = 链路层监听按应答模板应答）
 prping document [SECTION]   使用手册（全文 / 章节跳转）
-prping web [--addr ADDR] [--port N] [--open] [--lib PATH]  内嵌 Web 编辑器（SolidJS SPA + CodeMirror + LSP；默认 127.0.0.1、端口自动分配；--open 打开浏览器；--lib 附加包库目录）
+prping web [--addr ADDR] [--port N] [--open] [--lib PATH]  Web 编辑器（SolidJS SPA + CodeMirror + LSP；默认 127.0.0.1、端口自动分配；--open 打开浏览器；--lib 附加包库目录）
 prping -s ADDR|IFACE ...    指定源地址/网卡（测量子命令内）
 顶层 --version / --lang（任意位置）由 main() pre-scan 处理，不占子命令位
 ```
-每个子命令的选项集只含该模式生效的选项（结构性互斥）：ping 含 `-u/-l/-g/-p/-m`，
-latency 含 `-u/-l/-r/-g/-p`，bandwidth 含 `-u/-l/-r/--parallel`，trace 含 `-m/-d`，
-engine/packet 含引擎选项（`--lsp/--ls/--hex/--pcap` 互斥且不带文件；`--to-pkt/--structured/--skip/--limit` 需 `--pcap`；`--iface` 需 `--raw`；`--json`——engine 仅分析模式、packet 发送/配方模式）。
-`validate_*` 只留真校验：`--json`×`-p/-g/-H`、engine `--json`×`--ls/--hex/--pcap/--lsp`、packet `--json`×裸 `--wait`（持续监听）、`-m`×其他 ping 选项、非法 `-H`/`-n`、
-server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
+每个子命令的选项集只含该模式生效的选项（结构性互斥）；`validate_*` 只留真校验：
+`--json`×`-p/-g/-H`、engine `--json`×`--ls/--hex/--pcap/--lsp`、packet `--json`×裸 `--wait`、`-m`×其他 ping 选项、非法 `-H`/`-n`、server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 
 ## 功能完成度
 
-1. ICMP Ping — IPv4/IPv6, raw socket, 直方图, 时间线, 统计（`-l` 控制负载大小；区分不可达/TTL 超时）
-2. TCP Ping — connect 延迟, 彩色输出, 统计
-3. UDP Ping — 可达性, 延迟, 统计（回包 seq 校验过滤杂包）
-4. Latency Test — TCP/UDP client/server, echo 协议, `-r` 接收模式
-5. Bandwidth Test — TCP/UDP client/server, 多连接并发, `-r` 接收模式
-6. 时长模式 — `-n 10s` 按秒运行（ICMP/TCP/UDP/latency/bandwidth 全支持）
-7. Ctrl+C 优雅退出 — 首次停止并输出统计，再次强制退出（Unix libc::signal / Windows SetConsoleCtrlHandler）
-8. `--json` 机器可读输出、`--version`、退出码反映丢包
-9. `-H` 自定义阈值直方图（psping `-h` 对齐）
-10. 服务端聚合统计（Ctrl+C 退出时打印）
-11. 带宽测试实时进度条（`-b`）——`\r` 同行动态刷新；时长模式按时间、次数模式按包（每 5% 里程碑 + 100ms 限频）；仅 tty 显示，管道/`--json`/`-q` 静默（`bandwidth.rs::Progress`）
-12. 抖动 jitter — 相邻 RTT 差均值/最大（文本 + `--json` 的 `jitter_ms`/`jitter_max_ms`）
-13. 路径 MTU 探测 — `-m`/`--mtu`（ICMP DF + 变长载荷二分，解析 Fragmentation Needed）
-14. 源绑定 — `-s ADDR|IFACE`（全模式；Linux 网卡名 → IPv4）
-15. 路由跟踪 — `-t`/`--traceroute`（ICMP echo + 递增 TTL 逐跳）及 TCP SYN（带端口自动）/ `--udp` 经典变体（细节 → `docs/claude-rules/measure.md`）
-16. 配方 `.pktl` — 多个 `.pkt` 按顺序发出，global 跨步骤存储 / extract / wait / raw 步骤开关 / on_error（细节 → `docs/claude-rules/engine.md`）
-17. 反向 DNS — `--reverse-dns`（`-R`）对探测结果中的 IP 地址进行反向 DNS 查询，`-R` 启用反向查询（增加延迟），输出中显示域名（如 `192.168.1.1 (gateway.example.com)`）
-18. engine/packet `--json` — `engine FILE.pkt/.pktl --json` 输出单个 JSON 文档（.pkt 结构化分析：sources→packets→层栈字段/hex/警告/raw_only；.pktl 配方概览：globals/params/steps/extract）；`packet FILE.pkt/.pktl --json` 输出 JSONL（每包一行 + 汇总行；配方模式含 step/extract 行）
-19. `prping web` 内嵌 Web 编辑器 — SolidJS SPA（CodeMirror 6）+ engine LSP（WS 信封桥接 `run_lsp_on`：诊断/补全/悬停）+ 实时层栈/HEX 预览（`analyze_text_json` 内存分析）+ eng_lib 只读浏览；`--open` 自动开浏览器；前端构建由 build.rs 自动执行（pnpm/npm，`just build-web` 单独构建，`PRPING_SKIP_WEB_BUILD=1` 跳过；产物内嵌二进制，发布目录另有 `web/` 副本）
+1. **测量** — ICMP/TCP/UDP ping、latency、bandwidth（`--parallel` 并发 + `-b` 实时进度条，仅 tty）、MTU 探测（`-m`，解析 Fragmentation Needed）、traceroute（ICMP 默认/带端口 TCP SYN/`--udp` 经典变体）、jitter（文本 + `--json`）、`-s` 源绑定（Linux 网卡名 → IPv4）、`-R` 反向 DNS、`-n 10s` 时长模式（细节 → `docs/claude-rules/measure.md`）
+2. **输出** — 彩色人读 + `--json`/JSONL 机器可读、直方图（`-H` 自定义阈值，psping `-h` 对齐）、服务端聚合统计、退出码反映丢包/未达
+3. **引擎** — `engine` 分析/LSP/`--ls`/`--hex`/`--pcap`；`packet` 发送/配方；`.pktl` 配方（global / extract / wait / raw 步骤开关 / on_error）；engine/packet `--json` 结构化输出（细节 → `docs/claude-rules/engine.md`）
+4. **Web 编辑器** — SolidJS SPA（CodeMirror 6）+ engine LSP（WS 信封桥接 `run_lsp_on`：诊断/补全/悬停）+ 实时层栈/HEX 预览（`analyze_text_json` 与 CLI `--json` 同构）+ eng_lib 只读浏览；`--open` 开浏览器；前端**默认不内嵌**（运行期读**二进制同目录** `UI/`：`just build`/`just build-release` 经 `web-dist` 按需自动构建前端、经 `just dist` 同步 `target/<profile>/{UI,lib,examples}` 完整可运行布局；源码树不留生成物），`--features web-embed` 才内嵌（单文件分发）
+5. `document` 使用手册（双语、章节跳转、$PAGER 分页）
 
-## 协议学习资源
+## 协议学习资源（eng_lib/）
 
-本项目同时作为网络协议学习资源，在 `eng_lib/` 目录中包含完整的协议头部定义和详细注释：
-
-### eng_lib/ 目录结构
-- **`headers.pkt`** — OSI 模型各层协议头定义（包含详细学习注释）：
-  - **链路层**：以太网帧（eth）、ARP 地址解析（arp）
-  - **网络层**：IPv4 数据包（ipv4）、IPv6 数据包（ipv6）、ICMP 控制报文（icmp）
-  - **传输层**：TCP 传输控制协议（tcp）、UDP 用户数据报协议（udp）
-  - **应用层**：HTTP 文本协议（http）、DNS 域名解析（dns）
-- **`quic.pkt`** — QUIC 协议实现（基于 UDP 的现代传输协议）：
-  - QUIC 长头 Initial 包（quic_initial）
-  - QUIC 短头包（quic_short）
-  - CRYPTO 帧（quic_crypto）
-- **`tls.pkt`** — TLS/SSL 安全传输层协议（RFC 8446/5246）
-- **`ssh.pkt`** — SSH 安全远程登录协议（RFC 4251-4254）
-- **`ftp.pkt`** — FTP 文件传输协议（RFC 959）
-- **`smtp.pkt`** — SMTP 邮件传输协议（RFC 5321）
-- **`dhcp.pkt`** — DHCP 动态主机配置协议（RFC 2131）
-- **`ntp.pkt`** — NTP 网络时间协议（RFC 5905）
-- **`igmp.pkt`** — IGMP 组播组管理协议（RFC 3376）
-- **`ospf.pkt`** — OSPF 开放最短路径优先协议（RFC 2328）
-- **`bgp.pkt`** — BGP 边界网关协议（RFC 4271）
-- **`ipsec.pkt`** — IPSec IP 层安全协议（RFC 4301-4309）
-- **`wireguard.pkt`** — WireGuard 现代 VPN 协议
-- **`gre.pkt`** — GRE 通用路由封装协议（RFC 2784/2890）
-- **`mqtt.pkt`** — MQTT 消息队列遥测传输协议（IoT）
-- **`coap.pkt`** — CoAP 受限应用协议（RFC 7252）
-- **`rtp.pkt`** — RTP 实时传输协议（RFC 3550）
-- **`rtcp.pkt`** — RTCP RTP 控制协议（RFC 3550）
-- **`vnc.pkt`** — VNC 远程桌面协议（RFC 6143）
-- **`rdp.pkt`** — RDP 远程桌面协议（MS-RDPBCGR）
-- **`smb.pkt`** — SMB 文件共享协议（MS-SMB2）
-- **`bytes.pkt`** — 字节构建值函数和层标注具名包装
-- **`net.pkt`** — IP + 以太网组合层（net4/net6）
-- **`vint.pkt`** — 变长整数编解码
-- **`data.pkt`** — 数据处理原语
-
-### 学习注释规范
-每个 proto 函数都包含：
-1. **RFC 标准引用**：协议对应的 RFC 文档
-2. **协议概述**：协议的作用、特点、工作原理
-3. **字段详解**：每个参数的含义、数据类型、默认值、常见取值
-4. **自动字段**：引擎自动计算的字段说明
-5. **结构注释**：协议头的字节布局和字段顺序
-
-### 使用方式
-- 通过 `prping engine --ls headers.pkt` 查看所有协议定义
-- 通过 `prping engine --hex headers.pkt` 查看协议的十六进制表示
-- 通过 `prping document` 查看完整的使用手册
-- 通过 `docs/protocol-learning.md` 查看详细的协议学习指南
-- 通过 `PROTOCOL_SUPPORT.md` 查看完整的协议支持清单
-- 通过 `PROTOCOL_SUMMARY.md` 查看协议支持总结
-- 通过 `PROTOCOL_FINAL_SUMMARY.md` 查看最终总结
-- 通过 `PROTOCOL_COMPLETE_LIST.md` 查看完整协议列表
+- 25+ 协议 `.pkt` 库文件：headers（eth/arp/ipv4/ipv6/icmp/tcp/udp/http/dns）、quic、tls、ssh、ftp、smtp、dhcp、ntp、igmp、ospf、bgp、ipsec、wireguard、gre、mqtt、coap、rtp/rtcp、vnc、rdp、smb，及 bytes/net/vint/data 原语库。**完整清单以 `prping engine --ls` 与 `PROTOCOL_SUPPORT.md` 为准**
+- **注释规范**：每个 proto 函数包含 ①RFC 标准引用 ②协议概述 ③字段详解（含义/类型/默认值/常见取值）④引擎自动计算字段说明 ⑤字节布局与字段顺序
+- 查看：`prping engine --ls/--hex`、`prping document`、`docs/protocol-learning.md`
 
 ## 编码约定
 
-- Rust edition 2024
-- `cargo clippy` 零警告，`cargo fmt` 通过，`cargo test --workspace --all-targets` 全通过
+- Rust edition 2024；`cargo clippy` 零警告、`cargo fmt` 通过、`cargo test --workspace --all-targets` 全通过
 - 用户可见输出英文，注释中文
-- 颜色由 `output.rs` 统一管理（客户端与服务端一致，服务端连接日志用 `output::print_server_log`）；bin 侧错误用红色、警告用橙色（lib re-export `output::{stderr, writeln_red, writeln_orange}` 给 bin 用）
+- 颜色统一 `output.rs`（客户端与服务端一致，连接日志 `output::print_server_log`）；bin 侧错误红/警告橙（lib re-export `output::{stderr, writeln_red, writeln_orange}`）
+- 缩进用 `output.rs` 工具（`indent(level)`/`spaces(n)`/`pad_to`），不硬编码空格
 - 参数校验分层：子命令选项集结构性互斥 + `validate_*` 只留真校验 + lib `run` 管 config 级不变式
-- 共享逻辑收敛一处，不重复实现（直方图数据与渲染解耦、带宽报告用 `ReportArgs`）
-- lib 公开面最小化：只 re-export `run`/`serve`/`PingConfig`/`Stats`/报告/错误/警告/`output::{stderr, writeln_red, writeln_orange}`
-- 不引入不必要的抽象
-- 构建: `build.rs` 自动配置 `.cargo/run-with-cap.sh` runner（cap_net_raw，仅 `cargo run`/`cargo test` 生效）；直接跑产物用 `just cap`（rebuild 后失效需重跑）；各平台配方在 `justfile`——细节 → `docs/claude-rules/windows-build.md`
+- 共享逻辑收敛一处，不重复实现；不引入不必要的抽象；**JSON-RPC/LSP 管道与 WS 信封为手写实现（serde_json ~50 行），不引入 jsonrpc/lsp-server/jsonrpsee/gRPC 框架**（重评触发条件 → `docs/design-web-editor.md`）
+- 构建：build.rs 自动配置 `.cargo/run-with-cap.sh` runner（cap_net_raw，仅 `cargo run`/`test` 生效）；直跑产物用 `just cap`（rebuild 后失效需重跑）；平台配方在 `justfile`
+- **原语文档同步门禁**：改动原语须同步 `engine --ls` 展示与 GRAMMAR.md §4.6；`scripts/claude-hooks/primitive-docs-check.sh` 自动校验（`just doc-sync-check`）——原语清单在 `docs/claude-rules/engine.md`
+- **门禁**：平台相关改动 → `just check-all`（7 个交叉目标）；pcap 路径 → `just check-pcap`；web 前端/嵌入 → `just check-web-embed`（CI ubuntu 执行）。建议流程：`cargo check` → `just check-all` → `cargo test` → 提交
+- **跨平台依赖**：平台 API 统一 `windows-sys`（微软官方）；`t!` 宏导入用 `use rust_i18n::t;`；避免在 `#[cfg(unix)]` 块内定义通用函数。Windows 类型细节 → `docs/claude-rules/windows-build.md`
 - CI: `.github/workflows/ci.yml` — fmt/clippy/doc/全部测试 × Linux/macOS/Windows + 非门禁基准 job
-- **原语文档同步门禁**：改动原语须同步 `engine --ls` 展示与 GRAMMAR.md §4.6；`scripts/claude-hooks/primitive-docs-check.sh` 自动校验（`.claude/settings.json` PostToolUse hook 提醒 + `just doc-sync-check`）——原语清单在 `docs/claude-rules/engine.md`
-- **全平台检查**：改动涉及平台相关代码后，运行 `just check-all`（7 个交叉目标）验证编译通过；涉及 pcap feature 路径（raw 发送 / serve 抓包）另跑 `just check-pcap`（见上「Linux 可选 pcap feature」）。建议开发流程：`cargo check` → `just check-all` → `cargo test` → 提交。细节 → `docs/claude-rules/windows-build.md`
-- **跨平台依赖**：平台相关代码统一使用 `windows-sys`（微软官方）；`t!` 宏导入使用 `use rust_i18n::t;`；避免在 `#[cfg(unix)]` 块内定义通用函数。Windows 类型细节（`SOCKADDR_IN`、`CStr` 指针转换等） → `docs/claude-rules/windows-build.md`
-- **缩进控制**：终端输出中的缩进使用 `output.rs` 提供的工具函数，避免硬编码空格：
-  - `indent(level)` — 获取指定层级的缩进字符串（0=无缩进，1=2空格，2=4空格，3=8空格）
-  - `spaces(count)` — 创建指定长度的空格字符串（用于动态计算）
-  - `pad_to(text, width)` — 将文本填充到指定宽度（用于对齐）
-  - 示例：`format!("{}{name}", indent(1))` 替代 `format!("  {name}")`
 
 ## 版本控制
 
@@ -238,14 +97,13 @@ server 依赖链（`-a` 需 `-v`、`--filter` 需 `-a`，不隐含开启）。
 
 ## 详细规则（docs/claude-rules/，按需阅读）
 
-- `docs/claude-rules/engine.md` — 包构造引擎（engine/packet/LSP/pcap/转码/配方）、packet-dsl 子 crate、hex/raw 字节体系、自表示协议 proto、值函数/字节原语、eng_lib 标准库与库搜索、运行时参数。**改动原语或协议声明、新增协议支持前必读**。
-- `docs/claude-rules/measure.md` — 测量功能细节：jitter、源绑定、MTU 探测、路由跟踪（ICMP / TCP SYN / UDP 变体）、子命令前缀展开。
-- `docs/claude-rules/windows-build.md` — Win7 基线构建（xwin / XWIN_ARCH / windows.lib）、cap 与平台配方、Npcap 绑定与 wpcap 延迟加载、WSAPoll / ICMP.DLL / raw 收包框架等 Windows 细节。
+- `docs/claude-rules/engine.md` — 包构造引擎（engine/packet/LSP/pcap/转码/配方）、packet-dsl、hex/raw 字节体系、eng_lib 与库搜索、运行时参数。**改动原语或协议声明、新增协议支持前必读**
+- `docs/claude-rules/measure.md` — jitter、源绑定、MTU、路由跟踪各变体、子命令前缀展开
+- `docs/claude-rules/windows-build.md` — Win7 基线构建（xwin/XWIN_ARCH/windows.lib）、cap 配方、Npcap 与 wpcap 延迟加载、WSAPoll/ICMP.DLL/raw 收包框架
+- `docs/design-web-editor.md` — Web 编辑器设计（架构/信封协议/安全模型/ADR/路线图）
 
 ## 使用手册（document 子命令）
 
-- 手册源：`docs/manual-zh.md` / `docs/manual-en.md`（超长双语，`## N. 标题` 编号章节 + 头部目录），经 `src/manual.rs` include_str! 内嵌，单一来源（不建 mdbook 站点）。
-- `prping document`（无参数）→ 全文，unix tty 经 `$PAGER`（默认 `less -R`）自动分页，非 tty / Windows 直接输出（`src/manual.rs::print_paged`）。
-- `prping document 章节` → `find_sections` 编号 / 标题前缀 / 包含匹配（忽略大小写），单命中打印该章节、多命中列候选、无命中列目录。
-- 手册随 locale 切换（`manual_for`，`rust_i18n::locale()`）；双语章节编号一致性有测试。
-- 各子命令独立 `--help`（bpaf 生成，`cmd.*` descr + `help.footer_*` 示例）。
+- 手册源：`docs/manual-zh.md` / `docs/manual-en.md`（超长双语，`## N. 标题` 编号 + 头部目录），经 `src/manual.rs` include_str! 内嵌，单一来源（不建 mdbook）
+- `prping document` 全文（unix tty 经 `$PAGER`，默认 `less -R`）；`prping document 章节` 编号/标题/包含匹配（多命中列候选、无命中列目录）；随 locale 切换，双语章节编号一致性有测试
+- 各子命令独立 `--help`（bpaf 生成，`cmd.*` descr + `help.footer_*` 示例）

@@ -1,6 +1,6 @@
-# 设计文档：`prping web` 内嵌 Web 编辑器
+# 设计文档：`prping web` Web 编辑器
 
-> 状态：已实现（MVP：骨架 + LSP 桥 + CodeMirror 闭环 + 实时预览 + 库浏览）
+> 状态：已实现（MVP：骨架 + LSP 桥 + CodeMirror 闭环 + 实时预览 + 库浏览；资源分发改为默认 `UI/` 目录 + 可选 `web-embed` 内嵌）
 > 范围：`prping web [--addr ADDR] [--port N] [--open] [--lib PATH]`
 > 关联模块：`crates/prping-core/src/web/`、`frontend/`、`crates/prping-core/build.rs`
 
@@ -15,7 +15,7 @@
 - **低代码编辑**（规划中）：Blockly 积木视图，Scratch 风格（Zelos 渲染器）；
 - **实时反馈**：编辑即分析——层栈字段、字节数、hexdump、层序警告实时刷新；
 - **协议学习**：eng_lib 协议库（headers.pkt 等 21 个文件）只读浏览；
-- **零安装体验**：前端资源内嵌进二进制，`prping web --open` 一条命令打开浏览器即用。
+- **零安装体验**：`prping web --open` 一条命令打开浏览器即用——默认读二进制目录/`启动目录`的 `UI/` 文件夹（`just dist` 产物布局自带）；`--features web-embed` 时前端内嵌二进制（单文件分发）。
 
 ### 非目标（本期）
 
@@ -28,7 +28,7 @@
 ## 2. 总体架构
 
 ```text
-浏览器（SolidJS SPA，rust-embed 内嵌进 prping 二进制）
+浏览器（SolidJS SPA；默认读 UI/ 目录，--features web-embed 时内嵌二进制）
  ├─ CodeMirror 6 编辑器 ── LSP JSON-RPC（WS 信封透传 → 内存管道 → run_lsp_on）
  ├─ 层栈 / HEX / 诊断面板 ── analyze 信封（内存文本 → engine --json 同构文档）
  └─ eng_lib 库浏览 ── list / read 信封（服务端只读）
@@ -38,7 +38,8 @@
  ├─ http.rs   极简 HTTP/1.1 GET/HEAD 响应（Content-Length、keep-alive）
  ├─ ws.rs     WS 会话：信封分派 + Content-Length 分帧解包 + LSP 桥
  ├─ pipe.rs   异步↔阻塞字节桥（smol::channel 实现 io::Read/Write）
- └─ assets.rs rust-embed：debug 运行期直读 dist / release 编译期内嵌
+ └─ assets.rs 静态资源双模式：默认读 UI/ 目录；web-embed feature 时 rust-embed
+                 （debug 直读 dist / release 编译期内嵌）
                      │
         ──── 进程内（无需 IPC）────
         ├─ engine LSP（engine/eng/lsp.rs::run_lsp_on，阻塞线程）
@@ -66,7 +67,7 @@
 |---|---|---|
 | HTTP 服务 | 手写极简 HTTP/1.1（`web/http.rs`，~200 行） | 只需 GET/HEAD + Content-Length + keep-alive。hyper+smol-hyper 引入三套 IO trait 适配（hyper rt / futures-io / std）只为几条静态路由，得不偿失；axum 拖 tokio 违背 smol 栈；trillium 全家桶依赖面大 |
 | WebSocket | `async-tungstenite`（默认 feature：`handshake` + `futures-03-sink`，**无 tokio**） | `smol::Async<TcpStream>`（async-io 2.6）原生实现 futures-io `AsyncRead/Write`，可直接作传输层；升级握手手工完成（101 + `derive_accept_key`），再用 `WebSocketStream::from_raw_socket` 包裸流 |
-| 资源内嵌 | `rust-embed` 8 | debug 构建运行期直读 `frontend/dist`（改前端重跑构建即生效，不重编 Rust）；release 编译期内嵌二进制（单文件分发不变） |
+| 资源分发 | **默认读盘**：运行期从二进制所在目录（优先）或启动目录的 `UI/` 文件夹读前端产物——前端与 Rust 编译零耦合，产物体积小、构建无需 node；**可选 `web-embed` feature**：`rust-embed` 8，debug 直读 `frontend/dist`（改前端重跑构建即生效），release 编译期内嵌（单文件分发） |
 | MIME | `mime_guess` | rust-embed 传递依赖，提升为直接依赖零成本 |
 | 打开浏览器 | `open` 5 | 跨平台 open/xdg-open/start，`that_detached` 不阻塞服务启动 |
 | 异步运行时 | 复用 `smol` 2 | 与全项目一致；`smol::spawn` / `smol::unblock` / `smol::channel` / `smol::Timer` |
@@ -80,12 +81,13 @@
 | LSP 客户端 | 自写薄封装（`src/lsp.ts`，~150 行） | 服务端仅 5 个能力（diagnostics/completion/hover/documentSymbol/definition），`codemirror-languageserver` 泛用封装反而重 |
 | 低代码 | **规划：Blockly + Zelos 渲染器**（§10） | Zelos 即 Scratch 积木外观；Blockly vanilla JS 可包进 Solid。落选 scratch-blocks（停更）、Rete.js/Drawflow（节点画布适合拓扑图，pkt DSL 是层栈+步骤序列，嵌套块更贴合） |
 | UI | 手写 CSS（深色，~300 行） | 单页三面板布局，引入 Tailwind/Kobalte 收益低 |
-| 包管理 | pnpm（build.rs 自动降级 npm） | CI/裸环境无 pnpm 时兜底 |
+| 包管理 | bun（build.rs/justfile 自动降级 npm） | bun 自带锁文件与脚本运行器、install 快；npm 随 node 附带兜底 |
 
 ### 3.3 依赖增量
 
-Rust 侧 +5 crate（async-tungstenite / rust-embed / open / futures-util / mime_guess），
-npm 侧 solid-js + codemirror 6 件套 + vite 全家（dev）。产物体积 +~2MB（前端资源）。
+Rust 侧 +5 crate（async-tungstenite / rust-embed（可选，随 `web-embed`）/ open /
+futures-util / mime_guess），npm 侧 solid-js + codemirror 6 件套 + vite 全家（dev）。
+产物体积 +~2MB（仅 `web-embed` 内嵌时进二进制；默认分发为 `prping` + `UI/` 目录）。
 
 ---
 
@@ -100,7 +102,9 @@ crates/prping-core/src/web/
 ├── http.rs    请求头解析（CRLFCRLF 截断，MAX_HEAD=64KB）+ 响应 + 路由
 ├── ws.rs      accept（手工 101）+ session（三分任务）+ 信封分派 + FrameDecoder
 ├── pipe.rs    ChanReader/ChanWriter（smol::channel ↔ io::Read/Write，EOF=发送端 drop）
-└── assets.rs  rust-embed Assets（folder=../../frontend/dist）+ lookup/index_missing
+└── assets.rs  静态资源双模式：默认 UI/ 目录（二进制目录→启动目录）；
+                web-embed 时 rust-embed Assets（folder=../../frontend/dist）
+                lookup / index_missing / source_label / missing_hint
 ```
 
 公开 API（lib.rs）：`serve_web(WebConfig) -> anyhow::Result<()>`（async，CLI 侧
@@ -148,14 +152,16 @@ LSP `ChanReader` 读到 EOF → `run_lsp_on` 返回 → `out_tx`（ChanWriter）
 
 | 路径 | 行为 |
 |---|---|
-| `/`（及 `/index.html`） | 内嵌 `index.html`，`Cache-Control: no-cache` |
-| `/assets/*` | 内嵌产物（vite 文件名带内容 hash），`public, max-age=31536000, immutable` |
+| `/`（及 `/index.html`） | `index.html`（内嵌 / UI 目录），`Cache-Control: no-cache` |
+| `/assets/*` | 产物（vite 文件名带内容 hash），`public, max-age=31536000, immutable` |
 | `/config.json` | `{"version": "0.1.0", "wsPath": "/ws"}`，no-cache |
 | 其余 | 404 |
-| `/` 且前端未构建 | **503** + 构建提示（`web.frontend_missing` i18n） |
+| `/` 且前端资源缺失 | **503** + 按模式给提示（i18n）：内嵌 = `web.frontend_missing`（构建方式）；UI 目录 = `web.ui_missing`（放置位置：<二进制目录>/UI 或启动目录/UI） |
 
-资源键**精确匹配** rust-embed 内部映射（点段一律拒绝）——没有文件系统路径拼接，
-路径穿越从结构上不可能。请求头超 64KB → 连接关闭；HEAD 只回头部。
+资源键两种模式共用同一校验（`sanitize_key`）：`/` → `index.html`，其余剥前导
+`/` 后**逐段校验**——空段、点开头（`.`/`..`/隐藏文件）、反斜杠、冒号一律拒绝，
+余下必为单一路径组件，内嵌键精确匹配 / UI 目录拼接均不可能穿越。请求头超 64KB →
+连接关闭；HEAD 只回头部。
 
 ### 4.5 信封协议（WS 文本帧，一帧一信封 JSON）
 
@@ -266,7 +272,7 @@ frontend/
 | 网络暴露 | 默认绑定 `127.0.0.1`（`--addr` 显式才改）；WS 端点仅 `/ws` |
 | 浏览器特权 | 零特权：raw socket / 文件访问全在服务端进程 |
 | 文件访问 | 库浏览只读 + 纯文件名白名单式校验（拒绝分隔符/`..`） |
-| 资源服务 | rust-embed 键精确匹配，无路径拼接 |
+| 资源服务 | 内嵌：rust-embed 键精确匹配；UI 目录：逐段校验（空段/点段/反斜杠/冒号拒绝）+ 仅普通文件可读 |
 | 协议滥用 | 请求头 ≤64KB、单帧 ≤16MB、畸形帧丢弃；信封 type 白名单 |
 | 同源滥用 | 本机其它页面可连 `/ws`（无 token）——MVP 接受；规划：URL 随机 token（§10） |
 
@@ -279,11 +285,15 @@ frontend/
 ### 7.1 构建链（`crates/prping-core/build.rs`）
 
 ```text
-cargo build/check/test
+cargo build/check/test（默认：无 web-embed）
+  └─ prping-core/build.rs：检测 CARGO_FEATURE_WEB_EMBED 缺失 → 整个前端链条跳过
+     （默认产物运行期读 UI/ 目录，无需 node 工具链，改前端不触发重编）
+
+cargo build/check/test --features web-embed
   └─ prping-core/build.rs
        ├─ rerun-if-changed: frontend/{src,index.html,package.json,vite.config.ts,tsconfig.json}
-       └─ build_frontend(): pnpm install --silent（node_modules 缺失时）→ pnpm build
-            ├─ 无 pnpm → npm 降级；无 node → cargo:warning 跳过（离线/交叉可编译）
+       └─ build_frontend(): bun install（node_modules 缺失时）→ bun run build
+            ├─ 无 bun → npm 降级；无 node → cargo:warning 跳过（离线/交叉可编译）
             ├─ 有工具链但构建失败 → panic（构建失败，杜绝静默内嵌过期资源）
             └─ 跳过开关：PRPING_SKIP_WEB_BUILD=1
   └─ rust-embed（web/assets.rs）：release 编译期内嵌 dist；debug 运行期直读
@@ -298,25 +308,39 @@ cargo build/check/test
 
 ### 7.2 justfile
 
-- `just build-web`：pnpm/npm 构建 `frontend/dist`（单独刷新 / CI 预热）；
-- `just dist DIR`：产物目录新增 `web/` 副本（二进制内已内嵌同一份，便于静态服务器
-  分发 UI 或核对产物）；dist 缺失时打警告不阻塞跨平台产物；
-- 开发模式：`prping web --port 8788` 起后端，`pnpm --dir frontend dev` 起 Vite
+- `just build` / `just build-release`：依赖 **`web-dist`** 保障配方（`frontend/dist`
+  缺失或前端源码比产物新时自动执行 `just build-web`，新鲜则零开销跳过；
+  `PRPING_SKIP_WEB_BUILD=1` 跳过，与 build.rs 一致；无 node 降级为警告），cargo
+  构建后调用 `just dist` 把 **`target/{debug,release}` 同步为完整可运行布局**
+  `{prping, UI/, lib/, examples/}`——默认构建的 `prping web` 运行期从**二进制同
+  目录**读取（直接 `cargo run` 也命中 exe 目录候选），`--eng` 库搜索命中同目录
+  `lib/`；dist 缺失（无 node）时打提示不阻塞；
+- `just build-web`：bun/npm 构建 `frontend/dist`（强制刷新 / CI 预热；npm 为
+  bun 缺失时的兜底；不落 UI 副本，源码树不留生成物）；
+- `just dist DIR`：资源打包——`lib/`（← eng_lib）、`examples/`、`UI/`
+  （← frontend/dist）同步到 DIR，发布布局开箱即用；web-embed 构建的二进制不依赖
+  UI/；dist 缺失时打警告不阻塞跨平台产物；
+- `just check-web-embed`：`cargo check` + clippy `-D warnings`（`--features
+  prping/web-embed`；CI ubuntu 执行，与 `check-pcap` 并列）；
+- 开发模式：`prping web --port 8788` 起后端，`cd frontend && bun dev` 起 Vite
   热更新（`/ws`、`/config.json` 已配代理指向 8788）。
 
 ### 7.3 发布形态
 
-| 形态 | 内容 |
-|---|---|
-| 单文件 | `prping` 二进制（release 内嵌全部前端资源，`--open` 即用） |
-| 目录 | `target/release/{prping, lib/, examples/, web/}`（`just publish`） |
+| 形态 | 内容 | 构建 |
+|---|---|---|
+| 单文件 | `prping` 二进制（前端内嵌，`--open` 即用） | `cargo build --release -p prping --features web-embed` |
+| 目录（默认） | `target/release/{prping, UI/, lib/, examples/}`（`just publish`/`just dist`）——运行期读同目录 `UI/` | 默认（构建 UI 副本需 node，无则降级为 503 提示页） |
 
 ---
 
 ## 8. i18n
 
 服务端横幅/错误走 rust-i18n（core `locales/{en-US,zh-CN}.yml` 的 `web.*` 段：
-listening / opening / open_failed / exit_hint / frontend_missing / read_*）；
+listening / opening / open_failed / frontend_missing / ui_embedded(_debug) /
+ui_dir / ui_dir_missing / ui_missing / read_*）；横幅新增 `ui:` 行标明资源来源
+（内嵌 / UI 目录路径 / 未找到提示）；Ctrl+C 提示只在 listening 行尾出现一次，
+`--open` 的 opening 行不重复 URL（`open_failed` 例外——手动访问需要完整地址）；
 CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web_*`，
 `help.usage_line` 摘要与 `build-web` 输出同步双语）。前端 UI 文案当前为英文
 （MVP；面板文案少，随块编辑器一并接前端 i18n）。
@@ -329,6 +353,7 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 
 | 模块 | 覆盖 |
 |---|---|
+| `assets.rs` | 键映射（`/`→index.html）、穿越/特殊段拒绝（`..`/点段/反斜杠/冒号/空段）、UI 目录读盘往返（临时根注入） |
 | `pipe.rs` | 字节往返 + 跨块 EOF、零长读、对端断开 BrokenPipe |
 | `http.rs` | 请求头解析（query 剥离/HTTP/1.0/Connection: close）、WS 升级判定、畸形拒绝、CRLFCRLF 定位 |
 | `ws.rs` | FrameDecoder（整帧/单字节碎帧/畸形头不卡死/超限丢弃）、params 形状、`read` 路径穿越拒绝 |
@@ -348,6 +373,15 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 另验证：`--open` 弹出浏览器；release 二进制删除磁盘 dist 后仍 200（内嵌生效）；
 前端未构建时 `/` 返回 503 构建提示；`prping w` 前缀展开正常。
 
+资源分发双模式端到端（curl 对真实服务端）：
+
+1. 默认构建 + 启动目录 `UI/`：`/` 200 text/html、`/assets/*.js` 200、`/config.json` 200、
+   `/../Cargo.toml` 与 `/.git/config`（--path-as-is）404、横幅 `ui: <UI 目录路径>`；
+2. 默认构建 + 无 UI 目录（/tmp 启动）：`/` 503 + `web.ui_missing` 指引，横幅 `ui: 未找到 UI 目录…`；
+3. exe 目录优先：`target/debug/UI` 存在时从任意 cwd 启动均命中 exe 目录（横幅验证）；
+4. `--features web-embed` 构建：无任何 UI 目录时 `/` 与 `/assets/*` 仍 200（内嵌生效），
+   横幅 `ui: 内嵌（web-embed feature）`。
+
 ---
 
 ## 10. 已知限制与路线图
@@ -360,7 +394,7 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 | 鉴权 | 无（仅回环） | URL 随机 token（`prping web` 打印带 token 的 URL），发信封校验——发送能力上线时必做 |
 | TLS/远程 | 无 | 非目标；远程用 SSH 隧道或反向代理 |
 | 手册章节 | 未加入 `document` | `manual-zh/en` 增补 web 章节（双语编号一致性测试约束） |
-| check-all | Windows 交叉目标 4 个**预先存在**错误（父提交 69310e25 已有）：`serve/capture.rs` 的 `strip_null` import/定义 cfg 错配、`matches_bare` cfg 缺失、`ping/trace/dns.rs` getnameinfo 参数 | 独立修复，不阻塞本特性（本特性代码在全部目标编译通过） |
+| check-all | Windows 交叉目标 2 个**预先存在**错误（父提交 69310e25 已有）：`serve/capture.rs` 的 `strip_null` import/定义 cfg 错配、`ping/trace/dns.rs` getnameinfo 参数 |`matches_bare` cfg 缺失（`bare_ip_keep` cfg 对齐其唯一调用方 `pcap_loop`）、linux+pcap 的 `Layer`/`io` cfg 错配（`reply_is_v6`/`open_raw_icmp6` cfg 收紧）、Linux 主机 4 条 engine `raw/listen_raw` 死代码警告及全部 clippy 残留已顺手修复——现为默认/pcap/web-embed 全组合 clippy 零警告；剩余 2 项 Windows 交叉错误独立修复，不阻塞本特性 |
 
 ---
 
@@ -374,6 +408,12 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
    `Cursor` 验证）；smol::channel 的 `send_blocking`/`recv_blocking` 两侧同源，
    EOF 语义 = 发送端 drop，全链路无 OS 管道、无平台差异。
 4. **前端构建挂 core 的 build.rs**——rust-embed 读盘时机在 core 编译期，构建逻辑
-   必须先行（详见 §7.1）；pnpm→npm 降级保证 CI/裸环境可编译。
+   必须先行（详见 §7.1）；bun→npm 降级保证 CI/裸环境可编译。
 5. **文本为单一事实源**——块编辑器是视图而非平行存储；`analyze_text_json` 的
    结构化输出即块视图 IR，避免引入第二套模型。
+6. **资源默认不内嵌，`UI/` 目录兜底**——内嵌改成可选 `web-embed` feature（默认关）：
+   前端产物与 Rust 编译零耦合（改前端不触发重编）、默认构建无需 node 工具链（离线/
+   交叉/CI 零负担）、二进制小 ~2MB；分发形态 = 二进制 + `UI/` 目录（`just dist` 自带，
+   替换目录即换 UI）。需要单文件分发时 `--features web-embed` 一键内嵌（rust-embed
+   debug 仍直读 dist，开发热更新路径不变）。UI 目录查找：二进制所在目录优先（`just
+   dist` 布局与 cwd 无关），其次启动目录；每请求即时解析，目录可后补、文件改动即生效。

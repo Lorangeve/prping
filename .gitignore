@@ -8,3 +8,4 @@
 frontend/node_modules/
 frontend/dist/*
 !frontend/dist/.gitkeep
+# target/<profile>/UI（just build/build-release 同步的前端产物）已由 /target 覆盖

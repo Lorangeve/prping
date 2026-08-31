@@ -78,7 +78,10 @@ export class PrpingClient {
   }
 
   private sendRaw(obj: Record<string, unknown>): void {
-    this.ws?.send(JSON.stringify(obj));
+    // 仅 OPEN 态可发（CONNECTING/CLOSED 下 send 抛 InvalidStateError）；未连接时
+    // 静默丢弃——连接建立后上层经 onStatus("connected") 重放会话初始化
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify(obj));
   }
 
   /** 发送带 id 的信封并等待 result 应答。 */

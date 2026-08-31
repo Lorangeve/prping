@@ -157,6 +157,8 @@ pub(crate) fn listen_raw_once(
     iface: Option<&str>,
     timeout: Option<Duration>,
 ) -> anyhow::Result<Option<Vec<u8>>> {
+    // 匹配器已由调用方按 module/params/globals 构建，此处不再透传——显式丢弃标记有意不用
+    let _ = (&module, &params, &globals);
     let deadline = timeout.map(|d| std::time::Instant::now() + d);
     let expired = |deadline: Option<std::time::Instant>| {
         deadline.is_some_and(|dl| std::time::Instant::now() >= dl)
@@ -212,12 +214,10 @@ pub(crate) fn listen_raw_once(
             }
         };
         unsafe { libc::close(fd) };
-        return Ok(hit);
+        Ok(hit)
     }
     #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
     {
-        // 匹配器已构建，module/params/globals 无需进线程
-        let _ = (&module, &params, &globals);
         let devs = crate::engine::rawpcap::list_devices()?;
         // 设备选择：--iface 匹配名称/描述子串（不区分大小写）；否则全部设备
         let wanted: Vec<usize> = match iface {

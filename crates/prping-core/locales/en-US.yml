@@ -444,12 +444,22 @@ help:
 
 web:
   listening: 'web editor: %{url}  (Ctrl+C to exit)'
-  opening: 'opening browser: %{url}'
+  opening: 'opening browser…'
   open_failed: 'could not open browser (%{err}) — open %{url} manually'
-  exit_hint: 'Ctrl+C to stop'
   frontend_missing: |-
-    frontend assets not built — run once:
-      just build-web            (or: cd frontend && pnpm install && pnpm build)
+    frontend assets not built (web-embed mode) — run once:
+      just build-web            (or: cd frontend && bun install && bun run build)
+    then rebuild with --features web-embed (assets are embedded at compile time)
+  ui_embedded: 'embedded (web-embed feature)'
+  ui_embedded_debug: 'embedded (web-embed feature; debug reads frontend/dist from disk)'
+  ui_dir: '%{dir}'
+  ui_dir_missing: 'UI/ folder not found (binary dir/UI or startup dir/UI) — pages will serve a 503 build hint'
+  ui_missing: |-
+    web UI not found — the default build does not embed the frontend; place the
+    built assets in either of the following and restart:
+      <prping binary directory>/UI/
+      <startup directory>/UI/
+    dev: just build (auto-syncs to target/<profile>/UI) or just build-web, then copy frontend/dist manually
   read_bad_name: 'invalid library file name (bare file name only)'
   read_failed: 'failed to read library file: %{err}'
   read_not_found: 'library file not found: %{name}'

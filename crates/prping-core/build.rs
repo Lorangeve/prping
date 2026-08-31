@@ -4,10 +4,11 @@
 //!    `locales/*.yml` 并把文案内嵌进二进制，但 cargo 不感知宏读过的文件——
 //!    增量构建时改 yml 不会触发重编译，产物里一直是旧文案。用
 //!    `rerun-if-changed` 声明依赖，yml 一改就重编译本 crate。
-//! 2. 前端构建：web 模块的 rust-embed 在**本 crate 编译期**读取
-//!    `frontend/dist`（release 内嵌二进制），因此前端必须在本 crate 编译前
-//!    就绪——构建逻辑必须放在本 crate 的 build.rs（放 prping-cli 会晚于
-//!    rust-embed 读盘）。
+//! 2. 前端构建（仅 `web-embed` feature）：web 模块的 rust-embed 在**本 crate
+//!    编译期**读取 `frontend/dist`（release 内嵌二进制），因此前端必须在本
+//!    crate 编译前就绪——构建逻辑必须放在本 crate 的 build.rs（放 prping-cli
+//!    会晚于 rust-embed 读盘）。默认构建不启用该 feature：运行期读 UI/ 目录，
+//!    无需 node 工具链。
 
 fn main() {
     println!("cargo:rerun-if-changed=locales/zh-CN.yml");
@@ -15,6 +16,11 @@ fn main() {
 
     // 前端源码/配置变更 → 重建 dist；node 工具链缺失时仅警告跳过（离线/交叉
     // 环境可编译，运行期 web 页面 503 提示构建方式）。跳过开关：PRPING_SKIP_WEB_BUILD=1。
+    // 仅 web-embed（rust-embed 内嵌）需要 dist：默认构建读 UI/ 目录，整个前端
+    // 构建链条（含 rerun-if-changed）一并跳过，改前端不触发无谓重编。
+    if std::env::var_os("CARGO_FEATURE_WEB_EMBED").is_none() {
+        return;
+    }
     println!("cargo:rerun-if-changed=../../frontend/src");
     println!("cargo:rerun-if-changed=../../frontend/index.html");
     println!("cargo:rerun-if-changed=../../frontend/package.json");
@@ -29,9 +35,9 @@ fn main() {
     }
 }
 
-/// 前端构建：pnpm 优先、npm 兜底（CI/裸环境无 pnpm）；node_modules 缺失时先装
-/// 依赖。有工具链但构建失败 → panic（cargo 构建失败，避免静默内嵌过期资源）；
-/// 无工具链 → cargo:warning 后跳过。
+/// 前端构建（仅 web-embed feature 调用）：bun 优先、npm 兜底（npm 随 node
+/// 附带）；node_modules 缺失时先装依赖。有工具链但构建失败 → panic（cargo
+/// 构建失败，避免静默内嵌过期资源）；无工具链 → cargo:warning 后跳过。
 fn build_frontend() {
     let root = std::path::Path::new("../../frontend");
     if !root.join("package.json").exists() {
@@ -46,8 +52,9 @@ fn build_frontend() {
             .status()
             .is_ok_and(|s| s.success())
     };
-    let (pm, install_args, build_args): (&str, &[&str], &[&str]) = if has("pnpm") {
-        ("pnpm", &["install", "--silent"], &["build"])
+    let (pm, install_args, build_args): (&str, &[&str], &[&str]) = if has("bun") {
+        // bun：自带包管理器与脚本运行器；build 走 package.json 的 vite script
+        ("bun", &["install"], &["run", "build"])
     } else if has("npm") {
         (
             "npm",
@@ -56,7 +63,7 @@ fn build_frontend() {
         )
     } else {
         println!(
-            "cargo:warning=prping web: node/pnpm/npm not found — skipping frontend build \
+            "cargo:warning=prping web: node/bun/npm not found — skipping frontend build \
              (web UI falls back to a build-hint page); set PRPING_SKIP_WEB_BUILD=1 to silence"
         );
         return;

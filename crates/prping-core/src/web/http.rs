@@ -2,7 +2,8 @@
 //!
 //! 只实现浏览器访问单页应用所需的最小子集：请求头读取（CRLFCRLF 截断）、
 //! Content-Length 响应、keep-alive。不做 chunked/压缩/大文件流式——静态资源
-//! 全部来自 rust-embed 内嵌（键名精确匹配，天然免疫路径穿越）。
+//! 来自 rust-embed 内嵌（`web-embed` feature）或 UI 目录（默认），键名逐段
+//! 校验，天然免疫路径穿越（见 assets.rs）。
 
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use smol::net::TcpStream;
@@ -147,7 +148,7 @@ pub(crate) async fn respond(
     stream.flush().await
 }
 
-/// 路由分发：`/config.json`（动态）→ 内嵌静态资源 → 404（前端未构建时给构建提示）。
+/// 路由分发：`/config.json`（动态）→ 静态资源（内嵌 / UI 目录）→ 404（资源缺失时给提示）。
 pub(crate) async fn dispatch(stream: &mut TcpStream, head: &RequestHead) -> std::io::Result<()> {
     let keep = head.keep_alive();
     let is_head = head.method == "HEAD";
@@ -178,13 +179,14 @@ pub(crate) async fn dispatch(stream: &mut TcpStream, head: &RequestHead) -> std:
         return respond(stream, "200 OK", &mime, Some(cache), &data, keep, is_head).await;
     }
     if head.path == "/" && assets::index_missing() {
-        // 前端未构建：直接说明构建方式（比空 404 可诊断）
+        // 前端资源缺失（内嵌模式 = dist 未构建；UI 目录模式 = 未找到 UI 目录）：
+        // 按模式给对应指引（比空 404 可诊断）
         return respond(
             stream,
             "503 Service Unavailable",
             "text/plain; charset=utf-8",
             Some("no-cache"),
-            t_web_missing().as_bytes(),
+            assets::missing_hint().as_bytes(),
             keep,
             is_head,
         )
@@ -200,11 +202,6 @@ pub(crate) async fn dispatch(stream: &mut TcpStream, head: &RequestHead) -> std:
         is_head,
     )
     .await
-}
-
-/// 前端未构建提示（i18n）。
-fn t_web_missing() -> String {
-    rust_i18n::t!("web.frontend_missing").to_string()
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
-//! `prping web` —— 内嵌 Web 编辑器服务器（`prping web --open`）。
+//! `prping web` —— Web 编辑器服务器（`prping web --open`）。
 //!
 //! 单进程单端口，浏览器直连：
 //!
 //! ```text
-//! 浏览器（SolidJS SPA，rust-embed 内嵌进二进制）
+//! 浏览器（SolidJS SPA；默认读 UI/ 目录，--features web-embed 时内嵌二进制）
 //!  ├─ CodeMirror 6 ── LSP JSON-RPC（WS 信封透传 → 内存管道 → run_lsp_on）
 //!  └─ 层栈 / HEX 预览 ── analyze 信封（内存文本 → engine --json 同构文档）
 //!            │ HTTP(静态) + WebSocket(/ws) 同端口
@@ -11,7 +11,8 @@
 //!  ├─ http.rs  极简 HTTP/1.1 GET 响应（本机回环工具，不做完整 RFC 覆盖）
 //!  ├─ ws.rs    WS 会话：信封分派 + LSP 桥（Content-Length 分帧解包）
 //!  ├─ pipe.rs  异步↔阻塞字节桥（WS 任务 ↔ LSP 阻塞线程）
-//!  └─ assets.rs rust-embed：debug 直读 dist（改完重跑构建即生效），release 编译期内嵌
+//!  └─ assets.rs 静态资源双模式：默认读 UI/ 目录（二进制目录/启动目录），
+//!              web-embed feature 时 rust-embed（debug 直读 dist，release 内嵌）
 //! ```
 //!
 //! 安全模型：默认仅绑定回环（`--addr` 可改）；发包/读文件都发生在服务端进程
@@ -61,9 +62,10 @@ pub async fn serve_web(cfg: WebConfig) -> anyhow::Result<()> {
 
     if cfg.open_browser {
         match open::that_detached(&url) {
+            // URL 已在横幅 listening 行打印过，这里不再重复
             Ok(()) => {
                 let mut w = stdout_stream();
-                let _ = print_cyan(&mut w, &t!("web.opening", url = url.as_str()));
+                let _ = print_cyan(&mut w, &t!("web.opening"));
                 println!();
             }
             Err(e) => {
@@ -112,8 +114,10 @@ fn print_banner(url: &str, libs: &[PathBuf]) {
     println!();
     let _ = print_dim(&mut w, format!("libs: {}", libs_display(libs)));
     println!();
-    let _ = print_dim(&mut w, &t!("web.exit_hint"));
+    // 静态资源来源：内嵌（web-embed）/ UI 目录路径 / 未找到提示
+    let _ = print_dim(&mut w, format!("ui: {}", assets::source_label()));
     println!();
+    // Ctrl+C 提示已在 listening 行尾携带，不再单独重复一行
 }
 
 fn stdout_stream() -> StandardStream {

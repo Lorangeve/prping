@@ -792,7 +792,7 @@ fn clause_matches(
                 }
                 ItemMatcher::Mask(m) => {
                     let b = layer_raw_bytes(rl)?;
-                    if !b.first().is_some_and(|x| x & m == *m) {
+                    if b.first().is_none_or(|x| x & m != *m) {
                         return None;
                     }
                 }
@@ -884,7 +884,7 @@ fn clause_matches(
                 }
             }
             ItemMatcher::Mask(m) => {
-                if !reply.first().is_some_and(|x| x & m == *m) {
+                if reply.first().is_none_or(|x| x & m != *m) {
                     return None;
                 }
             }
