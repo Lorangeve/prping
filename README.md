@@ -75,8 +75,8 @@ prping engine FILE.pkt          # .pkt 分析（层栈 + hexdump）
 prping engine --lsp             # .pkt 语言服务器（JSON-RPC over stdio）
 prping packet FILE.pkt [HOST:PORT]  # 构建并发送（目标可省略）
 prping engine --pcap x.pcap --to-pkt dir/  # pcap → 每记录一个 .pkt + .pktl 配方（--structured 语义化）
-# Web 编辑器（内嵌进二进制，浏览器即用）：
-prping web --open               # 启动并自动打开浏览器（CodeMirror + LSP + 实时层栈/HEX 预览）
+# Web 编辑器（前端默认随产物 UI/ 目录分发；--features web-embed 内嵌二进制）：
+prping web --open               # 启动并自动打开浏览器（左栏文件管理：examples 可编辑保存/Ctrl+S、eng_lib 只读；CodeMirror + LSP + 实时层栈/HEX 预览）
 ```
 
 ### 选项（按子命令分组）

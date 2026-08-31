@@ -9,6 +9,13 @@ fn main() {
     println!("cargo:rerun-if-changed=locales/zh-CN.yml");
     println!("cargo:rerun-if-changed=locales/en-US.yml");
 
+    // Windows 目标：把 workspace 根 assets/images/icon.ico 嵌进 exe 资源
+    // （Explorer/任务栏/快捷方式图标）。资源编译器缺失（Linux 交叉编译环境
+    // 常见）时仅 cargo:warning，不阻断构建——图标缺失不影响功能。
+    if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
+        embed_windows_icon();
+    }
+
     if !cfg!(target_os = "linux") {
         return;
     }
@@ -59,5 +66,22 @@ fn main() {
             .args(["-n", "setcap", "cap_net_raw+ep"])
             .arg(&binary)
             .status();
+    }
+}
+
+/// Windows exe 图标嵌入：winresource 生成 .res 并链进二进制。
+/// 独立成函数便于在 main 的 Windows 分支调用；失败降级为警告。
+fn embed_windows_icon() {
+    let icon = std::path::Path::new("../../assets/images/icon.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    if !icon.is_file() {
+        println!("cargo:warning=prping: assets/images/icon.ico not found, exe icon skipped");
+        return;
+    }
+    let icon_str = icon.to_str().expect("icon path is utf-8");
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon(icon_str);
+    if let Err(e) = res.compile() {
+        println!("cargo:warning=prping: failed to embed exe icon: {e}");
     }
 }

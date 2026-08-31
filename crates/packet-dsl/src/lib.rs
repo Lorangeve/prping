@@ -56,7 +56,7 @@ pub use matchpred::{
     reply_field_names, sniffer_match, sniffer_match_with,
 };
 pub use semantic::{
-    Def, LibExport, Module, ResolvedImport, default_libs, lib_exports, parse_file,
+    Def, LibExport, Module, ResolvedImport, default_libs, lib_exports, lib_functions, parse_file,
     parse_file_with_libs, parse_source_at, parse_source_at_with_libs, parse_str,
 };
 pub use serialize::{DefaultSerializer, SerializeError, Serializer};

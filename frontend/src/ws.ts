@@ -107,11 +107,61 @@ export class PrpingClient {
     return this.request({ type: "analyze", uri, text, params });
   }
 
+  /** AST 结构化导出（块视图 IR；解析/语义失败 → ok:false，块视图降级）。 */
+  ast(uri: string, text: string): Promise<any> {
+    return this.request({ type: "ast", uri, text });
+  }
+
+  /** 原语/库层 schema（块字段提示与文档；每次连接取一次）。 */
+  schema(): Promise<any> {
+    return this.request({ type: "schema" });
+  }
+
   listLibs(): Promise<any> {
     return this.request({ type: "list" });
   }
 
   readLib(name: string): Promise<any> {
     return this.request({ type: "read", name });
+  }
+
+  /** 工作区目录树（默认 examples；应答含 root/writable/entries）。 */
+  tree(): Promise<any> {
+    return this.request({ type: "tree" });
+  }
+
+  /** 读工作区文件（可写；相对路径，'/' 分隔）。 */
+  readWs(name: string): Promise<any> {
+    return this.request({ type: "read", root: "ws", name });
+  }
+
+  /** 保存工作区文件（新建或覆盖）。 */
+  saveFile(name: string, text: string): Promise<any> {
+    return this.request({ type: "save", name, text });
+  }
+
+  /** 删除工作区文件。 */
+  deleteFile(name: string): Promise<any> {
+    return this.request({ type: "delete", name });
+  }
+
+  /** 重命名/移动工作区文件（目标已存在会被服务端拒绝）。 */
+  renameFile(from: string, to: string): Promise<any> {
+    return this.request({ type: "rename", from, to });
+  }
+
+  /** 新建工作区目录（父目录链一并创建）。 */
+  mkdir(name: string): Promise<any> {
+    return this.request({ type: "mkdir", name });
+  }
+
+  /** 打开自定义工作区文件夹（空串重置为默认 examples）。 */
+  openFolder(path: string): Promise<any> {
+    return this.request({ type: "workspace", path });
+  }
+
+  /** 浏览目录（文件夹选择对话框数据源；path 缺省 = 服务端用户主目录）。 */
+  browse(path?: string): Promise<any> {
+    return this.request(path ? { type: "browse", path } : { type: "browse" });
   }
 }

@@ -1,11 +1,13 @@
 // CodeMirror 6 编辑器组装：pktlang 高亮 + LSP 三件套（lint / 补全 / 悬停）。
+// 补全手感：validFor 本地过滤（免每键 LSP 往返）、( , = > 输入即弹、
+// 实参括号内命名参数（param=）补全、选中 name() 光标落括号内并顺势弹参数。
 
-import { autocompletion, closeBrackets } from "@codemirror/autocomplete";
+import { autocompletion, closeBrackets, startCompletion, type CompletionResult } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
 import { highlightSelectionMatches, search } from "@codemirror/search";
-import { EditorState, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, type Text, type Extension } from "@codemirror/state";
 import {
   EditorView,
   drawSelection,
@@ -18,6 +20,7 @@ import {
   lineNumbers,
   tooltips,
 } from "@codemirror/view";
+import { renderMarkdown } from "./markdown";
 import { pktlangLanguage } from "./pktlang";
 
 /** 深色主题（与面板配色一致，不引外部主题依赖）。 */
@@ -39,12 +42,184 @@ const theme = EditorView.theme(
       maxWidth: "460px",
     },
     ".cm-tooltip-autocomplete ul li[aria-selected]": { backgroundColor: "#2c313c" },
-    ".hover-doc": { padding: "6px 10px", whiteSpace: "pre-wrap", fontSize: "12px" },
+    ".hover-doc": {
+      padding: "8px 12px",
+      fontSize: "12px",
+      lineHeight: "1.55",
+      maxHeight: "400px",
+      overflowY: "auto",
+      overscrollBehavior: "contain",
+    },
+    ".hover-doc::-webkit-scrollbar": { width: "8px" },
+    ".hover-doc::-webkit-scrollbar-thumb": { backgroundColor: "#333842", borderRadius: "4px" },
+    ".hover-doc::-webkit-scrollbar-track": { backgroundColor: "transparent" },
+    ".hover-doc p": { margin: "0 0 6px", whiteSpace: "pre-wrap" },
+    ".hover-doc :last-child": { marginBottom: "0" },
+    ".hover-doc h1, .hover-doc h2, .hover-doc h3, .hover-doc h4, .hover-doc h5, .hover-doc h6": {
+      margin: "2px 0 6px",
+      fontSize: "12.5px",
+      color: "#e8e8e8",
+    },
+    ".hover-doc ul": { margin: "0 0 6px", paddingLeft: "18px" },
+    ".hover-doc li": { margin: "1px 0" },
+    ".hover-doc code": {
+      backgroundColor: "#2a2e37",
+      borderRadius: "3px",
+      padding: "1px 4px",
+      fontFamily: "inherit",
+      fontSize: "11.5px",
+    },
+    ".hover-doc pre": {
+      backgroundColor: "#101216",
+      border: "1px solid #333842",
+      borderRadius: "4px",
+      padding: "6px 8px",
+      overflowX: "auto",
+      margin: "0 0 6px",
+    },
+    ".hover-doc pre code": { backgroundColor: "transparent", padding: "0", fontSize: "11.5px" },
+    ".hover-doc strong": { color: "#e8e8e8" },
+    ".cm-completionInfo": {
+      backgroundColor: "#1d2026",
+      border: "1px solid #333842",
+      borderRadius: "6px",
+    },
   },
   { dark: true },
 );
 
 const highlight = syntaxHighlighting(defaultHighlightStyle, { fallback: true });
+
+/** 可编辑开关（Compartment：库文件只读 / 工作区文件可写，切换不重建编辑器）。 */
+const editableCompartment = new Compartment();
+
+function editableExt(on: boolean): Extension {
+  return [EditorView.editable.of(on), EditorState.readOnly.of(!on)];
+}
+
+/** 切换编辑器可编辑态（打开库文件 → false，工作区文件 → true）。 */
+export function setEditable(view: EditorView, editable: boolean): void {
+  view.dispatch({ effects: editableCompartment.reconfigure(editableExt(editable)) });
+}
+
+/** LSP documentation（MarkupContent | MarkedString | 数组）→ markdown 文本。 */
+function docMarkdown(d: any): string {
+  if (d == null) return "";
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) return d.map(docMarkdown).join("\n\n");
+  return d.value ?? "";
+}
+
+/** 补全项 info：懒渲染——info 气泡出现时才把 markdown 转 HTML（renderMarkdown
+ *  先整体转义，innerHTML 注入安全）。无文档返回 null 不弹气泡。 */
+function infoRenderer(item: any): (() => Node) | null {
+  const md = docMarkdown(item.documentation);
+  if (!md) return null;
+  return () => {
+    const dom = document.createElement("div");
+    dom.className = "hover-doc";
+    dom.innerHTML = renderMarkdown(md);
+    return dom;
+  };
+}
+
+/** LSP 补全项 detail（如 "ipv4(version, ihl, ttl=64)" / "func f(a, b=c)  [mod]" /
+ *  "#[proto] func ... -> bytes f(a)  [需 import mod]"）→ 参数名列表。供
+ *  「光标在实参括号内」时的命名参数（param=）补全缓存用。 */
+function parseParamNames(detail: string): string[] {
+  const open = detail.indexOf("(");
+  const close = detail.lastIndexOf(")");
+  if (open < 0 || close <= open) return [];
+  return detail
+    .slice(open + 1, close)
+    .split(",")
+    .map((s) => s.trim().split(/[=:]/)[0].trim())
+    .filter((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s));
+}
+
+/** 光标向外最近一层未闭合调用括号：{ 函数名, 已填参数名 }。括号配对带引号奇偶
+ *  跟踪（字符串里的括号不参与）；找不到调用括号返回 null（启发式，不解析全语法）。 */
+function enclosingCall(doc: Text, pos: number): { name: string; used: string[] } | null {
+  const text = doc.sliceString(Math.max(0, pos - 4000), pos);
+  // 每个字符位置前的引号奇偶（1 = 处于字符串字面量内）
+  const parity = new Uint8Array(text.length + 1);
+  for (let i = 0; i < text.length; i++) parity[i + 1] = parity[i] ^ (text.charCodeAt(i) === 34 ? 1 : 0);
+  let depth = 0;
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (parity[i]) continue; // 字符串内
+    const ch = text[i];
+    if (ch === ")") depth++;
+    else if (ch === "(") {
+      if (depth === 0) {
+        const name = /([A-Za-z_][A-Za-z0-9_]*)\s*$/.exec(text.slice(0, i))?.[1];
+        if (!name) return null;
+        const inner = text.slice(i + 1);
+        const used = [...inner.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/g)].map((m) => m[1]);
+        return { name, used: [...new Set(used)] };
+      }
+      depth--;
+    }
+  }
+  return null;
+}
+
+/** 光标是否在字符串字面量内（引号奇偶启发）：触发字符不弹窗防打扰。 */
+function insideString(doc: Text, pos: number): boolean {
+  const text = doc.sliceString(0, pos);
+  return (text.match(/"/g)?.length ?? 0) % 2 === 1;
+}
+
+/** 光标是否处于 export: 列表位（export: 行冒号之后，或其 - 项续行）——该处语法上
+ *  只接受裸名字（元件/函数），补全不应给 name() 调用。启发式：光标行含未写完的
+ *  export: 项，或本身是 - 项且向上连续 - 行后紧跟 export: 行。 */
+function inExportList(doc: Text, pos: number): boolean {
+  const lines = doc.sliceString(0, pos).split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (i === lines.length - 1) {
+      // 光标行：export: 之后（冒号后允许已有 - 项内容）
+      if (/export\s*:/.test(t)) return true;
+      if (t.startsWith("-")) continue;
+      return false;
+    }
+    if (t.startsWith("-")) continue;
+    if (/^export\s*:/.test(t)) return true;
+    return false;
+  }
+  return false;
+}
+
+/** 光标前词起点（锚定行尾取尾部词段，行内任意位置的词都正确）。 */
+function wordStart(doc: Text, lineFrom: number, pos: number): number {
+  const before = doc.sliceString(lineFrom, pos);
+  return pos - (/[A-Za-z0-9_]*$/.exec(before)?.[0].length ?? 0);
+}
+
+/** 光标是否处于 sniffer: 块内（sniffer: 行，或其 - 项续行）。服务端已做上下文
+ *  补全（谓词/层名/字段），前端只负责空格触发与结果排序。 */
+/** 光标是否处于 .pktl 配方列表位（global:/recipe: 段头之下）。服务端按位置返回
+ *  段头/项形态/选项键/枚举值专属列表，前端只负责 `-` 与空格触发。 */
+function inRecipeList(doc: Text, pos: number): boolean {
+  const lines = doc.sliceString(0, pos).split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (t === "global:" || t === "recipe:") return true;
+    if (t.startsWith("-")) continue;
+    return false;
+  }
+  return false;
+}
+
+function inSnifferList(doc: Text, pos: number): boolean {
+  const lines = doc.sliceString(0, pos).split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (/^sniffer\s*:/.test(t)) return true;
+    if (t.startsWith("-")) continue;
+    return false;
+  }
+  return false;
+}
 
 export interface EditorOpts {
   doc: string;
@@ -57,25 +232,117 @@ export interface EditorOpts {
 }
 
 export function createEditor(parent: HTMLElement, opts: EditorOpts): EditorView {
+  // 函数名 → 参数名（来自 LSP 补全项 detail，随响应增量缓存；本地/库/原语通用）
+  const signatures = new Map<string, string[]>();
+
   const cmCompletion = autocompletion({
     override: [
-      async (ctx) => {
+      async (ctx): Promise<CompletionResult | null> => {
         const line = ctx.state.doc.lineAt(ctx.pos);
         const result = await opts.completion({
           line: line.number - 1,
           character: ctx.pos - line.from,
         });
         if (!result) return null;
-        // LSP CompletionList → CM CompletionResult（insertText 如 `tcp()` 原样展开）
-        return {
-          from: ctx.matchBefore(/[A-Za-z0-9_]/)?.from ?? ctx.pos,
-          options: (result.items ?? []).map((item: any) => ({
+        // export: 列表位：只补作用域内裸名字（本地元件/函数优先）——该处不接受
+        // name() 调用，带括号的 insertText 反而会写出非法语法
+        if (inExportList(ctx.state.doc, ctx.pos)) {
+          const tier = (it: any): number => {
+            const d = it.detail ?? "";
+            if (it.kind === 6 || it.kind === 9) return 1; // 本地元件/导出/模块默认
+            if (it.kind === 3 && d.startsWith("func ") && !d.includes(" [")) return 2; // 本地函数
+            if (d.includes(" [")) return 3; // 库导出（隐式在作用域，可转出口）
+            return 4; // 其余（原语等——导出多半无效，沉底）
+          };
+          const nameOpts = (result.items ?? [])
+            .filter((it: any) => it.kind === 3 || it.kind === 6 || it.kind === 9)
+            .sort((a: any, b: any) => tier(a) - tier(b))
+            .map((it: any) => ({
+              label: it.label,
+              detail: it.detail ?? "",
+              info: infoRenderer(it),
+              type: it.kind === 3 ? "function" : it.kind === 9 ? "namespace" : "variable",
+              apply: it.label, // 裸名字——export 列表不接受调用
+              boost: 40 - tier(it) * 10, // 保持 tier 顺序（CM 同分按字母重排）
+            }));
+          return {
+            from: wordStart(ctx.state.doc, line.from, ctx.pos),
+            options: nameOpts,
+            validFor: /^[A-Za-z0-9_]*$/,
+          };
+        }
+        // LSP CompletionList → CM CompletionResult；detail 捎带进签名缓存
+        const options = (result.items ?? []).map((item: any) => {
+          signatures.set(item.label, parseParamNames(item.detail ?? ""));
+          const insert = item.insertText ?? item.label;
+          // name() 形式：整体插入、光标落括号内，并顺势弹参数补全
+          const fn = /^\s*([A-Za-z_][A-Za-z0-9_]*)\(\)$/.exec(insert);
+          return {
             label: item.label,
             detail: item.detail ?? "",
-            info: item.documentation?.value ?? item.documentation ?? undefined,
-            type: item.kind === 3 ? "function" : item.kind === 14 ? "keyword" : "variable",
-            apply: item.insertText ?? item.label,
-          })),
+            info: infoRenderer(item),
+            type:
+              item.kind === 3
+                ? "function"
+                : item.kind === 14
+                  ? "keyword"
+                  : item.kind === 5
+                    ? "property"
+                    : item.kind === 9
+                      ? "namespace"
+                      : "variable",
+            apply: fn
+              ? (view: EditorView, _c: unknown, from: number, to: number) => {
+                  view.dispatch({
+                    changes: { from, to, insert: `${fn[1]}()` },
+                    selection: { anchor: from + fn[1].length + 1 },
+                  });
+                  startCompletion(view);
+                }
+              : insert,
+          };
+        });
+        // sniffer: 块内：服务端按位置返回谓词/层名/字段位专属列表（值位交回全局）
+        // ——仅当整份结果都是 sniffer 条目时才走此分支，避免误伤值位的全局列表
+        const snifferItems = result.items ?? [];
+        if (
+          inSnifferList(ctx.state.doc, ctx.pos) &&
+          snifferItems.length > 0 &&
+          snifferItems.every((it: any) => it.kind === 14 || it.kind === 5)
+        ) {
+          return {
+            from: wordStart(ctx.state.doc, line.from, ctx.pos),
+            options: snifferItems.map((it: any) => ({
+              label: it.label,
+              detail: it.detail ?? "",
+              type: it.kind === 14 ? "keyword" : "property",
+              apply: it.insertText ?? it.label,
+              // match 最常用置顶，and/or/not 次之，层名/字段再次
+              boost: it.kind === 14 ? (it.label === "match" ? 30 : 25) : 20,
+            })),
+            validFor: /^[A-Za-z0-9_=]*$/,
+          };
+        }
+        // 实参括号内：当前函数的命名参数以 param= 形式置顶（已填过的不重复）
+        const call = enclosingCall(ctx.state.doc, ctx.pos);
+        const paramOptions = call
+          ? (signatures.get(call.name) ?? [])
+              .filter((p) => !call.used.includes(p))
+              .map((p) => ({
+                label: `${p}=`,
+                detail: `${call.name} 参数`,
+                type: "property",
+                apply: `${p}=`,
+                boost: 99, // 实参位参数名压过同前缀函数（CM 按过滤分排序）
+              }))
+          : [];
+        // 光标前的词起点（锚定行尾取尾部词段，行内任意位置的词都正确）
+        const from = wordStart(ctx.state.doc, line.from, ctx.pos);
+        return {
+          from,
+          options: [...paramOptions, ...options],
+          // 词字符/=续敲时 CM 本地过滤复用本结果，不重查 LSP（括号/逗号等会触发重查）
+          validFor: /^[A-Za-z0-9_=]*$/,
         };
       },
     ],
@@ -92,13 +359,13 @@ export function createEditor(parent: HTMLElement, opts: EditorOpts): EditorView 
       const value =
         typeof result.contents === "string" ? result.contents : (result.contents.value ?? "");
       if (!value) return null;
-      // 极简展示：按文本渲染（保留换行），Markdown 修饰丢弃
+      // Markdown 渲染（renderMarkdown 先整体转义 HTML，注入安全）
       return {
         pos,
         create: () => {
           const dom = document.createElement("div");
           dom.className = "hover-doc";
-          dom.textContent = value;
+          dom.innerHTML = renderMarkdown(value);
           return { dom };
         },
       };
@@ -107,7 +374,49 @@ export function createEditor(parent: HTMLElement, opts: EditorOpts): EditorView 
   );
 
   const updateListener = EditorView.updateListener.of((u) => {
-    if (u.docChanged) opts.onUpdate(u.state.doc.toString());
+    if (!u.docChanged) return;
+    opts.onUpdate(u.state.doc.toString());
+    // 触发字符：输入 ( , = > 立即弹补全（ipv4( 直达参数列表、|> 后直达层函数）；
+    // import 行的空格直达模块名；export:/sniffer: 列表位敲 - / 空格即弹名字或谓词；
+    // 字符串字面量内不打扰
+    let inserted = "";
+    u.changes.iterChanges((_a, _b, _c, _d, text) => {
+      inserted += text.toString();
+    });
+    if (
+      inserted.length > 0 &&
+      inserted.length <= 3 &&
+      !insideString(u.state.doc, u.state.selection.main.head)
+    ) {
+      const head = u.state.selection.main.head;
+      const line = u.state.doc.lineAt(head);
+      const before = u.state.doc.sliceString(line.from, head);
+      const inExport = inExportList(u.state.doc, head);
+      const inSniff = inSnifferList(u.state.doc, head);
+      // export:/sniffer: 列表位敲 `-`（项起点）即弹，无需先敲字母；空格同样触发
+      const inRecipe = inRecipeList(u.state.doc, head);
+      const dashCtx = inserted.trim() === "-" && (inExport || inSniff || inRecipe);
+      const spaceCtx =
+        inserted.trim() === "" &&
+        (inExport || inSniff || inRecipe || /^\s*import\s/.test(before));
+      // 自动格式化：列表位项起点的 `-` 补随行空格（规范形态 `- full` / `- match`）
+      if (dashCtx && inserted.trim() === "-") {
+        const dashHead = u.state.selection.main.head;
+        const dashLine = u.state.doc.lineAt(dashHead);
+        const beforeDash = u.state.doc.sliceString(dashLine.from, dashHead - 1);
+        if (beforeDash.trim() === "") {
+          u.view.dispatch({
+            changes: { from: dashHead, insert: " " },
+            selection: { anchor: dashHead + 1 },
+          });
+        }
+      }
+      if (!/[(,=>]\s*$/.test(inserted) && !dashCtx && !spaceCtx) return;
+      // 零参函数的实参括号内无东西可补（eth()/use() 等），弹全量列表纯噪音
+      const call = enclosingCall(u.state.doc, head);
+      const sig = call ? signatures.get(call.name) : undefined;
+      if (!call || sig === undefined || sig.length > 0) startCompletion(u.view);
+    }
   });
 
   const extensions: Extension[] = [
@@ -129,6 +438,7 @@ export function createEditor(parent: HTMLElement, opts: EditorOpts): EditorView 
     pktlangLanguage,
     highlight,
     theme,
+    editableCompartment.of(editableExt(true)),
     tooltips({ position: "absolute" }),
     cmCompletion,
     cmHover,

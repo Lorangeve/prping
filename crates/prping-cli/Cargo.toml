@@ -15,6 +15,13 @@ path = "src/main.rs"
 # 用法：cargo build -p prping --features web-embed（workspace 根需包名限定）
 web-embed = ["prping-core/web-embed"]
 
+# 编译期把 assets/images/icon.ico 嵌进 Windows exe 资源（见 build.rs）。
+# 不用 [target.'cfg(windows)'.build-dependencies]：其 cfg 匹配的是 host，
+# Linux/macOS 交叉编译 Windows 时 build.rs 会因缺依赖而无法编译；
+# winresource 本身极小，全平台无条件编译，build.rs 内按 CARGO_CFG_WINDOWS 分支。
+[build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 prping-core = { path = "../prping-core" }
 packet-dsl = { path = "../packet-dsl" }

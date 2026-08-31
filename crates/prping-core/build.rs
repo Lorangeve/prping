@@ -23,6 +23,8 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=../../frontend/src");
     println!("cargo:rerun-if-changed=../../frontend/index.html");
+    // public/ 静态资源（favicon 等）经 vite 拷入 dist 根，变更也需重建
+    println!("cargo:rerun-if-changed=../../frontend/public");
     println!("cargo:rerun-if-changed=../../frontend/package.json");
     println!("cargo:rerun-if-changed=../../frontend/vite.config.ts");
     println!("cargo:rerun-if-changed=../../frontend/tsconfig.json");

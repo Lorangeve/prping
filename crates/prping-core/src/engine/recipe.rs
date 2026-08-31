@@ -247,6 +247,12 @@ pub fn parse(path: &Path) -> anyhow::Result<Recipe> {
             t!("engine.parse_read_fail", path = path.display(), err = e)
         )
     })?;
+    parse_text(&src, path)
+}
+
+/// 解析配方文本（LSP 内存文档用）：`path` 供相对 packet 路径解析、Recipe.path
+/// 与错误展示（行号化错误由 parse_text 内部统一生成）。
+pub fn parse_text(src: &str, path: &Path) -> anyhow::Result<Recipe> {
     let mut recipe = Recipe {
         path: path.to_path_buf(),
         globals: Vec::new(),

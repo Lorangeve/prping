@@ -1,6 +1,6 @@
 # 设计文档：`prping web` Web 编辑器
 
-> 状态：已实现（MVP：骨架 + LSP 桥 + CodeMirror 闭环 + 实时预览 + 库浏览；资源分发改为默认 `UI/` 目录 + 可选 `web-embed` 内嵌）
+> 状态：已实现（MVP：骨架 + LSP 桥 + CodeMirror 闭环 + 实时预览 + 库浏览；资源分发默认 `UI/` 目录 + 可选 `web-embed` 内嵌；左栏文件管理——工作区 examples 可编辑、eng_lib 只读）
 > 范围：`prping web [--addr ADDR] [--port N] [--open] [--lib PATH]`
 > 关联模块：`crates/prping-core/src/web/`、`frontend/`、`crates/prping-core/build.rs`
 
@@ -15,12 +15,15 @@
 - **低代码编辑**（规划中）：Blockly 积木视图，Scratch 风格（Zelos 渲染器）；
 - **实时反馈**：编辑即分析——层栈字段、字节数、hexdump、层序警告实时刷新；
 - **协议学习**：eng_lib 协议库（headers.pkt 等 21 个文件）只读浏览；
+- **文件管理**：左栏文件树——默认打开**启动目录**的 `examples/` 文件夹（发现方法与
+  `UI/`、`lib` 一致：二进制目录优先、其次启动目录），可编辑/保存（Ctrl+S）/新建/删除；
+  也可从页面打开任意本地文件夹作工作区；eng_lib 库文件始终只读；
 - **零安装体验**：`prping web --open` 一条命令打开浏览器即用——默认读二进制目录/`启动目录`的 `UI/` 文件夹（`just dist` 产物布局自带）；`--features web-embed` 时前端内嵌二进制（单文件分发）。
 
 ### 非目标（本期）
 
 - 不做用户系统 / 远程部署形态（默认仅回环，单用户本地工具）；
-- 不做 `.pkt` 文件写入（库浏览只读；编辑器内容仅存于浏览器）；
+- eng_lib 库文件不做写入接口（只读；工作区写入限根内 `.pkt/.pktl`，见 §4.8）；
 - 不引入 tokio（与项目 smol 栈保持一致）。
 
 ---
@@ -31,14 +34,17 @@
 浏览器（SolidJS SPA；默认读 UI/ 目录，--features web-embed 时内嵌二进制）
  ├─ CodeMirror 6 编辑器 ── LSP JSON-RPC（WS 信封透传 → 内存管道 → run_lsp_on）
  ├─ 层栈 / HEX / 诊断面板 ── analyze 信封（内存文本 → engine --json 同构文档）
+ ├─ 左栏文件管理 ── tree / read(root=ws) / save / delete / workspace / browse 信封（可写工作区；
+ │                   📂 = web 文件夹选择对话框，原生系统选择框为同机次选）
  └─ eng_lib 库浏览 ── list / read 信封（服务端只读）
            │  HTTP（静态资源 + /config.json）＋ WebSocket（/ws）同端口
  ──────────┴──────────────────────────────────────────────
  prping web（crates/prping-core/src/web/，smol 异步）
- ├─ http.rs   极简 HTTP/1.1 GET/HEAD 响应（Content-Length、keep-alive）
- ├─ ws.rs     WS 会话：信封分派 + Content-Length 分帧解包 + LSP 桥
- ├─ pipe.rs   异步↔阻塞字节桥（smol::channel 实现 io::Read/Write）
- └─ assets.rs 静态资源双模式：默认读 UI/ 目录；web-embed feature 时 rust-embed
+ ├─ http.rs      极简 HTTP/1.1 GET/HEAD 响应（Content-Length、keep-alive）
+ ├─ ws.rs        WS 会话：信封分派 + Content-Length 分帧解包 + LSP 桥 + 会话工作区状态
+ ├─ workspace.rs 可写工作区：默认 examples 发现（同 UI/ 方法）+ 路径校验/读写删/目录树
+ ├─ pipe.rs      异步↔阻塞字节桥（smol::channel 实现 io::Read/Write）
+ └─ assets.rs    静态资源双模式：默认读 UI/ 目录；web-embed feature 时 rust-embed
                  （debug 直读 dist / release 编译期内嵌）
                      │
         ──── 进程内（无需 IPC）────
@@ -79,6 +85,7 @@
 | 框架 | SolidJS 1.9 + Vite 6（`vite-plugin-solid`） | 纯本地单页应用，不需要 SSR/文件路由——**不用 SolidStart**（Nitro 输出形态嵌二进制别扭，纯 Vite 的 `dist/` 一个目录即可 rust-embed） |
 | 编辑器 | CodeMirror 6（state/view/language/lint/autocomplete/search/commands） | Lezer 生态可后续换正式语法；本期用 `StreamLanguage` 简易分词 |
 | LSP 客户端 | 自写薄封装（`src/lsp.ts`，~150 行） | 服务端仅 5 个能力（diagnostics/completion/hover/documentSymbol/definition），`codemirror-languageserver` 泛用封装反而重 |
+| Markdown 渲染 | 自写极简渲染器（`src/markdown.ts`） | LSP 文档只产出固定子集（标题/粗体/行内代码/列表/围栏代码块/段落）；先整体转义 HTML 实体再套标记，innerHTML 注入安全。落选 marked/markdown-it（为一个 tooltip 引整库不值） |
 | 低代码 | **规划：Blockly + Zelos 渲染器**（§10） | Zelos 即 Scratch 积木外观；Blockly vanilla JS 可包进 Solid。落选 scratch-blocks（停更）、Rete.js/Drawflow（节点画布适合拓扑图，pkt DSL 是层栈+步骤序列，嵌套块更贴合） |
 | UI | 手写 CSS（深色，~300 行） | 单页三面板布局，引入 Tailwind/Kobalte 收益低 |
 | 包管理 | bun（build.rs/justfile 自动降级 npm） | bun 自带锁文件与脚本运行器、install 快；npm 随 node 附带兜底 |
@@ -97,10 +104,12 @@ futures-util / mime_guess），npm 侧 solid-js + codemirror 6 件套 + vite 全
 
 ```text
 crates/prping-core/src/web/
-├── mod.rs     serve_web(WebConfig) 入口：bind → 横幅 → --open → accept 循环
+├── mod.rs     serve_web(WebConfig) 入口：bind → 横幅（libs/ui/workspace 行）→ --open → accept
 │              handle_conn：读请求头 → WS 升级（仅 /ws）或 HTTP 分发（keep-alive 循环）
 ├── http.rs    请求头解析（CRLFCRLF 截断，MAX_HEAD=64KB）+ 响应 + 路由
-├── ws.rs      accept（手工 101）+ session（三分任务）+ 信封分派 + FrameDecoder
+├── ws.rs      accept（手工 101）+ session（三分任务 + 会话工作区状态）+ 信封分派 + FrameDecoder
+├── workspace.rs 工作区（可写）：default_workspace（examples 发现）+ validate_rel/resolve_in_root
+│              （逐段校验 + canonicalize 根内断言）+ tree/read_file/save_file/delete_entry（目录递归）/open_folder
 ├── pipe.rs    ChanReader/ChanWriter（smol::channel ↔ io::Read/Write，EOF=发送端 drop）
 └── assets.rs  静态资源双模式：默认 UI/ 目录（二进制目录→启动目录）；
                 web-embed 时 rust-embed Assets（folder=../../frontend/dist）
@@ -172,7 +181,16 @@ LSP `ChanReader` 读到 EOF → `run_lsp_on` 返回 → `out_tx`（ChanWriter）
 { "type": "analyze", "id": 1, "uri": "file:///scratch.pkt",
   "text": "…编辑器全文…", "params": { "k": "v" } }
 { "type": "list", "id": 2 }                       // 列库文件（.pkt/.pktl 文件名 + 目录）
-{ "type": "read", "id": 3, "name": "net.pkt" }    // 读库文件（仅纯文件名）
+{ "type": "read", "id": 3, "name": "net.pkt" }    // 读库文件（仅纯文件名）；带 root:"ws" 读工作区
+{ "type": "tree", "id": 4 }                       // 工作区目录树（默认 examples/）
+{ "type": "save", "id": 5, "name": "a/b.pkt", "text": "…" }  // 保存工作区文件（可写）
+{ "type": "delete", "id": 6, "name": "a/b.pkt" }  // 删除工作区条目（目录 = 递归删除）
+{ "type": "rename", "id": 6, "from": "a.pkt", "to": "b/c.pkt" }  // 重命名/移动（目标存在则拒绝）
+{ "type": "mkdir",  "id": 6, "name": "sub/dir" }  // 新建目录（父链自动创建）
+{ "type": "workspace", "id": 7, "path": "…" }     // 打开/重置/查询工作区根（path 省略=查询）
+{ "type": "browse", "id": 8, "path": "/dir" }     // 列子目录（文件夹选择对话框数据源；缺省=主目录）
+{ "type": "ast", "id": 9, "uri": "file:///x.pkt", "text": "…" }  // AST 结构化导出（块视图 IR；解析/语义失败 ok:false）
+{ "type": "schema", "id": 10 }                    // 原语/库层 schema（块字段提示与文档）
 ```
 
 服务端 → 客户端：
@@ -191,8 +209,11 @@ LSP `ChanReader` 读到 EOF → `run_lsp_on` 返回 → `out_tx`（ChanWriter）
 - **FrameDecoder**（服务端 LSP 输出 → 信封）：增量解析 Content-Length 分帧；无
   Content-Length 的畸形头丢弃已缓冲部分防卡死；单帧上限 16MB（与 LSP 侧
   `MAX_LSP_MSG` 同量级），超限清空缓冲；
-- `analyze`/`read` 在 `smol::unblock` 执行（CPU/IO 不阻塞异步循环），结果按请求
-  `id` 关联，乱序到达无碍。
+- `analyze`/`read`/`tree`/`save`/`delete` 在 `smol::unblock` 执行（CPU/IO 不阻塞
+  异步循环），结果按请求 `id` 关联，乱序到达无碍；
+- **会话工作区状态**：每条 WS 连接独立持有工作区根（`Mutex<Option<PathBuf>>`，初值 =
+  服务端启动时发现的 examples）——`workspace` 信封切换只影响本连接，浏览器多标签
+  互不干扰；重连后服务端侧重置回默认。
 
 ### 4.6 analyze：内存文本 → `engine --json` 同构文档
 
@@ -212,7 +233,36 @@ bytes / hex / warnings / raw_only`，前端三面板直接消费。
 - `list`：`effective_libs`（烘焙 eng_lib + `--lib` 附加）逐目录扫描 `*.pkt|*.pktl`，
   跨目录按文件名去重（先到先得，与解析器库搜索顺序一致），目录列表一并返回供前端展示；
 - `read`：**仅接受纯文件名**（`Path::file_name() == Path` 校验，拒绝分隔符与 `..`），
-  按库目录顺序查找读取——服务端无写接口。
+  按库目录顺序查找读取——库文件无写接口。
+
+### 4.8 工作区（可写，`web/workspace.rs`）
+
+与只读库浏览相对，工作区内的 `.pkt/.pktl` **可写**（保存/删除/新建）。默认工作区
+发现顺序与 UI/ 同构：**二进制目录/examples → 启动目录/examples**（`just dist` 布局
+就地可用）；`workspace` 信封可为本连接打开任意本地目录（canonicalize 校验存在）。
+写操作安全边界：
+
+- 相对路径逐段校验（与 `assets.rs` 的 `sanitize_key` 同风格）：空段、点段、反斜杠、
+  冒号（盘符/ADS）、Windows 保留设备名（`CON.pkt` 等）一律拒绝；扩展名按操作区分：
+  **读/删/改名/建目录接受任意文件**（文件管理基本语义，`tree` 条目带 `pkt` 标记供
+  前端样式区分），仅 `save` 保留 DSL 提示语义（服务端实际不限扩展名）；
+- `read`：二进制/非 UTF-8 文件明确报错（不显示乱码）；
+- 解析后 canonicalize + 根内断言（防符号链接把工作区条目指向根外）；
+- `save`：新建/覆盖，缺失父目录自动创建（validate_rel 已保证相对路径无点段/反斜杠/
+  冒号，create_dir_all 后重走 canonicalize + 根内断言）；4MB 内容上限；同目录隐藏
+  临时文件 + rename 原子落盘（无半截文件）；
+- `rename`：改名/跨目录移动，目标不存在才执行（覆盖需显式删除），目标父目录须已
+  存在；目录同样支持；
+- `mkdir`：父目录链自动创建，已存在报错；
+- `tree`：目录在前、字典序；隐藏项/符号链接跳过，条目 ≤4096、递归深度 ≤8 截断；
+- **开自定义文件夹唯一入口**（📂 按钮 → web 文件夹选择对话框）：`browse` 信封列
+  子目录（仅目录、跳隐藏、≤500 条、目录符号链接可跟随——用户逐级驱动无递归风险），
+  对话框内点击进出、`..` 上级、路径输入框直达（Enter 跳转），确定走
+  `workspace path` 信封校验生效；浏览起点 = 当前工作区根（缺省 examples），initial
+  为空时服务端兜底用户主目录（HOME/USERPROFILE，兜底 `/`）。曾实现过的服务端
+  原生选择框与浏览器 webkitdirectory 导入已移除：前者与 browse 目标重复（都为设
+  工作区根），后者受浏览器安全模型限制拿不到绝对路径（fakepath），语义只能做导入，
+  与「打开文件夹」混淆——打开文件夹收敛为 web 对话框一条路。
 
 ---
 
@@ -225,14 +275,21 @@ frontend/
 ├── index.html / vite.config.ts / tsconfig.json / package.json
 └── src/
     ├── index.tsx      入口 render
-    ├── App.tsx        布局（顶栏/编辑器/右面板）+ 数据流编排
-    ├── ws.ts          PrpingClient：信封传输 + request id 关联 + 指数退避重连
+    ├── App.tsx        布局（顶栏/左栏文件管理/编辑器/右面板）+ 数据流编排 + 打开/保存
+    ├── files.tsx      左栏文件管理：工作区树（缩进/悬停改名删除钮）+ eng_lib 只读列表 + 新建/刷新
+│                     + 右键菜单（文件：打开/改名/删除；目录：改名/删除（递归）；
+│                     空白区：新建文件/新建文件夹/刷新，无工作区 = 打开文件夹/刷新）
+│                     + FolderDialog（web 文件夹选择对话框：browse 导航/路径直输/确定取消，
+│                     「system dialog…」调服务端原生选择框）
+    ├── ws.ts          PrpingClient：信封传输 + request id 关联 + 指数退避重连 + 工作区信封方法
     ├── lsp.ts         LspClient：initialize/didOpen/didChange/补全/悬停 + 诊断回调
-    ├── cm.ts          CodeMirror 组装：高亮 + lint + 补全 + 悬停 + 深色主题
+    ├── cm.ts          CodeMirror 组装：高亮 + lint + 补全 + 悬停 + 深色主题 + 可编辑开关（Compartment）
+    ├── markdown.ts    极简 Markdown → HTML（hover / 补全文档渲染；先转义后套标记）
     ├── pktlang.ts     StreamLanguage 分词（# 注释 / #[ 注解 / 关键字 / 0x 十六进制 / |> / 字段名）
+    ├── blocks.tsx     块视图（阶段 1 只读）：ast 信封 → Blockly(Zelos) 工作区，懒加载独立 chunk
     ├── panels.tsx     诊断 / 层栈 / HEX 三面板
-    ├── sample.ts      首开示例文档（合法 DSL，开箱即有预览）
-    └── index.css      深色样式
+    ├── sample.ts      空态兜底示例文档（无工作区/无可开文件时出现）
+    └── index.css      深色样式（三栏：文件树 220px + 编辑器 + 面板）
 ```
 
 ### 5.2 数据流（编辑 → 反馈）
@@ -247,21 +304,73 @@ frontend/
 - 重连成功后自动重放 `initialize + didOpen + analyze`（`onStatus("connected")` 钩子）；
 - 断线期间挂起的 request 以 `{ok:false, error:"disconnected"}` 快速失败，不悬挂 UI。
 
+文件流（打开 → 编辑 → 保存）：
+
+- 连接后首个 `tree` 自动打开工作区第一个文件（无工作区/空树 → 保持内置示例文档）；
+  重连不重复自动打开（重放当前文档）；
+- 打开文件 → `read(root)` → `setDoc` + LSP 会话重放（`didOpen`）+ 立即 analyze。
+  **工作区文件传真实 `file://` 绝对路径 URI**（`fileUri(root, rel)`，Windows 盘符折叠
+  为 `/C:/` 形式）——LSP/analyze 的 import 据此解析到文件所在目录，模块名取文件名；
+  库文件沿用 `file:///<name>`；
+- 可编辑态经 CodeMirror `Compartment` 切换（`setEditable`）：工作区文件可写，
+  eng_lib 文件 `EditorView.editable(false) + readOnly`；
+- 保存：`Ctrl+S`（`metaKey` 同）或 Save 按钮（dirty 时出现）→ `save` 信封 → 成功后
+  刷新目录树；dirty = 编辑器文本 ≠ 已保存文本（新建文件未落盘恒 dirty）；
+- 删除打开中的文件：缓冲保留（保存即重建）；删除目录 = 递归（确认文案说明后果），
+  目录内文件的 lastFile 记录一并清除；
+- 开自定义目录（📂）：web 文件夹选择对话框（browse 导航 + 路径直输，详见 §4.8），
+  确定后刷新目录树；「system dialog…」走服务端原生选择框（不可用时错误就地展示）。
+
+**前端持久化（IndexedDB，浏览器端数据库）**——项目相关状态跨刷新/重连保留，
+生成的产物不落库：
+
+| 键 | 内容 | 恢复时机 |
+|---|---|---|
+| `workspaceRoot` | 自定义工作区根 | 连接后首个 `tree` 若与服务端默认（examples）不同 → `workspace path` 重开（目录已不存在则清除记录，落回默认） |
+| `lastFile` | 上次打开的文件 `{root, path}` | 目录树就绪后重开（服务端报错走兜底：自动打开第一个工作区文件） |
+| `draft:<root>:<path>` | 未落盘草稿（编辑器文本 ≠ 磁盘文本时才存在） | 打开该文件时恢复草稿并呈未保存状态（savedText = 磁盘文本）；保存/删除即清除 |
+| `panel` | 右侧面板页签选择 | 启动时恢复 |
+
+实现：`src/store.ts` 裸 IndexedDB kv（无依赖，~90 行；隐私模式退化内存 Map）；
+草稿写入防抖 1s、卸载前 flush。**不存**：层栈/HEX/诊断等生成物（打开即重算）。
+
 ### 5.3 LSP ↔ CodeMirror 映射
 
 | LSP 能力 | CodeMirror 呈现 |
 |---|---|
 | `publishDiagnostics` | `@codemirror/lint` `setDiagnostics`（severity 1→error，其余→warning；行/列 0 基 → doc offset） |
-| `textDocument/completion` | `autocompletion.override` 异步源；`insertText`（如 `tcp()`）原样展开；kind 3→function |
-| `textDocument/hover` | `hoverTooltip`，markdown `contents.value` 按纯文本渲染（保留换行） |
+| `textDocument/completion` | `autocompletion.override` 异步源；`insertText`（如 `tcp()`）原样展开；kind 3→function；documentation（markdown）经 `renderMarkdown` 懒渲染为 info 气泡（选中项才转 HTML） |
+| `textDocument/hover` | `hoverTooltip`，markdown `contents.value` 经 `markdown.ts` 渲染为 HTML（标题/粗体/行内代码/列表/围栏代码块；先整体转义，注入安全） |
 
 补全/悬停均为「编辑器位置 → LSP 0 基行列」的轻适配；超时 3s 兜底返回 null 不卡 UI。
 
-### 5.4 与未来块编辑器的边界
+### 5.4 块视图（低代码）与文本的边界
 
-**文本是单一事实源**：块编辑器（规划）将 parse 文本成块、改动后生成文本回写；
-解析失败时块视图降级为只读+报错。前端当前所有状态（`lastText` / LSP 会话）都围绕
-文本组织，为双向同步预留了同一条数据通道（`analyze` 信封即块视图的 IR 来源）。
+**文本是单一事实源**：块编辑器是视图而非平行存储。已落地阶段 0+1+2（可编辑回写）：
+
+- **`ast` 信封 = 块视图 IR**（`eng/eng/astdoc.rs`）：直接序列化 AST（def/pipeline/
+  func/proto/import/sniffer，节点带 1 基 span），调用实参按 span 从源码**原文切片**
+  （保留 0x/引号/表达式原样）。注意 analyze 的 `fields` 是渲染后的展示串
+  （len/checksum 已求值、raw 层从字节反解），做不了编辑 IR——只够只读层栈面板；
+- **前端 `blocks.tsx`**：ast → Blockly(Zelos) 工作区（层=块、字段=输入行、管线=next
+  链、proto/func/import/sniffer=信息卡）；顶栏 text/blocks 切换；Blockly 动态 import
+  懒加载成独立 chunk（~746KB），文本视图首屏不受影响；
+- **编辑与回写（阶段 2）**：仅工作区文件可编辑（eng_lib 只读注入 readOnly 工作区）。
+  字段值/层名（下拉，`schema` 信封供候选）提交即按 **call span** 重生成该调用文本；
+  结构操作走右键菜单——加/删字段、后插层、删层、删语句、新建语句——按 **item span**
+  重生成整句。回写 = App 侧按 span 拼接 `text()` → `setDoc` → 既有 LSP/analyze/ast
+  防抖刷新闭环（脏标记/Ctrl+S 照常）。**astText 过期守卫**：文本已变（ast 未跟上）
+  时丢弃块编辑并刷新，杜绝旧 span 写坏新文本；
+- **语法边界**（GRAMMAR：管线必须以 `use(...)` 开头）：`def = call`（纯内容）的层块
+  不提供「后插层」（`def = call |> x` 非法），改提供 **Wrap in new statement**——追加
+  `name_wrapped = use(name) |> layer()` 新语句（即 examples 的 get/full 惯用法）；
+- **已知限制**：被编辑语句内部的换行续行折叠为单行（语句外格式/注释全保留）；跨行
+  值只读；use 名单暂不可在块里编辑；func/proto/import/sniffer 信息卡不可编辑；
+- **阶段 3（配方 .pktl）已实现**：`blocks_json` 按扩展名路由——.pktl 返回 recipe
+  形态（global 项 + 步骤，行区间 + 文件 token fileSpan），块视图一个 .pkt 一个块
+  （改名/加步/删步行级拼接）；右侧 Recipe/Globals 面板（数据表视图）与块视图共存；
+- 一个函数一个块：层块类型由 schema 信封动态注册（`pkt_fn_<层名>`，参数行 = schema
+  参数 + 默认值；源里省略的参数显示默认，提交时显式化）；未知层回退通用 `pkt_card`；
 
 ---
 
@@ -271,7 +380,8 @@ frontend/
 |---|---|
 | 网络暴露 | 默认绑定 `127.0.0.1`（`--addr` 显式才改）；WS 端点仅 `/ws` |
 | 浏览器特权 | 零特权：raw socket / 文件访问全在服务端进程 |
-| 文件访问 | 库浏览只读 + 纯文件名白名单式校验（拒绝分隔符/`..`） |
+| 文件读 | 库浏览只读 + 纯文件名白名单式校验（拒绝分隔符/`..`） |
+| 文件写（工作区） | 仅限工作区根内：路径逐段校验（`..`/反斜杠/盘符/隐藏段/Windows 保留名拒绝）+ canonicalize 根内断言（防符号链接逃逸）+ 仅 `.pkt/.pktl` + 4MB 上限；缺失父目录自动创建（仅校验后的相对路径）；工作区根可为任意本地目录（`workspace` 信封 / 对话框选择）——单用户本地工具的信任模型，随 token 鉴权（§10）收紧 |
 | 资源服务 | 内嵌：rust-embed 键精确匹配；UI 目录：逐段校验（空段/点段/反斜杠/冒号拒绝）+ 仅普通文件可读 |
 | 协议滥用 | 请求头 ≤64KB、单帧 ≤16MB、畸形帧丢弃；信封 type 白名单 |
 | 同源滥用 | 本机其它页面可连 `/ws`（无 token）——MVP 接受；规划：URL 随机 token（§10） |
@@ -338,9 +448,12 @@ cargo build/check/test --features web-embed
 
 服务端横幅/错误走 rust-i18n（core `locales/{en-US,zh-CN}.yml` 的 `web.*` 段：
 listening / opening / open_failed / frontend_missing / ui_embedded(_debug) /
-ui_dir / ui_dir_missing / ui_missing / read_*）；横幅新增 `ui:` 行标明资源来源
-（内嵌 / UI 目录路径 / 未找到提示）；Ctrl+C 提示只在 listening 行尾出现一次，
-`--open` 的 opening 行不重复 URL（`open_failed` 例外——手动访问需要完整地址）；
+ui_dir / ui_dir_missing / ui_missing / read_* / ws_*（工作区：ws_dir / ws_dir_missing /
+ws_not_found / ws_bad_path / ws_escape / ws_bad_ext / ws_too_large / ws_read_failed /
+ws_save_failed / ws_delete_failed / ws_open_failed））；横幅 `ui:` 行标明资源来源
+（内嵌 / UI 目录路径 / 未找到提示），`workspace:` 行标明工作区（路径 / 未找到提示）；
+Ctrl+C 提示只在 listening 行尾出现一次，`--open` 的 opening 行不重复 URL
+（`open_failed` 例外——手动访问需要完整地址）；
 CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web_*`，
 `help.usage_line` 摘要与 `build-web` 输出同步双语）。前端 UI 文案当前为英文
 （MVP；面板文案少，随块编辑器一并接前端 i18n）。
@@ -357,7 +470,9 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 | `pipe.rs` | 字节往返 + 跨块 EOF、零长读、对端断开 BrokenPipe |
 | `http.rs` | 请求头解析（query 剥离/HTTP/1.0/Connection: close）、WS 升级判定、畸形拒绝、CRLFCRLF 定位 |
 | `ws.rs` | FrameDecoder（整帧/单字节碎帧/畸形头不卡死/超限丢弃）、params 形状、`read` 路径穿越拒绝 |
+| `workspace.rs` | 路径校验（穿越/特殊段/Windows 保留名；扩展名开/关两模式）、符号链接逃逸拒绝、save（父目录自动创建/覆盖写/临时文件清理）/read/delete（目录递归删除）/rename（改名+跨目录移动+目标存在拒绝）/mkdir（嵌套+已存在拒绝）往返、二进制文件读拒绝、目录树排序/全部普通文件/隐藏跳过/深度截断、browse（排序/隐藏跳过/父链/缺失路径报错）、open_folder 存在性校验、选择器输出三态解析（unix） |
 | `eng/mod.rs` | `analyze_text_json` 与 CLI `--json` 同构（随 engine 既有测试回归） |
+| `eng/astdoc.rs` | `ast_text_json`：源码顺序（span 升序）、def/pipeline/use 结构、实参原文保真（0x/引号/跨行切片）、空文档、语义错误 Err；`schema_json`：builtins + eng_lib 层头（icmp proto 含 type 参数） |
 
 ### 9.2 端到端验证记录（Node `WebSocket` 客户端，对真实服务端）
 
@@ -372,6 +487,31 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 
 另验证：`--open` 弹出浏览器；release 二进制删除磁盘 dist 后仍 200（内嵌生效）；
 前端未构建时 `/` 返回 503 构建提示；`prping w` 前缀展开正常。
+
+工作区文件管理端到端（Node `WebSocket` 客户端对真实服务端，22/22 通过）：
+
+1. `tree` → root 为二进制同目录 `examples/`，107 条目、目录在前、含 .pkt、无非
+   `.pkt(l)` 文件、`writable: true`；
+2. `read root:"ws" app_http/http_get.pkt` → ok + `writable: true`；`read net.pkt`
+   （库）→ ok + `writable: false`；
+3. `save zz_e2e_test.pkt` → 读回一致、目录树出现；`delete` → 再读报错；
+4. `save ../evil.pkt` / `x.txt` / `a//b.pkt` / `read C:/win.pkt` → 全部拒绝（i18n 文案）；
+5. `workspace path:<自定义目录>` → root 切换、tree 跟随、可保存；`workspace path:""`
+   → 重置回 examples；`workspace`（无 path）→ 查询；
+6. analyze 以真实 `file://` URI（examples 子目录文件）→ ok，import 解析正常；
+7. HTTP：`/` 200 text/html、`/config.json` 200、未知路径 404。
+
+块视图阶段 0+1 端到端（Node `WebSocket` 客户端对真实服务端，9/9 通过）；阶段 2 编辑
+闭环（字段/改名/插删层/删语句 round-trip）与阶段 3 配方块（渲染/改名/加删步）同法
+验证通过：
+
+1. `ast` 合法文档 → ok，items 按源码顺序（def 在前、顶层 pipeline 在后）；
+2. def 实参原文保真：`type=8,id=0x1234,seq=1`（0x 前缀原样）；
+3. 管线层序内→外（`ipv4|>eth`）、use 名单、引号值原样（`"127.0.0.1"`）；
+4. `schema` → builtins 34 项 + libLayers 含 icmp proto（`type` 参数在列）；
+5. `ast` 未知名（语义错误）→ ok:false，错误文案与 CLI 一致（块视图降级依据）；
+6. 前端构建：Blockly 懒加载独立 chunk（主包 429KB / 块 chunk 746KB gzip 201KB），
+   `tsc --noEmit` 对新增文件零错误；`/` 与 `/config.json` 200（UI 目录模式）。
 
 资源分发双模式端到端（curl 对真实服务端）：
 
@@ -388,9 +528,9 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 
 | 项 | 现状 | 计划 |
 |---|---|---|
-| 低代码编辑 | 未实现（仅文本） | Blockly(Zelos) 积木视图：层=块、字段=输入、配方=步骤序列；文本为单一事实源，块↔文本双向（解析失败降级只读） |
+| 低代码编辑 | **阶段 0+1+2+3 已实现**：`ast`/`schema` 信封 + Blockly(Zelos) 积木视图——.pkt 按 layer 一块（可编辑：字段值/层名下拉/右键加删字段/插删层/删语句/新建语句，按 call/item span 拼接回写 + astText 过期守卫；use 管线后插层按语法门控，纯内容 def 走 Wrap in new statement）；.pktl 按步骤一块（`blocks_json` recipe 形态：步骤行区间 + 文件 token fileSpan，改名/加步/删步行级拼接；global 信息卡）；eng_lib 只读；懒加载独立 chunk | use 名单块内编辑；语句内格式保留（续行不折叠）；global 项编辑 |
 | 发送/监听 | 无 | 「Run」按钮 → 服务端复用 `packet` 发送路径（SendMode/PkgOptions 现成），进度/结果走新信封类型回传 |
-| 文件保存 | 编辑器内容不落盘 | 工作区文件读写 + 路径校验（需 token 先行） |
+| 文件保存 | 已实现：左栏文件管理（工作区 = 默认 examples/ 或自定义目录）tree/save/read/delete（目录递归）/rename/mkdir 信封 + 路径逐段校验 + 根内断言 + Ctrl+S 保存/新建/删除/改名/移动 + 目录树折叠（默认全收起，展开集跟踪）+ 右键菜单（打开/改名/删除/新建/刷新） | URL 随机 token 鉴权（与下方「鉴权」行合并推进，发送能力上线时必做） |
 | 鉴权 | 无（仅回环） | URL 随机 token（`prping web` 打印带 token 的 URL），发信封校验——发送能力上线时必做 |
 | TLS/远程 | 无 | 非目标；远程用 SSH 隧道或反向代理 |
 | 手册章节 | 未加入 `document` | `manual-zh/en` 增补 web 章节（双语编号一致性测试约束） |
@@ -409,11 +549,19 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
    EOF 语义 = 发送端 drop，全链路无 OS 管道、无平台差异。
 4. **前端构建挂 core 的 build.rs**——rust-embed 读盘时机在 core 编译期，构建逻辑
    必须先行（详见 §7.1）；bun→npm 降级保证 CI/裸环境可编译。
-5. **文本为单一事实源**——块编辑器是视图而非平行存储；`analyze_text_json` 的
-   结构化输出即块视图 IR，避免引入第二套模型。
+5. **文本为单一事实源**——块编辑器是视图而非平行存储；块视图 IR 取 **AST 导出**
+   （`ast_text_json`：节点 span + 实参原文切片）而非 analyze 的渲染结果——后者
+   字段已求值（checksum/len/auto）且无位置信息，只读展示够用、编辑会失真。
+   求值结果永远由 analyze 面板呈现，块视图只管结构。
 6. **资源默认不内嵌，`UI/` 目录兜底**——内嵌改成可选 `web-embed` feature（默认关）：
    前端产物与 Rust 编译零耦合（改前端不触发重编）、默认构建无需 node 工具链（离线/
    交叉/CI 零负担）、二进制小 ~2MB；分发形态 = 二进制 + `UI/` 目录（`just dist` 自带，
    替换目录即换 UI）。需要单文件分发时 `--features web-embed` 一键内嵌（rust-embed
    debug 仍直读 dist，开发热更新路径不变）。UI 目录查找：二进制所在目录优先（`just
    dist` 布局与 cwd 无关），其次启动目录；每请求即时解析，目录可后补、文件改动即生效。
+7. **工作区写边界收在路径层而非鉴权层**——examples 默认工作区沿用 `UI/`/`lib` 的
+   就近发现（二进制目录 → 启动目录），写操作全部经同一 `validate_rel + resolve_in_root`
+   缝隙（词法逐段校验 + canonicalize 根内断言 + 扩展名白名单 + 4MB 上限；缺失父目录
+   自动创建但仅限校验后的相对路径），服务端无「任意路径写」原语；自定义目录打开依赖
+   回环单用户的本地信任模型，与 §6 同源滥用条目一致，token 上线后再整体收紧。库文件
+   只读由「无写信封」结构保证，不做运行时开关。

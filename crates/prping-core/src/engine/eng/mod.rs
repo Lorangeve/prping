@@ -3,6 +3,7 @@
 //! - 精美输出：模块概览 → 逐来源逐包展示层栈（字段 + auto 标注）→ 字节 hexdump（带 ASCII）。
 //! - LSP：JSON-RPC over stdio（Content-Length 分帧），提供诊断 / 补全 / 悬停 / 文档符号。
 
+mod astdoc;
 mod display;
 mod lsp;
 
@@ -25,6 +26,8 @@ use crate::util::hex_str;
 use display::{
     describe_packet_layers, render_listen_template, render_module_header, stack_warning_messages,
 };
+
+pub use astdoc::{ast_text_json, blocks_json, schema_json};
 
 /// 列表项展示：字节项（0..=255 的 Int/Hex）→ 两位小写十六进制，其余递归 `value_display`。
 ///
@@ -99,7 +102,15 @@ pub(crate) fn collect_pkt_params(
     path: &Path,
 ) -> anyhow::Result<Vec<(String, Option<packet_dsl::ast::Value>)>> {
     let src = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("读取失败：{e}"))?;
-    let ast = packet_dsl::parser::parse_ast(&src).map_err(|d| anyhow::anyhow!("解析失败：{d}"))?;
+    collect_src_params(&src)
+}
+
+/// [`collect_pkt_params`] 的内存文本版（web 编辑器 analyze 用）：文件未落盘、
+/// 甚至构建失败（如必填参数未提供）时也能拿到参数声明供面板渲染输入行。
+pub(crate) fn collect_src_params(
+    src: &str,
+) -> anyhow::Result<Vec<(String, Option<packet_dsl::ast::Value>)>> {
+    let ast = packet_dsl::parser::parse_ast(src).map_err(|d| anyhow::anyhow!("解析失败：{d}"))?;
     let mut out: Vec<(String, Option<packet_dsl::ast::Value>)> = Vec::new();
     for stmt in &ast.stmts {
         match stmt {
@@ -680,7 +691,66 @@ pub fn analyze_text_json(
         packet_dsl::resolve_sources_with_globals(&module, &p, &packet_dsl::Globals::new())
             .map_err(|d| anyhow::anyhow!("{d}"))?;
     let total: usize = sources.iter().map(|(_, p)| p.len()).sum();
-    analyze_sources_doc(uri, &sources, total, &libs, params)
+    let mut doc = analyze_sources_doc(uri, &sources, total, &libs, params)?;
+    // sniffer: 段（--wait 回包校验 / --listen 监听规则）：每条顶层子句一行
+    // （顶层列表 = 隐式 OR），展示文本与源码书写形态一致
+    if let (Some(obj), Some(spec)) = (doc.as_object_mut(), &module.sniffer) {
+        obj.insert(
+            "sniffer".into(),
+            json!(
+                spec.clauses
+                    .iter()
+                    .map(sniffer_pred_text)
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
+    Ok(doc)
+}
+
+/// sniffer 谓词 → 面板展示文本（与源码书写形态一致；字面量/表达式复用
+/// value_display，裸 Ident 保持原样——语义是「引用发包同名字段」）。
+fn sniffer_pred_text(p: &packet_dsl::ast::SnifferPred) -> String {
+    use packet_dsl::ast::{SnifferItem, SnifferPred, SnifferValue};
+    const Q: char = '"';
+
+    fn value(v: &SnifferValue) -> String {
+        match v {
+            SnifferValue::SentField(f) => f.clone(),
+            SnifferValue::Literal(lit) | SnifferValue::Expr(lit) => value_display(lit),
+        }
+    }
+
+    fn items_text(items: &[SnifferItem]) -> String {
+        items
+            .iter()
+            .map(|it| match it {
+                SnifferItem::FieldEq { name, val } => format!("{name}={}", value(val)),
+                SnifferItem::FieldNe { name, val } => format!("ne({name}, {})", value(val)),
+                SnifferItem::Mask(m) => format!("mask({})", value_display(m)),
+                SnifferItem::StartsWith(s) => format!("startswith({Q}{s}{Q})"),
+                SnifferItem::EndsWith(s) => format!("endswith({Q}{s}{Q})"),
+                SnifferItem::Contains(s) => format!("contains({Q}{s}{Q})"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn pred(p: &SnifferPred) -> String {
+        match p {
+            SnifferPred::Clause(c) => format!("match {}({})", c.layer, items_text(&c.items)),
+            SnifferPred::And(ps) => format!(
+                "and({})",
+                ps.iter().map(pred).collect::<Vec<_>>().join(", ")
+            ),
+            SnifferPred::Or(ps) => {
+                format!("or({})", ps.iter().map(pred).collect::<Vec<_>>().join(", "))
+            }
+            SnifferPred::Not(inner) => format!("not({})", pred(inner)),
+        }
+    }
+
+    pred(p)
 }
 
 pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {

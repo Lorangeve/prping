@@ -488,6 +488,56 @@ pub fn lib_exports(libs: &[PathBuf]) -> Vec<LibExport> {
     out
 }
 
+/// 枚举库目录下全部模块声明的**全部函数**（导出 + 未导出）。
+///
+/// 未导出函数同样"能解析出来"——`import 模块 { 名字 }` 按目标模块本地定义解析
+/// （不要求 export），调用方（LSP 补全）应提供它们并标注来源模块。导出项与
+/// [`lib_exports`] 重叠，调用方按名字去重即可。
+pub fn lib_functions(libs: &[PathBuf]) -> Vec<LibExport> {
+    let mut all = default_libs();
+    all.extend_from_slice(libs);
+    // 与 lib_exports 相同的目录去重（canonical 路径）
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|p| {
+        let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        seen.insert(key)
+    });
+    let mut out = Vec::new();
+    for (mod_name, path) in collect_lib_modules(&all) {
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(ast) = parse_ast(&src) else {
+            continue;
+        };
+        for stmt in &ast.stmts {
+            if let Stmt::Func(f) = stmt {
+                out.push(LibExport {
+                    module: mod_name.clone(),
+                    name: f.name.clone(),
+                    // proto 函数 = 带 schema 的 FuncStmt：字段即参数（与 lib_exports 同构）
+                    params: Some(if let Some(schema) = &f.schema {
+                        schema
+                            .fields
+                            .iter()
+                            .map(|f| ast::FuncParam {
+                                name: f.name.clone(),
+                                span: f.name_span,
+                                default: f.default.clone(),
+                            })
+                            .collect()
+                    } else {
+                        f.params.clone()
+                    }),
+                    doc: f.doc.clone(),
+                    is_proto: f.schema.is_some(),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// 以入口目录 + 库目录列表搜索 `name.pkt`：入口目录（直接 + 递归）优先，
 /// 库目录**从后往前**逐个搜索（直接 + 递归）——显式 lib（`./lib`、`--lib`）优先于
 /// 默认 eng_lib，与库导出注入的胜者一致（同名列靠后的库目录覆盖前面的）。

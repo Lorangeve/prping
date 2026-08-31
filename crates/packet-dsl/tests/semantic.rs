@@ -447,6 +447,31 @@ fn lib_exports_dedupes_overlapping_lib_dirs() {
     }
 }
 
+/// lib_functions 枚举全部声明函数（含未导出，标注模块）。
+#[test]
+fn lib_functions_include_unexported() {
+    let defaults = packet_dsl::default_libs();
+    assert!(!defaults.is_empty(), "开发环境应有默认 eng_lib");
+    let fns = packet_dsl::lib_functions(&[]);
+    let by_name = |n: &str| fns.iter().find(|f| f.name == n);
+    // headers.pkt 声明但未导出的辅助函数（其 export 列表只有层函数）
+    let hdr = by_name("hdr_line").expect("hdr_line 应在 lib_functions 中");
+    assert_eq!(hdr.module, "headers");
+    assert!(hdr.is_proto, "hdr_line 是 #[proto] 函数");
+    // dns.pkt 无 export 块：其全部函数仍应枚举（可经 import dns { dns_question } 引入）
+    assert!(by_name("dns_question").is_some(), "dns_question 应枚举");
+    assert!(by_name("dns_answer").is_some(), "dns_answer 应枚举");
+    // 导出项同样在其中（与 lib_exports 重叠，调用方按名去重）
+    assert!(by_name("tcp").is_some(), "导出函数也应枚举");
+    // 参数签名携带（proto 函数取 schema 字段）
+    let dns_q = by_name("dns_question").expect("dns_question 应存在");
+    let params = dns_q.params.as_ref().expect("函数应携带参数");
+    assert!(
+        params.iter().any(|p| p.name == "name"),
+        "dns_question 应有 name 参数"
+    );
+}
+
 /// 函数上方的 `#` 注释（含 @param/@auto 标签）作为 doc 随库导出携带（--ls / LSP 悬停展示）。
 #[test]
 fn lib_exports_carry_func_doc() {

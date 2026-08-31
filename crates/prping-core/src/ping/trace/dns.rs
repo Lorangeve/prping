@@ -104,7 +104,8 @@ fn reverse_dns(ip: IpAddr) -> Option<String> {
             1024,
             serv.as_mut_ptr() as *mut u8,
             64,
-            NI_NAMEREQD,
+            // windows-sys 0.59 常量是 u32，flags 参数是 i32
+            NI_NAMEREQD as i32,
         )
     };
     if rc != 0 {

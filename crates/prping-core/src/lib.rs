@@ -104,10 +104,10 @@ pub use ping::trace::{DEFAULT_MAX_HOPS, TraceReport, traceroute};
 // 引擎模块
 pub use engine::convert::{ConvertOptions, ConvertReport, convert_pcap};
 pub use engine::eng::{
-    analyze_file, analyze_recipe, analyze_text_json, decode_hex, decode_pcap, dns_type_name,
-    effective_libs, ensure_proto_registry, layer_name, libs_display, ls_builtins, opt_bytes_len,
-    render_dissected, render_hexdump, render_layers, render_packet, render_packet_fields, run_lsp,
-    run_lsp_on, value_display,
+    analyze_file, analyze_recipe, analyze_text_json, ast_text_json, blocks_json, decode_hex,
+    decode_pcap, dns_type_name, effective_libs, ensure_proto_registry, layer_name, libs_display,
+    ls_builtins, opt_bytes_len, render_dissected, render_hexdump, render_layers, render_packet,
+    render_packet_fields, run_lsp, run_lsp_on, schema_json, value_display,
 };
 pub use engine::pcap::{LinkType, PcapRecord, linktype_of, read_pcap, write_pcap};
 pub use engine::pkg::{

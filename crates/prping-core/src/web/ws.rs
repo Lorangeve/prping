@@ -7,8 +7,20 @@
 //!   { "type": "lsp",     "message": {…JSON-RPC…} }     透传给 LSP 会话
 //!   { "type": "analyze", "id": 1, "uri": "file:///x.pkt",
 //!     "text": "…", "params": {"k":"v"} }               engine --json 同构分析
-//!   { "type": "list",    "id": 2 }                       列库文件（.pkt/.pktl）
-//!   { "type": "read",    "id": 3, "name": "net.pkt" }    读库文件（只读）
+//!   { "type": "list",    "id": 2 }                       列库文件（.pkt/.pktl，只读）
+//!   { "type": "read",    "id": 3, "name": "net.pkt" }    读库文件（默认 root="lib"，只读）
+//!   { "type": "read",    "id": 4, "root": "ws", "name": "sub/x.pkt" }  读工作区文件（可写）
+//!   { "type": "tree",    "id": 5 }                       工作区目录树（默认 examples）
+//!   { "type": "save",    "id": 6, "name": "sub/x.pkt", "text": "…" }  保存（限工作区）
+//!   { "type": "delete",  "id": 7, "name": "sub/x.pkt" }  删除（限工作区；目录递归）
+//!   { "type": "rename",  "id": 7, "from": "a.pkt", "to": "b/c.pkt" }  重命名/移动（限工作区）
+//!   { "type": "mkdir",   "id": 7, "name": "sub/dir" }    新建目录（限工作区）
+//!   { "type": "workspace", "id": 8 }                     查询当前工作区根
+//!   { "type": "workspace", "id": 9, "path": "/dir" }     打开自定义文件夹（"" 重置默认）
+//!   { "type": "browse",  "id": 11, "path": "/dir" }      浏览目录（文件夹选择对话框数据源；
+//!                                                        path 缺省 = 用户主目录）
+//!   { "type": "ast",     "id": 12, "uri": "file:///x.pkt", "text": "…" }  AST 导出（块视图 IR）
+//!   { "type": "schema",  "id": 13 }                      原语/库层 schema（块字段提示）
 //! server → client
 //!   { "type": "lsp", "message": {…publishDiagnostics/响应…} }
 //!   { "type": "result", "id": 1, "ok": true, "data": … | "ok": false, "error": "…" }
@@ -20,6 +32,7 @@
 //! → 回推通道关闭 → 会话任务结束（无泄漏）。
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use async_tungstenite::WebSocketStream;
 use async_tungstenite::tungstenite::handshake::derive_accept_key;
@@ -32,6 +45,7 @@ use smol::io::AsyncWriteExt;
 use smol::net::TcpStream;
 
 use super::pipe::{ChanReader, ChanWriter};
+use super::workspace;
 
 /// 单条 LSP 消息上限（与 lsp.rs 的 MAX_LSP_MSG 同量级，防异常帧耗内存）。
 const MAX_FRAME: usize = 16 * 1024 * 1024;
@@ -56,12 +70,21 @@ pub(crate) async fn accept(
 
 /// 会话主体：读任务（WS→分派）+ 转发任务（LSP 帧→信封）+ 回推循环（信封→WS）。
 /// `libs` 为 `--lib` 附加目录（与 engine/packet 同语义；烘焙库目录在分析/列库函数
-/// 内部合并）。
-pub(crate) async fn session(ws: WebSocketStream<TcpStream>, libs: Vec<PathBuf>) {
+/// 内部合并）；`default_ws` 为本连接的初始工作区根（examples 发现结果，可被
+/// workspace 信封按连接切换）。
+pub(crate) async fn session(
+    ws: WebSocketStream<TcpStream>,
+    libs: Vec<PathBuf>,
+    default_ws: Option<PathBuf>,
+) {
     let (mut sink, mut source) = ws.split();
     let (in_tx, in_rx) = unbounded::<Vec<u8>>();
     let (out_tx, out_rx) = unbounded::<Vec<u8>>();
     let (reply_tx, reply_rx) = unbounded::<Value>();
+    let sess = Arc::new(Session {
+        libs: libs.clone(),
+        root: Mutex::new(default_ws),
+    });
 
     // LSP 会话：阻塞 run_lsp_on 放线程池；EOF/退出由管道两端 drop 传导
     let lsp = {
@@ -94,7 +117,7 @@ pub(crate) async fn session(ws: WebSocketStream<TcpStream>, libs: Vec<PathBuf>) 
     // WS 读 → 信封分派（客户端断开时本任务结束，in_tx drop → LSP EOF）
     let reader = {
         let reply_tx = reply_tx.clone();
-        let libs = libs.clone();
+        let sess = sess.clone();
         smol::spawn(async move {
             while let Some(Ok(msg)) = source.next().await {
                 let text = match msg {
@@ -103,7 +126,7 @@ pub(crate) async fn session(ws: WebSocketStream<TcpStream>, libs: Vec<PathBuf>) 
                     Message::Close(_) => break,
                     _ => continue,
                 };
-                dispatch(&text, &in_tx, &reply_tx, &libs).await;
+                dispatch(&text, &in_tx, &reply_tx, &sess).await;
             }
         })
     };
@@ -122,8 +145,26 @@ pub(crate) async fn session(ws: WebSocketStream<TcpStream>, libs: Vec<PathBuf>) 
     lsp.cancel().await;
 }
 
-/// 信封分派：lsp 透传 / analyze / list / read。
-async fn dispatch(text: &str, in_tx: &Sender<Vec<u8>>, reply_tx: &Sender<Value>, libs: &[PathBuf]) {
+/// 单连接会话状态：库目录（服务级共享）+ 工作区根（每连接独立，workspace 信封可切换）。
+struct Session {
+    libs: Vec<PathBuf>,
+    root: Mutex<Option<PathBuf>>,
+}
+
+/// 当前工作区根快照（Mutex 中毒按 None 处理——会话级状态，不值得传播 panic）。
+fn root_of(sess: &Session) -> Option<PathBuf> {
+    sess.root.lock().ok().and_then(|g| g.clone())
+}
+
+/// 信封分派：lsp 透传 / analyze / list / read / tree / save / delete / rename /
+/// mkdir / workspace / browse。
+/// 目录树、文件读写、目录浏览走 `smol::unblock`（磁盘操作不阻塞异步循环）。
+async fn dispatch(
+    text: &str,
+    in_tx: &Sender<Vec<u8>>,
+    reply_tx: &Sender<Value>,
+    sess: &Arc<Session>,
+) {
     let Ok(env) = serde_json::from_str::<Value>(text) else {
         let _ = reply_tx
             .send(json!({ "type": "error", "message": "invalid envelope" }))
@@ -154,13 +195,70 @@ async fn dispatch(text: &str, in_tx: &Sender<Vec<u8>>, reply_tx: &Sender<Value>,
                 .unwrap_or("")
                 .to_string();
             let params = params_of(env.get("params"));
-            let libs = libs.to_vec();
+            let libs = sess.libs.clone();
             let tx = reply_tx.clone();
             smol::spawn(async move {
-                let reply = match smol::unblock(move || {
-                    crate::analyze_text_json(&uri, &text, &params, &libs)
-                })
-                .await
+                // .pktl 配方文档：配方概览（globals / params / steps）——
+                // .pkt 解析器不认配方语法
+                let reply = if uri
+                    .strip_prefix("file://")
+                    .is_some_and(|p| p.ends_with(".pktl"))
+                {
+                    let display =
+                        PathBuf::from(uri.strip_prefix("file://").unwrap_or("recipe.pktl"));
+                    match crate::engine::recipe::parse_text(&text, &display) {
+                        Ok(r) => {
+                            json!({ "type": "result", "id": id, "ok": true, "data": recipe_overview(&r) })
+                        }
+                        Err(e) => {
+                            json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
+                        }
+                    }
+                } else {
+                    smol::unblock(move || {
+                        // 声明的运行参数（词法收集）随成功/失败都返回：构建失败时
+                        // 面板仍能渲染参数输入行（LSP 诊断不含参数缺失这类错误）
+                        let decl = crate::engine::eng::collect_src_params(&text).unwrap_or_default();
+                        match crate::analyze_text_json(&uri, &text, &params, &libs) {
+                            Ok(mut doc) => {
+                                if let Some(obj) = doc.as_object_mut() {
+                                    obj.insert("params".into(), params_decl_json(&decl));
+                                }
+                                json!({ "type": "result", "id": id, "ok": true, "data": doc })
+                            }
+                            Err(e) => json!({
+                                "type": "result",
+                                "id": id,
+                                "ok": false,
+                                "error": e.to_string(),
+                                "data": { "params": params_decl_json(&decl) },
+                            }),
+                        }
+                    })
+                    .await
+                };
+                let _ = tx.send(reply).await;
+            })
+            .detach();
+        }
+        Some("ast") => {
+            // 块视图 IR：AST 结构化导出（与 analyze 同一解析入口，原文保真切片）。
+            // 解析/语义失败 → ok:false（前端块视图降级为提示，文本视图不受影响）
+            let uri = env
+                .get("uri")
+                .and_then(Value::as_str)
+                .unwrap_or("file:///untitled.pkt")
+                .to_string();
+            let text = env
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let libs = sess.libs.clone();
+            let tx = reply_tx.clone();
+            smol::spawn(async move {
+                let reply = match smol::unblock(move || crate::blocks_json(&uri, &text, &libs))
+                    .await
                 {
                     Ok(doc) => json!({ "type": "result", "id": id, "ok": true, "data": doc }),
                     Err(e) => {
@@ -171,19 +269,59 @@ async fn dispatch(text: &str, in_tx: &Sender<Vec<u8>>, reply_tx: &Sender<Value>,
             })
             .detach();
         }
+        Some("schema") => {
+            // 块字段提示/悬停文档（builtin_docs + eng_lib 层头函数；每次连接取一次）
+            let libs = sess.libs.clone();
+            let _ = reply_tx
+                .send(json!({
+                    "type": "result", "id": id, "ok": true,
+                    "data": crate::schema_json(&libs),
+                }))
+                .await;
+        }
         Some("list") => {
             let _ = reply_tx
                 .send(json!({
                     "type": "result", "id": id, "ok": true,
-                    "data": { "files": lib_file_names(libs), "dirs": lib_dirs(libs) },
+                    "data": { "files": lib_file_names(&sess.libs), "dirs": lib_dirs(&sess.libs) },
                 }))
                 .await;
         }
         Some("read") => {
             let name = env.get("name").and_then(Value::as_str).unwrap_or("");
-            let reply = match read_lib_file(Path::new(name), libs) {
+            // root="ws" 读工作区（可写）；缺省读库文件（只读，兼容旧客户端）
+            if env.get("root").and_then(Value::as_str) == Some("ws") {
+                match root_of(sess) {
+                    Some(root) => {
+                        let name = name.to_string();
+                        let tx = reply_tx.clone();
+                        smol::spawn(async move {
+                            let reply =
+                                match smol::unblock(move || workspace::read_file(&root, &name))
+                                    .await
+                                {
+                                    Ok(text) => json!({ "type": "result", "id": id, "ok": true,
+                                    "data": { "text": text, "writable": true } }),
+                                    Err(e) => json!({ "type": "result", "id": id,
+                                    "ok": false, "error": e.to_string() }),
+                                };
+                            let _ = tx.send(reply).await;
+                        })
+                        .detach();
+                    }
+                    None => {
+                        let _ = reply_tx
+                            .send(json!({ "type": "result", "id": id, "ok": false,
+                                "error": t!("web.ws_not_found").to_string() }))
+                            .await;
+                    }
+                }
+                return;
+            }
+            let reply = match read_lib_file(Path::new(name), &sess.libs) {
                 Ok(text) => {
-                    json!({ "type": "result", "id": id, "ok": true, "data": { "text": text } })
+                    json!({ "type": "result", "id": id, "ok": true,
+                        "data": { "text": text, "writable": false } })
                 }
                 Err(e) => {
                     json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
@@ -191,12 +329,280 @@ async fn dispatch(text: &str, in_tx: &Sender<Vec<u8>>, reply_tx: &Sender<Value>,
             };
             let _ = reply_tx.send(reply).await;
         }
+        Some("tree") => {
+            let root = root_of(sess);
+            let tx = reply_tx.clone();
+            smol::spawn(async move {
+                let data = match &root {
+                    Some(r) => {
+                        let dir = r.clone();
+                        let entries = smol::unblock(move || workspace::tree(&dir)).await;
+                        json!({
+                            "root": r.display().to_string(),
+                            "writable": true,
+                            "entries": entries
+                                .iter()
+                                .map(|e| json!({ "path": e.path, "dir": e.dir, "pkt": e.pkt }))
+                                .collect::<Vec<_>>(),
+                        })
+                    }
+                    // 无工作区：空树 + 不可写（前端给打开文件夹提示）
+                    None => json!({ "root": Value::Null, "writable": false, "entries": [] }),
+                };
+                let _ = tx
+                    .send(json!({ "type": "result", "id": id, "ok": true, "data": data }))
+                    .await;
+            })
+            .detach();
+        }
+        Some("save") | Some("delete") => {
+            let name = env
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let text = env
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let is_save = env.get("type").and_then(Value::as_str) == Some("save");
+            let root = root_of(sess);
+            let tx = reply_tx.clone();
+            smol::spawn(async move {
+                let reply = match root {
+                    Some(root) => {
+                        let res = if is_save {
+                            smol::unblock(move || workspace::save_file(&root, &name, &text)).await
+                        } else {
+                            smol::unblock(move || workspace::delete_entry(&root, &name)).await
+                        };
+                        match res {
+                            Ok(()) => json!({ "type": "result", "id": id, "ok": true, "data": {} }),
+                            Err(e) => json!({ "type": "result", "id": id,
+                                "ok": false, "error": e.to_string() }),
+                        }
+                    }
+                    None => json!({ "type": "result", "id": id, "ok": false,
+                        "error": t!("web.ws_not_found").to_string() }),
+                };
+                let _ = tx.send(reply).await;
+            })
+            .detach();
+        }
+        Some("rename") => {
+            let from = env
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let to = env
+                .get("to")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let root = root_of(sess);
+            let tx = reply_tx.clone();
+            smol::spawn(async move {
+                let reply = match root {
+                    Some(root) => {
+                        let res =
+                            smol::unblock(move || workspace::rename_entry(&root, &from, &to)).await;
+                        match res {
+                            Ok(()) => json!({ "type": "result", "id": id, "ok": true, "data": {} }),
+                            Err(e) => json!({ "type": "result", "id": id,
+                                "ok": false, "error": e.to_string() }),
+                        }
+                    }
+                    None => json!({ "type": "result", "id": id, "ok": false,
+                        "error": t!("web.ws_not_found").to_string() }),
+                };
+                let _ = tx.send(reply).await;
+            })
+            .detach();
+        }
+        Some("mkdir") => {
+            let name = env
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let root = root_of(sess);
+            let tx = reply_tx.clone();
+            smol::spawn(async move {
+                let reply = match root {
+                    Some(root) => {
+                        match smol::unblock(move || workspace::mkdirs(&root, &name)).await {
+                            Ok(dir) => json!({ "type": "result", "id": id, "ok": true,
+                            "data": { "path": dir.display().to_string() } }),
+                            Err(e) => json!({ "type": "result", "id": id,
+                            "ok": false, "error": e.to_string() }),
+                        }
+                    }
+                    None => json!({ "type": "result", "id": id, "ok": false,
+                        "error": t!("web.ws_not_found").to_string() }),
+                };
+                let _ = tx.send(reply).await;
+            })
+            .detach();
+        }
+        Some("workspace") => {
+            match env.get("path").and_then(Value::as_str) {
+                // 带 path：打开自定义文件夹（工作区根仅影响本连接）
+                Some(p) if !p.is_empty() => {
+                    let reply = match workspace::open_folder(p) {
+                        Ok(canon) => {
+                            if let Ok(mut g) = sess.root.lock() {
+                                *g = Some(canon.clone());
+                            }
+                            json!({ "type": "result", "id": id, "ok": true,
+                                "data": { "root": canon.display().to_string() } })
+                        }
+                        Err(e) => {
+                            json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
+                        }
+                    };
+                    let _ = reply_tx.send(reply).await;
+                }
+                // 空 path：重置为默认工作区（examples）
+                Some(_) => {
+                    let def = workspace::default_workspace();
+                    if let Ok(mut g) = sess.root.lock() {
+                        *g = def.clone();
+                    }
+                    let _ = reply_tx
+                        .send(json!({ "type": "result", "id": id, "ok": true,
+                            "data": { "root": def.map(|d| d.display().to_string()) } }))
+                        .await;
+                }
+                // 无 path：查询当前工作区
+                None => {
+                    let _ = reply_tx
+                        .send(json!({ "type": "result", "id": id, "ok": true,
+                            "data": { "root": root_of(sess).map(|d| d.display().to_string()) } }))
+                        .await;
+                }
+            }
+        }
+        Some("browse") => {
+            // 文件夹选择对话框数据源：列子目录（仅目录、跳隐藏、上限截断）；
+            // path 缺省 = 用户主目录。选择结果仍走 workspace path 信封确认。
+            let path = env.get("path").and_then(Value::as_str).map(str::to_string);
+            let tx = reply_tx.clone();
+            smol::spawn(async move {
+                let reply = match smol::unblock(move || workspace::browse(path.as_deref())).await {
+                    Ok((cur, parent, dirs)) => json!({ "type": "result", "id": id, "ok": true,
+                        "data": {
+                            "path": cur.display().to_string(),
+                            "parent": parent.map(|p| p.display().to_string()),
+                            "dirs": dirs,
+                        } }),
+                    Err(e) => {
+                        json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
+                    }
+                };
+                let _ = tx.send(reply).await;
+            })
+            .detach();
+        }
         _ => {
             let _ = reply_tx
                 .send(json!({ "type": "error", "id": id, "message": "unknown envelope type" }))
                 .await;
         }
     }
+}
+
+/// .pktl 配方概览 JSON（前端 Recipe/Globals 面板数据）：globals、steps（含
+/// extract 与 params）、扁平化的 params 键值表。
+fn recipe_overview(r: &crate::engine::recipe::Recipe) -> Value {
+    use crate::engine::eng::value_display;
+    use crate::engine::pkg::WaitMode;
+    use crate::engine::recipe::{FromSpec, OnError, OnTimeout, StepRaw};
+
+    let mut params: Vec<Value> = Vec::new();
+    let steps: Vec<Value> = r
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            for (k, v) in &s.params {
+                params.push(json!({ "key": k, "value": v, "step": idx + 1 }));
+            }
+            let wait = match s.wait {
+                None | Some(WaitMode::Off) => Value::Null,
+                Some(WaitMode::OneShot(secs)) => json!(format!("{secs}s")),
+                Some(WaitMode::Continuous) => json!("∞"),
+            };
+            let on_timeout = match &s.on_timeout {
+                None => Value::Null,
+                Some(OnTimeout::Retry(n)) => json!(format!("retry×{n}")),
+                Some(OnTimeout::Packet(p)) => {
+                    json!(
+                        p.file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| p.display().to_string())
+                    )
+                }
+            };
+            let raw = match &s.raw {
+                None => Value::Null,
+                Some(StepRaw::On { iface }) => match iface {
+                    Some(name) => json!(name),
+                    None => json!("true"),
+                },
+                Some(StepRaw::Off) => json!("false"),
+            };
+            let extract: Vec<Value> = s
+                .extract
+                .iter()
+                .map(|e| {
+                    let from = match &e.from {
+                        FromSpec::Field { layer, field } => format!("reply.{layer}.{field}"),
+                        FromSpec::SentField { layer, field } => format!("sent.{layer}.{field}"),
+                        FromSpec::PeerField { field } => format!("reply.peer.{field}"),
+                        FromSpec::Expr(v) => value_display(v),
+                    };
+                    json!({
+                        "name": e.name,
+                        "from": from,
+                        "as": format!("{:?}", e.as_).to_lowercase(),
+                    })
+                })
+                .collect();
+            json!({
+                "idx": idx + 1,
+                "pkg": s
+                    .pkg
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| s.pkg.display().to_string()),
+                // 解析后的完整路径：前端 Recipe 面板点包名跳转用（pkg 只是展示名）
+                "pkgPath": s.pkg.display().to_string(),
+                "line": s.line,
+                "wait": wait,
+                "onTimeout": on_timeout,
+                "raw": raw,
+                "onError": match s.on_error {
+                    OnError::Stop => "stop",
+                    OnError::Continue => "continue",
+                },
+                "extract": extract,
+            })
+        })
+        .collect();
+    let globals: Vec<Value> = r
+        .globals
+        .iter()
+        .map(|g| {
+            json!({
+                "name": g.name,
+                "init": g.init.as_ref().map(value_display),
+                "line": g.line,
+            })
+        })
+        .collect();
+    json!({ "globals": globals, "params": params, "steps": steps })
 }
 
 /// `params` 对象 → (k, v) 列表（非对象 → 空）。
@@ -214,6 +620,18 @@ fn params_of(v: Option<&Value>) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 声明的运行参数 → JSON（同名去重保首个；default 为 null = 必填）。
+fn params_decl_json(decl: &[(String, Option<packet_dsl::ast::Value>)]) -> Value {
+    use crate::engine::eng::value_display;
+    let mut seen = std::collections::HashSet::new();
+    json!(
+        decl.iter()
+            .filter(|(n, _)| seen.insert(n.clone()))
+            .map(|(n, d)| json!({ "name": n, "default": d.as_ref().map(value_display) }))
+            .collect::<Vec<_>>()
+    )
 }
 
 /// 生效库目录（烘焙 eng_lib + `--lib` 附加；展示用）。

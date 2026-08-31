@@ -14,7 +14,9 @@
 #
 # 依赖：
 #   - 前端：bun 或 node（npm 兜底）
-#   - Windows MSVC（Linux）：需 xwin（cargo install cargo-xwin，自动下载 SDK）
+#   - Windows MSVC（Linux/mac 交叉）：需 xwin（cargo install cargo-xwin，自动下载
+#     SDK）；Windows 本机原生编译无需 xwin，且 exe 会嵌入图标（winresource 需
+#     rc.exe，仅原生构建可用，见 crates/prping-cli/build.rs）
 #   - Win7 目标：nightly + rust-src（rustup toolchain install nightly --profile minimal
 #     && rustup component add rust-src --toolchain nightly）
 #
@@ -30,6 +32,12 @@ default: build
 # dist 资源打包 → target/debug 完整布局 {prping, lib/, examples/, UI/}
 [script]
 build: web-dist
+    # Windows：pcap 依赖静态链接 wpcap.lib，与 build-release 同样的 SDK 前置
+    # （build.rs 的 exe 图标嵌入在 debug 下同样生效）
+    if [ "${OS:-}" = "Windows_NT" ]; then
+        just windows-deps
+        export LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64
+    fi
     cargo build
     just dist target/debug
 
@@ -84,7 +92,8 @@ cap:
         exit 1
     fi
 
-# ── Windows 交叉编译（Linux 上；Windows 本机直接跑 build-release） ──
+# ── Windows 编译（MSVC x64：Windows 本机原生 / Linux·mac 经 xwin 交叉，同配方
+#    按 host 自动分派；Win7 变体恒走 xwin） ──
 # XWIN_ARCH=x86,x86_64：cargo-xwin 默认只下载 x86_64+aarch64 库，且 DONE 标记
 # 只记录最近一次架构——不统一指定会导致换架构时反复重下载；本项目只用 x86/x86_64。
 #
@@ -133,13 +142,23 @@ fetch-npcap-sdk:
     rm -rf target/.wlibs target/windows_x86_64_msvc.crate target/windows_i686_msvc.crate
     @echo "SDK 就绪：target/npcap-sdk/Lib/{x64/,}wpcap.lib + windows.lib（构建时 LIBPCAP_LIBDIR 已由配方设置）"
 
-# Windows MSVC x86_64 构建步骤（私有：仅作依赖被编排，见 build-windows-msvc）
+# Windows MSVC x86_64 构建步骤（私有：仅作依赖被编排，见 build-windows-msvc）。
+# 按 host 分派：Windows 本机 → 原生 cargo build（rc.exe 可用，exe 嵌入图标）；
+# Linux/mac → cargo xwin 交叉（无资源编译器，图标跳过仅警告）。
+# [script]：if 块内含 \ 续行，just 普通配方解析不了（extra leading whitespace）
 [private]
+[script]
 build-windows-msvc-impl: windows-deps
-    XWIN_ARCH=x86,x86_64 LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64 \
-        cargo xwin build --target x86_64-pc-windows-msvc --release
+    if [ "${OS:-}" = "Windows_NT" ]; then
+        LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64 \
+            cargo build --release --target x86_64-pc-windows-msvc
+    else
+        XWIN_ARCH=x86,x86_64 LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64 \
+            cargo xwin build --target x86_64-pc-windows-msvc --release
+    fi
 
-# Windows MSVC x86_64（先构建，再经 dist 打包 lib/、examples/、UI/ 到产物目录）
+# Windows MSVC x86_64（先构建，再经 dist 打包 lib/、examples/、UI/ 到产物目录；
+# Windows 本机运行即原生编译并嵌入 exe 图标，Linux/mac 自动走 xwin 交叉）
 build-windows-msvc: build-windows-msvc-impl (dist "target/x86_64-pc-windows-msvc/release")
 
 # Windows 7 x64 构建步骤（私有；官方 Win7 基线目标 MSVC，Linux 需 xwin，
@@ -206,7 +225,7 @@ publish: publish-impl (dist "target/release")
 web-dist:
     case "${PRPING_SKIP_WEB_BUILD:-}" in 1|true|yes) exit 0;; esac
     if [ ! -f frontend/package.json ]; then exit 0; fi
-    if [ -f frontend/dist/index.html ] && [ -z "$(find frontend/src frontend/index.html frontend/package.json frontend/vite.config.ts frontend/tsconfig.json -newer frontend/dist/index.html 2>/dev/null | head -1)" ]; then
+    if [ -f frontend/dist/index.html ] && [ -z "$(find frontend/src frontend/index.html frontend/package.json frontend/vite.config.ts frontend/tsconfig.json frontend/public -newer frontend/dist/index.html 2>/dev/null | head -1)" ]; then
         exit 0
     fi
     just build-web

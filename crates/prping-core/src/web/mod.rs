@@ -21,6 +21,7 @@
 mod assets;
 mod http;
 mod pipe;
+mod workspace;
 mod ws;
 
 use std::net::SocketAddr;
@@ -55,10 +56,12 @@ pub async fn serve_web(cfg: WebConfig) -> anyhow::Result<()> {
     ensure_dns_resolver();
     ensure_proto_registry();
     let libs = Arc::new(effective_libs(&cfg.libs));
+    // 默认工作区（examples；二进制目录优先、其次启动目录，与 UI/lib 就近查找一致）
+    let default_ws = workspace::default_workspace();
 
     let listener = smol::net::TcpListener::bind(SocketAddr::new(cfg.addr, cfg.port)).await?;
     let url = format!("http://{}/", listener.local_addr()?);
-    print_banner(&url, &libs);
+    print_banner(&url, &libs, default_ws.as_ref());
 
     if cfg.open_browser {
         match open::that_detached(&url) {
@@ -85,7 +88,7 @@ pub async fn serve_web(cfg: WebConfig) -> anyhow::Result<()> {
         loop {
             match listener.accept().await {
                 Ok((stream, _peer)) => {
-                    smol::spawn(handle_conn(stream, libs.clone())).detach();
+                    smol::spawn(handle_conn(stream, libs.clone(), default_ws.clone())).detach();
                 }
                 Err(e) => {
                     // accept 错误退避（防 EMFILE 之类死循环烧 CPU），随后继续
@@ -106,7 +109,7 @@ pub async fn serve_web(cfg: WebConfig) -> anyhow::Result<()> {
 }
 
 /// 打印监听横幅（与 serve 一致的 termcolor 风格）。
-fn print_banner(url: &str, libs: &[PathBuf]) {
+fn print_banner(url: &str, libs: &[PathBuf], ws: Option<&PathBuf>) {
     let mut w = stdout_stream();
     let _ = print_magenta(&mut w, format!("prping web {}", env!("CARGO_PKG_VERSION")));
     println!();
@@ -117,6 +120,13 @@ fn print_banner(url: &str, libs: &[PathBuf]) {
     // 静态资源来源：内嵌（web-embed）/ UI 目录路径 / 未找到提示
     let _ = print_dim(&mut w, format!("ui: {}", assets::source_label()));
     println!();
+    // 可编辑工作区（examples 未找到时提示可从页面打开自定义文件夹）
+    let ws_label = match ws {
+        Some(d) => t!("web.ws_dir", dir = d.display().to_string()).to_string(),
+        None => t!("web.ws_dir_missing").to_string(),
+    };
+    let _ = print_dim(&mut w, format!("workspace: {ws_label}"));
+    println!();
     // Ctrl+C 提示已在 listening 行尾携带，不再单独重复一行
 }
 
@@ -125,7 +135,11 @@ fn stdout_stream() -> StandardStream {
 }
 
 /// 单连接处理：HTTP（静态/config.json，keep-alive 循环）或 WebSocket 升级（仅 /ws）。
-async fn handle_conn(mut stream: smol::net::TcpStream, libs: Arc<Vec<PathBuf>>) {
+async fn handle_conn(
+    mut stream: smol::net::TcpStream,
+    libs: Arc<Vec<PathBuf>>,
+    default_ws: Option<PathBuf>,
+) {
     loop {
         let head = match http::read_head(&mut stream).await {
             Ok(Some(h)) => h,
@@ -153,7 +167,7 @@ async fn handle_conn(mut stream: smol::net::TcpStream, libs: Arc<Vec<PathBuf>>) 
             };
             // 流所有权交给 WS 层：升级后不再有 HTTP 请求
             if let Ok(ws) = ws::accept(stream, &key).await {
-                ws::session(ws, (*libs).clone()).await;
+                ws::session(ws, (*libs).clone(), default_ws).await;
             }
             return;
         }

@@ -1302,8 +1302,10 @@ fn pcap_loop(
 /// 剥 DLT_NULL/LOOP 的 4 字节族头（AF_INET=2 / AF_INET6=30），返回裸 IP 包；
 /// 族头非法或不足 → None。族头字节序：DLT_NULL 是主机字节序，DLT_LOOP 是网络
 /// 字节序——两种都接受（值都是 2/30，只是字节排列不同）。
-/// serve 抓包与 `packet --listen --raw`（pcap 路径）共用。
-#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "pcap")))]
+/// serve 抓包与 `packet --listen --raw`（pcap 路径）共用。cfg 与
+/// serve/mod.rs 的 re-export 及 listen_raw 的 pcap 路径调用方一致
+/// （此前误用 frame_keep 一侧的窄 cfg，Windows 下 re-export 悬空 E0432）。
+#[cfg(any(windows, target_os = "macos", feature = "pcap"))]
 pub(crate) fn strip_null(data: &[u8]) -> Option<&[u8]> {
     let head = data.get(..4)?;
     let le = u32::from_le_bytes(head.try_into().ok()?);

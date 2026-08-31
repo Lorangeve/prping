@@ -13,7 +13,7 @@
   - `ping/` — icmp（导出 `build_v4`/`build_v6`/`icmp_cksum` 供 MTU/trace 复用）/tcp/udp、latency、bandwidth（独立循环+进度条）、mtu（DF+变长二分）、`trace/`（icmp / tcp / udp / tcpwin[Win+Npcap] / dns 反解）
   - `util/` — config、dns、net（`bind_udp` 4MB 缓冲、`connect_timeout` 含 Win7 workaround）、socket（raw 基础设施）、format、interrupt（`Run`：按次数或 `-n 10s` 按时长）
   - `engine/` — 包构造引擎：`eng/`（display/lsp）、`pkg/`（send/recipe/sniffer/raw/listen/listen_raw）、`rawpcap/`（pcap feature 兼容层）
-  - `web/` — Web 编辑器服务器（`prping web`，单端口 HTTP+WS，smol）：`http.rs` 极简 GET/HEAD、`ws.rs` 信封协议（lsp 透传/analyze/list/read）+ FrameDecoder 防御、`pipe.rs` 异步↔阻塞桥（零改动复用 `run_lsp_on`）、`assets.rs` 静态资源双模式——**默认运行期读 `UI/` 目录（二进制所在目录优先，其次启动目录）**；`--features web-embed` 时 rust-embed（debug 直读 dist / release 编译期内嵌）；键名逐段校验（空段/点段/反斜杠/冒号拒绝）
+  - `web/` — Web 编辑器服务器（`prping web`，单端口 HTTP+WS，smol）：`http.rs` 极简 GET/HEAD、`ws.rs` 信封协议（lsp 透传/analyze/list/read/tree/save/delete/workspace）+ FrameDecoder 防御、`workspace.rs` 可写工作区（默认 `examples/`，发现顺序同 `UI/`；`workspace` 信封打开自定义目录、`browse` 列目录供 web 文件夹选择对话框（打开文件夹唯一入口）；写操作限根内：路径逐段校验 + canonicalize 根内断言 + 4MB 上限；读/删（文件直接删、目录递归删）/改名/建目录接受任意文件（.pkt/.pktl 由 tree 的 pkt 标记区分；二进制文件读取明确报错），`rename`/`mkdir` 信封做重命名/移动/建目录）、`pipe.rs` 异步↔阻塞桥（零改动复用 `run_lsp_on`）、`assets.rs` 静态资源双模式——**默认运行期读 `UI/` 目录（二进制所在目录优先，其次启动目录）**；`--features web-embed` 时 rust-embed（debug 直读 dist / release 编译期内嵌）；键名逐段校验（空段/点段/反斜杠/冒号拒绝）
   - `stats.rs` 统计/直方图/JSON 输出；`drive.rs` `Probe` trait 统一 ping 循环（间隔/预热/统计/JSONL）；`output.rs` 终端颜色 + 服务端日志 + 缩进工具；`manual.rs` 手册分页
 - **直方图**: 默认 ASCII `#`；`-p`/`--pretty` 用 [ploot](https://github.com/ploot-rs/ploot)（非 tty 剥 ANSI）；`-H` 桶数或逗号阈值（ms）
 - **i18n**: rust-i18n（`locales/{en-US,zh-CN}.yml`）；`--lang` > `$LANG` > macOS/Windows 系统 UI 语言兜底 > 英文
@@ -68,7 +68,7 @@ prping -s ADDR|IFACE ...    指定源地址/网卡（测量子命令内）
 1. **测量** — ICMP/TCP/UDP ping、latency、bandwidth（`--parallel` 并发 + `-b` 实时进度条，仅 tty）、MTU 探测（`-m`，解析 Fragmentation Needed）、traceroute（ICMP 默认/带端口 TCP SYN/`--udp` 经典变体）、jitter（文本 + `--json`）、`-s` 源绑定（Linux 网卡名 → IPv4）、`-R` 反向 DNS、`-n 10s` 时长模式（细节 → `docs/claude-rules/measure.md`）
 2. **输出** — 彩色人读 + `--json`/JSONL 机器可读、直方图（`-H` 自定义阈值，psping `-h` 对齐）、服务端聚合统计、退出码反映丢包/未达
 3. **引擎** — `engine` 分析/LSP/`--ls`/`--hex`/`--pcap`；`packet` 发送/配方；`.pktl` 配方（global / extract / wait / raw 步骤开关 / on_error）；engine/packet `--json` 结构化输出（细节 → `docs/claude-rules/engine.md`）
-4. **Web 编辑器** — SolidJS SPA（CodeMirror 6）+ engine LSP（WS 信封桥接 `run_lsp_on`：诊断/补全/悬停）+ 实时层栈/HEX 预览（`analyze_text_json` 与 CLI `--json` 同构）+ eng_lib 只读浏览；`--open` 开浏览器；前端**默认不内嵌**（运行期读**二进制同目录** `UI/`：`just build`/`just build-release` 经 `web-dist` 按需自动构建前端、经 `just dist` 同步 `target/<profile>/{UI,lib,examples}` 完整可运行布局；源码树不留生成物），`--features web-embed` 才内嵌（单文件分发）
+4. **Web 编辑器** — SolidJS SPA（CodeMirror 6）+ engine LSP（WS 信封桥接 `run_lsp_on`：诊断/补全/悬停）+ 实时层栈/HEX 预览（`analyze_text_json` 与 CLI `--json` 同构）+ 左栏文件管理（工作区 = 启动目录 `examples/` 或页面打开的自定义目录，可编辑/保存 Ctrl+S/新建/删除（目录递归，确认文案说明后果）/改名/移动 + 行悬停按钮与右键菜单（文件：打开/改名/删除；目录：改名/删除；空白区：新建/刷新）+ 目录树折叠（默认全收起）；eng_lib 只读浏览；📂 = web 文件夹选择对话框（browse 导航，默认当前工作区根；唯一入口，原生选择框/webkitdirectory 导入因重复与路径限制已移除）；前端 IndexedDB 持久化项目状态——工作区根/上次文件/未保存草稿/面板，生成物不落库；打开真实文件即以真实 `file://` URI 走 LSP/analyze，import 解析到文件所在目录）；`--open` 开浏览器；前端**默认不内嵌**（运行期读**二进制同目录** `UI/`：`just build`/`just build-release` 经 `web-dist` 按需自动构建前端、经 `just dist` 同步 `target/<profile>/{UI,lib,examples}` 完整可运行布局；源码树不留生成物），`--features web-embed` 才内嵌（单文件分发）
 5. `document` 使用手册（双语、章节跳转、$PAGER 分页）
 
 ## 协议学习资源（eng_lib/）
