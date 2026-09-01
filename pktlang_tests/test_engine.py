@@ -152,8 +152,9 @@ def test_E6():
             timeout=10,
         )
         if rc != 0:
-            # 依赖配方 global 的 pkt（如 tcp_handshake/ack.pkt）独立分析会报错，属正常
-            if "未设置" in err:
+            # 依赖配方 global 的 pkt（如 tcp_handshake/ack.pkt）独立分析会报错，属正常；
+            # 依赖配方 params: 注入的步骤文件（如 wait_timeout/probe.pkt）同理（"未提供"）
+            if "未设置" in err or "未提供" in err:
                 skipped += 1
             else:
                 failed.append(f"{pkt.name}: exit={rc} err={err[:80]}")

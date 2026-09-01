@@ -14,5 +14,14 @@ md-5 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
 
+[features]
+# 测试构建回退（仅 dev-dependencies 激活，见下方 dev-dep 注释）：运行时 `lib/`
+# 发现落空（cargo test 的 exe 在 target/*/deps、cwd 在 crate 目录，都没有 lib/）
+# 时，回退编译期烘焙的仓库 eng_lib 路径——测试共享真实标准库 prelude。
+# 产物（非测试编译）不带此 feature，二进制只认运行时 lib/ 布局。
+test-stdlib = []
+
 [dev-dependencies]
 serde_json = "1"
+# 自引用 dev-dep：给本 crate 自身的测试/示例开 `test-stdlib`（tokio 同款手法）
+packet-dsl = { path = ".", features = ["test-stdlib"] }

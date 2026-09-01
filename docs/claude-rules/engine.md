@@ -44,6 +44,11 @@
 - `prping engine FILE.pkt`：模块概览 + 逐包层栈（字段 + `auto` 标注）+ 字节 hexdump
   （`src/eng.rs`）；`engine --lsp`：.pkt LSP 服务器
   （JSON-RPC over stdio，`run_lsp_on` 可测；诊断/补全/悬停/documentSymbol）。
+  诊断 = 解析错误（单条）+ **静态形状检查**（`packet_dsl::check::check_module`，
+  DESIGN.md §6.6：解析成功后对求值期 coercer 必然失败的封闭形态出多条诊断——
+  字符串进数值位/越界/同宽宽度不符/移位移位量/除零/proto 字段默认值（含 bits）等，
+  按 (行,列) 排序去重；`params`/裸 ident/未知值调用零误报跳过；库值函数体不展开，
+  `ip4`/`ip6`/`mac` 按 tpl 宽度表检查）。
   补全按光标位置上下文出候选（`eng/lsp.rs::pkt_context`）：层位（`|>` 后/`|>` 续行/
   def 值位 `name = ` 之后/函数体语句）只给 use+层函数+库函数、实参名位给所属函数未填的 `name=`（本地/库/内置参数表，hex/params
   等位置实参原语不弹）、值位给值原语+作用域参数名+值函数并按 (函数,参数) 加权
@@ -139,31 +144,26 @@
     替代默认 DNS/ICMP 硬编码匹配（默认 ICMP 匹配按发包 IP 族取期望回包类型
     v4 type=0 / v6 type=129，防把 echo request 自身当回包）；
     仅配合 `--wait`，TCP 回显无独立字节故不适用。
-  - **裸 `--wait` 持续监听（pktlang 对话服务端）**：`pkg/listen.rs::listen_packets`——**发送段先行**
-    （文件有可发送的导出先发送再监听；含 `reply()` 叶子的应答模板不可发送跳过），绑定
+  - **裸 `--wait` 纯持续监听**：`pkg/listen.rs::listen_packets`——**发送段先行**
+    （文件有可发送的导出先发送再监听；含 `reply()` 叶子的包求值失败 → 无可发送包跳过），绑定
     CLI `HOST:PORT`（或按包内最外层 udp/tcp dport 推导，IPv6 包 → `[::]`），
     循环接收 UDP 数据报，反解后按 .pkt 的 sniffer 规则匹配（`allow_sent:
-    false`）；命中**原样回显**给发送方并打印 `✓ matched ... from peer` +
-    反解展示，未命中忽略；Ctrl+C 优雅退出（读超时 200ms 轮询中断标志）并打印
-    匹配统计。与客户端 `--wait`（发送 + 同一规则匹配应答）配对即可让两个进程
-    用 export + sniffer 模拟通信（demo → `examples/sniffer_chat/README.md`）。
-  - **`--wait --raw` 链路层监听完整版**：`pkg/listen_raw.rs::listen_raw_packets`（同样发送段先行，
-    应答模板自动跳过）
+    false`）；命中只打印 `✓ matched ... from peer` +
+    反解展示（**不发包回应**——回应包的构造属编排，由 .pktl 配方的 `wait:` 无值
+    步骤 + extract + 触发发包完成），未命中忽略；Ctrl+C 优雅退出（读超时 200ms
+    轮询中断标志）并打印匹配统计（demo → `examples/sniffer_chat/README.md`）。
+  - **`--wait --raw` 链路层纯监听**：`pkg/listen_raw.rs::listen_raw_packets`（同样发送段先行）
     ——持续接收**完整帧**（Linux 默认 AF_PACKET 单 socket 全接口/指定 `--iface`，
     复用 `util::socket::open_af_packet`/`af_packet_promisc_all`；macOS/Windows/
     Linux+pcap 走 `rawpcap::open_capture_listen` 多设备多线程——**接收导向打开**：
     不做 EN10MB 限制（macOS lo0 的 DLT_NULL 也能收，剥头复用 `serve::strip_null`）、
     混杂尽力而为（BIOCPROMISC 不支持的设备如 macOS anpi* 降级不混杂）；
-    应答注入走**接收设备**（--iface 优先），按 sniffer 统一谓词匹配（`allow_sent: false`），命中后
-    按**应答模板**（.pkt 默认导出，经 `reply("层","字段")` 取收到的帧字段——
-    `resolve_sources_with_reply` 绑定 ReplyAccess）构造应答帧并经
-    `inject_reply` raw 注入（**裸 IPv4 外层应答走内核 IP 栈路由**：
-    `util::socket::inject_ip4`——Linux IPPROTO_RAW+IP_HDRINCL 整包 / macOS 按
-    报文协议开 raw socket 只发 IP 载荷，回环与局域网均无需 MAC 解析，macOS lo0
-    的 DLT_NULL 裸 IP 帧也能注入；eth 外层应答仍走 `send_raw_bytes` 链路层注入）；
-    自注入/lo 双投递防护（最近注入帧 +
-    DEDUP_WINDOW 去重）；Ctrl+C 优雅退出 + 匹配统计。需要 root/Npcap。
-    demo → `examples/icmp_echo_server/`（纯 pktlang 的 ICMP echo 服务端，应答模板为裸 IP 外层）。
+    按 sniffer 统一谓词匹配（`allow_sent: false`），命中只打印匹配详情与反解展示
+    （**无应答模板注入**——历史单文件应答模板已移除，`reply("层","字段")` 现为
+    配方 extract 专用原语，.pkt 内出现即 `ReplyOutsideRecipe` 诊断错误）；
+    lo 双投递防护（DEDUP_WINDOW 去重）；Ctrl+C 优雅退出 + 匹配统计。需要 root/Npcap。
+    配方服务端 demo → `examples/icmp_echo_server/`（ICMP echo）、
+    `examples/tcp_handshake_listen/`（TCP SYN-ACK）、`examples/dns_echo_listen/`（DNS）。
   - **pcap**：`src/pcap.rs` 手写格式（magic 0xa1b2c3d4 LE/BE + nano 变体；24B 全局 + 16B
     记录头；`LinkType{Ethernet=1, Raw=101}`）。`packet --out` 写入、`engine --pcap` 读取、
     **`engine --pcap x.pcap --to-pkt DIR` 转码**（`src/engine/convert.rs`，`--out` 逆操作）：每记录一个
@@ -578,8 +578,14 @@
   裸结构，AEAD/头部保护不在 DSL 范围，示例 `examples/quic_initial/`）。
   分发（publish/dist 配方）见 `docs/claude-rules/windows-build.md`。
 - 库搜索：`packet-dsl` 的 `find_module(dir, libs, name)`——入口目录（直接+递归）优先，
-  库目录**从后往前**逐个搜索（显式 lib 优先于默认 eng_lib）；公共 API
+  库目录**从后往前**逐个搜索（显式 lib 优先于默认 lib/ 目录）；公共 API
   `parse_file_with_libs` / `parse_source_at_with_libs`。
+- **默认库目录 = 运行时发现，不再烘焙 eng_lib**：`packet_dsl::default_libs` 找
+  二进制同目录 `lib/` + 当前目录 `lib/`（存在才收录，canonical 去重）——二进制
+  一律走 `lib/` 布局（`just dist` 产出/同步），仓库 `eng_lib/` 只是同步源。
+  测试构建经 `test-stdlib` feature（packet-dsl/prping-core 的 dev-dependencies
+  激活，自引用 dev-dep 手法）在发现落空时回退仓库 `eng_lib/`——测试与产物行为分离，
+  产物永不读 eng_lib。
 - **import 按模块解析**：同名文件在不同目录可共存，每个 import 绑定到**自身模块目录**
   找到的模块实例（`ModuleGraph.module_imports` 存每模块 import 边，无全局名字表）——
   入口目录的本地文件（如自己的 headers.pkt）遮蔽库同名模块；结果不依赖 import 顺序。
@@ -594,8 +600,9 @@
   作用域查不到时 `find_lib_export` 回退到库模块集合（须「导出且本地定义」才可作求值目标）。
   **库目录诊断**：库目录不可读 / 库模块语法错 / 同一库目录内导出名重复 → 报错（带文件+span）；
   跨目录同名导出允许（显式 lib 覆盖标准库）。
-- prping `--lib PATH`（可多次，engine/packet 子命令）：`resolve_libs` = 默认「当前目录/lib」
-  （存在时）+ --lib 追加；analyze_file/send_packets/LSP（LspServer.libs）全链路携带。
+- prping `--lib PATH`（可多次，engine/packet 子命令）：`resolve_libs` 只归集 --lib
+  （默认 lib/ 由 `default_libs` 运行时发现合并）；analyze_file/send_packets/LSP
+  （LspServer.libs）全链路携带。
 - 值位置 hex：`hex("...")` 在参数值位置解析为字节列表 Value（parser `hex_call`），
   与层位置 `hex(...)`（Raw 载荷层）并存。
 

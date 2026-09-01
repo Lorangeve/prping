@@ -127,6 +127,44 @@ body {
   border-color: #5a6478;
 }
 
+/* ── 导航历史（返回/前进）──────────────────────────── */
+.nav-btns {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.nav-btn {
+  background: transparent;
+  color: var(--text-dim, #9aa3b2);
+  border: 1px solid #3a4152;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.nav-btn:hover:enabled {
+  color: var(--text, #e8ebf2);
+  border-color: #5a6478;
+}
+
+.nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* ── 跳转链接（go-to-definition）──────────────────── */
+/* 跳转一律 Ctrl/Cmd+单击（Alt = 多光标/块选）；按住时全部候选（cm-ident）
+   统一点亮 + pointer。状态类挂在 body——CM6 会在焦点变化时整写 .cm-editor
+   的 class，挂编辑器上会被抹掉。无修饰键悬停不给可点击暗示（点击也不跳） */
+.cm-mod-goto .cm-ident {
+  color: var(--accent, #4da3ff);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
 .draft-btn {
   background: transparent;
   color: var(--accent, #4da3ff);
@@ -877,6 +915,31 @@ body {
   color: #9a9aa8;
 }
 
+/* GFM 表格：display:block + overflow 让宽表在面板内横向滚动而不撑破布局 */
+.md-render table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 10px 0;
+}
+
+.md-render th,
+.md-render td {
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  text-align: left;
+}
+
+.md-render th {
+  background: #1b1f27;
+  color: #e8e8e8;
+}
+
+.md-render tbody tr:nth-child(2n) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .md-render hr {
   border: none;
   border-top: 1px solid var(--border);
@@ -985,4 +1048,269 @@ body {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 12px;
   color: var(--accent);
+}
+
+/* ── Run 面板 / 顶栏执行按钮（packet 子进程执行；见 web/run.rs）────── */
+.run-go-btn {
+  background: var(--ok);
+  color: #10131a;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 12px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.run-go-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.run-go-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.run-stop-btn {
+  background: var(--err);
+  color: #10131a;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 12px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.run-stop-btn:hover {
+  filter: brightness(1.1);
+}
+
+.run-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  overflow: hidden;
+}
+
+.run-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.run-status {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.run-status.running {
+  color: var(--warn);
+}
+
+.run-truncated {
+  color: var(--warn);
+}
+
+.run-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.run-field input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.run-field input:focus,
+.run-row input:focus,
+.run-params input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.run-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.run-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.run-num {
+  width: 56px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.run-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+}
+
+.run-check input {
+  accent-color: var(--accent);
+}
+
+.run-iface {
+  width: 90px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.run-params {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-height: 30%;
+  overflow: auto;
+}
+
+.run-console {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.run-line {
+  color: var(--text);
+}
+
+.run-line.err {
+  color: var(--err);
+}
+
+.tab-badge.run-badge {
+  color: var(--warn);
+}
+
+/* JSONL 结构化输出行（--json：包 ✓/✗ / 步骤 / 汇总） */
+.run-line-step {
+  color: var(--accent);
+  margin-top: 3px;
+}
+
+.run-line-ok {
+  color: var(--ok);
+}
+
+.run-line-err {
+  color: var(--err);
+}
+
+.run-line-summary {
+  color: var(--text);
+  font-weight: 600;
+  margin-top: 3px;
+  border-top: 1px solid var(--border);
+  padding-top: 3px;
+}
+
+/* 任务标签条（多运行任务管理）：chip = 一个任务，点击切换控制台 */
+.run-tabs {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  max-height: 72px;
+  overflow: auto;
+}
+
+.run-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 4px 2px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  max-width: 260px;
+}
+
+.run-chip:hover {
+  border-color: var(--accent);
+}
+
+.run-chip.active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.run-chip.running .run-chip-state {
+  color: var(--warn);
+}
+
+.run-chip-state {
+  font-size: 10px;
+}
+
+.run-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-chip-close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 4px;
+  line-height: 1.2;
+  border-radius: 50%;
+}
+
+.run-chip-close:hover {
+  color: var(--err);
+}
+
+.run-tasks-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
 }

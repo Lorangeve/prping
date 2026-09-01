@@ -10,10 +10,17 @@ name = "prping"
 path = "src/main.rs"
 
 [features]
+# web 子命令（`prping web`）。**默认不启用**：关闭时整个 web 模块不编译、CLI 无
+# web 子命令（产物体积更小）。整 workspace 统一由 justfile 的 build/check/test
+# 配方以 --features prping/web 启用（包名已限定，避免与 prping-core 同名 feature
+# 歧义）。透传并启用 prping-core/web。
+web = ["prping-core/web"]
+
 # 透传 prping-core 的 web-embed（rust-embed 内嵌 Web 前端；默认不嵌入，
 # 运行期读二进制目录/启动目录的 UI/ 文件夹）。
+# 隐含启用 web：内嵌只对 web 子命令有意义。
 # 用法：cargo build -p prping --features web-embed（workspace 根需包名限定）
-web-embed = ["prping-core/web-embed"]
+web-embed = ["web", "prping-core/web-embed"]
 
 # 编译期把 assets/images/icon.ico 嵌进 Windows exe 资源（见 build.rs）。
 # 不用 [target.'cfg(windows)'.build-dependencies]：其 cfg 匹配的是 host，

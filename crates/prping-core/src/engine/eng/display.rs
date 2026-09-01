@@ -6,7 +6,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use packet_dsl::DefaultSerializer;
 use packet_dsl::ir::{Layer, MacAddr, PacketSpec};
@@ -16,8 +16,8 @@ use termcolor::WriteColor;
 
 use crate::engine::eng::{libs_display, value_display};
 use crate::output::{
-    print_bold, print_cyan, print_dim, print_green, print_magenta, print_orange, print_red,
-    print_yellow, spaces, writeln_orange,
+    print_bold, print_cyan, print_dim, print_green, print_magenta, print_red, print_yellow, spaces,
+    writeln_orange,
 };
 use crate::util::hex_str;
 
@@ -972,49 +972,9 @@ fn render_sniffer_pred<W: WriteColor>(
     Ok(())
 }
 
-/// 监听应答模板文件的解析展示（`engine` 只做解析、不发包）：`reply(层,字段)`
-/// 需 `--wait --raw` 监听上下文才能求值，此处不展开包，只展示模块结构
-/// （defs / sniffer / params / libs）并说明原因。
-pub(crate) fn render_listen_template<W: WriteColor>(
-    w: &mut W,
-    path: &Path,
-    module: &Module,
-    libs: &[PathBuf],
-    params: &[(String, String)],
-) -> io::Result<()> {
-    print_magenta(w, "prping engine")?;
-    writeln!(w)?;
-    print_cyan(w, "module: ")?;
-    print_bold(w, &module.name)?;
-    print_dim(w, format!("{}default: yes (应答模板，未展开)", spaces(2)))?;
-    writeln!(w)?;
-    print_dim(w, format!("file: {}", path.display()))?;
-    writeln!(w)?;
-    if !module.defs.is_empty() {
-        let names: Vec<&str> = module.defs.iter().map(|d| d.name.as_str()).collect();
-        print_dim(w, format!("defs: {}", names.join(", ")))?;
-        writeln!(w)?;
-    }
-    if let Some(sn) = &module.sniffer {
-        print_dim(w, "sniffer:")?;
-        writeln!(w)?;
-        for pred in &sn.clauses {
-            render_sniffer_pred(w, pred, 2)?;
-        }
-    }
-    if !params.is_empty() {
-        let p_str: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        print_dim(w, format!("params: {}", p_str.join(", ")))?;
-        writeln!(w)?;
-    }
-    print_dim(w, format!("libs: {}", libs_display(libs)))?;
-    writeln!(w)?;
-    print_orange(w, t!("engine.listen_template_note"))?;
-    writeln!(w)?;
-    Ok(())
-}
-
 /// sniffer 匹配值的展示（字面量按值展示；Ident = 发包字段引用；表达式按值展示）。
+/// （监听应答模板的解析展示已随该能力移除——`reply(层,字段)` 现为配方 extract
+/// 专用原语，.pkt 内出现即普通诊断错误。）
 pub(crate) fn sniffer_value_display(v: &packet_dsl::SnifferValue) -> String {
     use packet_dsl::SnifferValue;
     match v {

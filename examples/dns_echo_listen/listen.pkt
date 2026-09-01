@@ -1,0 +1,10 @@
+# server 配方 · 步骤 1：持续监听（wait: 无值）——本包有 udp 传输层 → 自动选
+# UDP 数据报监听（绑定 :53，载荷反解后按 sniffer 匹配），命中后配方继续。
+#
+# 监听规则：DNS 查询（QR=0）。dport=53 用于推导监听绑定地址；
+# 绑定 53 端口需 root/管理员（或用 -p port= 改成高位端口实验）。
+p = raw(bytes="")
+use(p) |> udp(dport=53) |> ipv4(dst="127.0.0.1") |> eth()
+
+sniffer:
+  - match dns(flags=0x0100)

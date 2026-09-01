@@ -22,6 +22,7 @@
 //! 设计文档见仓库内 `DESIGN.md`。
 
 pub mod ast;
+pub mod check;
 mod codec;
 pub mod diag;
 pub mod dissect;
@@ -37,6 +38,7 @@ pub mod serialize;
 pub mod stack;
 mod tpl;
 pub use ast::{SnifferSpec, SnifferValue};
+pub use check::check_module;
 pub use proto::{
     CtxCond, MatchFn, MatchTarget, MatchVal, ProtoHit, ProtoVal, ResolvedProto, Rule, RuleCond,
     parse_cond, parse_header, parse_proto, proto_registry, set_proto_registry,
@@ -56,8 +58,9 @@ pub use matchpred::{
     reply_field_names, sniffer_match, sniffer_match_with,
 };
 pub use semantic::{
-    Def, LibExport, Module, ResolvedImport, default_libs, lib_exports, lib_functions, parse_file,
-    parse_file_with_libs, parse_source_at, parse_source_at_with_libs, parse_str,
+    Def, DefinitionSite, LibExport, Module, ResolvedImport, default_libs, lib_exports,
+    lib_functions, lib_module_paths, parse_file, parse_file_with_libs, parse_source_at,
+    parse_source_at_with_libs, parse_str,
 };
 pub use serialize::{DefaultSerializer, SerializeError, Serializer};
 pub use stack::{StackWarning, StackWarningKind, stack_warnings};

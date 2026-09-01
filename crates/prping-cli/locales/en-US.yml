@@ -88,7 +88,7 @@ errors:
   lsp_requires_eng: "--lsp only applies with --eng"
   raw_requires_pkg: "--raw only applies with --pkt"
   iface_requires_raw: "--iface only applies with --pkt --raw"
-  listen_conflict: "continuous listen (bare --wait) cannot be combined with --fuzz/--out (receives and echoes; --raw = link-layer listen, pairs with --iface)"
+  listen_conflict: "continuous listen (bare --wait) cannot be combined with --fuzz/--out (receives and prints match details; --raw = link-layer listen, pairs with --iface)"
   listen_raw_no_target: "--wait --raw (link-layer listen) takes no ADDR:PORT (frames are addressed by their MAC/IP fields)"
   params_requires_eng_pkg: "--params only applies with --eng or --pkt"
   params_format: "--params expects k=v format: `%{value}`"
@@ -211,7 +211,7 @@ help:
     pkt_count: send each packet N times (overridden by a recipe step `count:`; not with bare --wait)
     wait: >-
       Wait/match mode: `--wait SECS` sends then waits for one matching reply (like scapy sr1), prints RTT and dissects it;
-      bare `--wait` or a negative value (e.g. `--wait=-2`) waits forever / listens continuously (server side: echo/reply on match, Ctrl+C to stop)
+      bare `--wait` or a negative value (e.g. `--wait=-2`) waits forever / listens continuously (server side, pure listen: prints match details, Ctrl+C to stop)
     fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkt)
     out: Save built packets to a pcap file (like scapy wrpcap, with --pkt)
     summary: 'Summary mode: print a single result line (packet count, target, sent/failed); suppress per-packet detail'
@@ -223,7 +223,7 @@ help:
     skip: Skip the first N pcap records when converting (with --to-pkt)
     limit: Convert at most N pcap records (with --to-pkt)
     threads: 'Convert with N parallel threads (0 = auto: parallel when ≥1024 records; 1 = single-threaded)'
-    lib: pkglang library directory (repeatable; engine/packet, after the default eng_lib)
+    lib: pkglang library directory (repeatable; engine/packet, after the default lib/ directory)
     quiet: Suppress per-ping output
     histogram: 'Histogram: bucket count (e.g. 20) or comma-separated thresholds in ms (e.g. 1,5,10,50)'
     warmup: Warmup iterations (default 4)

@@ -13,3 +13,7 @@ frontend/dist/*
 # npm/playwright 本地缓存与临时工具目录（误生成不入库）
 .npm-cache/
 .pw-test/
+
+# just dotenv 本地配置（set dotenv-load；不提交）
+.env
+

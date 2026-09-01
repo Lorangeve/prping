@@ -2,19 +2,35 @@
 // 数据流：编辑 →（防抖）→ LSP didChange + analyze 请求 → 诊断/层栈/HEX 更新。
 // 文件面：工作区（examples / 自定义文件夹）可编辑保存（Ctrl+S），eng_lib 只读。
 
-import { For, Index, createMemo, onCleanup, onMount, createSignal, Show } from "solid-js";
+import { For, Index, createEffect, createMemo, onCleanup, onMount, createSignal, Show } from "solid-js";
 
 /** analyze 应答带的运行参数声明（params("名", 默认)）。 */
 interface DeclParam {
   name: string;
   default: string | null;
 }
+
+/** 导航历史条目：文件 + 落点行（null = 文件级打开，离开时回填光标行）。 */
+interface NavEntry {
+  root: "ws" | "lib";
+  path: string;
+  line0: number | null;
+}
 import type { EditorView } from "@codemirror/view";
-import { applyDiagnostics, createEditor, revealLine, setDoc, setEditable } from "./cm";
+import {
+  applyDiagnostics,
+  createEditor,
+  revealLine,
+  revealPos,
+  setDoc,
+  setEditable,
+  setLinkMode,
+  setLinkScope,
+} from "./cm";
 import { FileSidebar, FolderDialog, type CurrentFile, type TreeEntry } from "./files";
 import { draftKey, Keys, kvDel, kvGet, kvSet } from "./store";
 import { LspClient, type LspDiagnostic } from "./lsp";
-import type { AnalyzeDoc, Panel } from "./panels";
+import type { AnalyzeDoc, Panel, RunExitState, RunLine, RunSettings, RunTask } from "./panels";
 import {
   DiagnosticsPanel,
   GlobalsPanel,
@@ -23,6 +39,7 @@ import {
   OutlinePanel,
   PanelTabs,
   RecipePanel,
+  RunPanel,
   type OutlineSym,
   type RecipeDoc,
 } from "./panels";
@@ -53,6 +70,8 @@ export function App() {
   };
   // 文档大纲（LSP documentSymbol；.pkt 编辑器 Outline 页签）
   const [symbols, setSymbols] = createSignal<OutlineSym[]>([]);
+  // 内置原语名单（config.json 一次性下发）：跳转高亮据此排除「无定义可跳」的调用名
+  const [builtins, setBuiltins] = createSignal<Set<string>>(new Set());
   // Layers 页签顶的运行参数：文件声明过（params("名", 默认)）则渲染结构化输入行，
   // 否则退回自由文本 k=v；值随每次 analyze 传给服务端构建
   const [runParams, setRunParams] = createSignal("");
@@ -61,6 +80,29 @@ export function App() {
 
   const [panel, setPanel] = createSignal<Panel>("layers");
   const [version, setVersion] = createSignal("");
+
+  // ── 执行（Run 页签）────────────────────────────────────
+  // 服务端 spawn 自身 CLI 的 packet 子命令（web/run.rs）；run_id 关联流式输出。
+  // 多标签并行运行：每个 run 一个任务卡（任务管理），chip 切换控制台。
+  const [runSettings, setRunSettings] = createSignal<RunSettings>({
+    target: "",
+    count: "1",
+    wait: "",
+    listen: false,
+    fuzz: false,
+    raw: false,
+    iface: "",
+    json: true, // 默认 JSONL 结构化渲染（listen 时自动失效）
+  });
+  const [runTasks, setRunTasks] = createSignal<RunTask[]>([]);
+  const [activeRunId, setActiveRunId] = createSignal<string | null>(null);
+  // 控制台行数上限（与 MAX_RUN_LINES 转发上限独立；超限从头丢弃）
+  const MAX_UI_RUN_LINES = 4000;
+  // 任务卡数量上限：超出丢弃最旧（服务端并发另有全局 8 上限）
+  const MAX_UI_RUN_TASKS = 12;
+  // 当前视图的任务 / 全局运行中计数（页签 ● 徽标）
+  const activeTask = () => runTasks().find((t) => t.id === activeRunId()) ?? null;
+  const runningCount = () => runTasks().filter((t) => t.running).length;
 
   // Markdown 视图：渲染（renderMarkdown HTML）/ 编辑（源码）——仅 .md 文件用
   const [mdMode, setMdMode] = createSignal<"render" | "edit">("render");
@@ -78,6 +120,13 @@ export function App() {
     null,
   );
 
+  // ── 导航历史（返回/前进）────────────────────────────────
+  // 落点条目 = 文件 + 打开/跳转时的行。离开某条目时把其行号刷新为光标行，
+  // 「返回」因此能回到离开时的位置（含同文件内的定义跳转）。
+  const [navList, setNavList] = createSignal<NavEntry[]>([]);
+  const [navIdx, setNavIdx] = createSignal(-1);
+  let navigating = false; // 返回/前进触发的文件打开不再入栈
+
   let editorHost!: HTMLDivElement;
   let view: EditorView;
   let autoOpened = false; // 首次连接后自动打开一个工作区文件（重连不重复触发）
@@ -92,6 +141,22 @@ export function App() {
   // 服务端 → 客户端的 LSP 消息（initialize 应答 / publishDiagnostics / 补全悬停
   // 应答）全部经此回调进入 LspClient——漏接则诊断与补全全哑
   client.onLsp = (m) => lsp.handle(m);
+
+  // packet 运行输出/终态（run 信封启动后按 run_id 归入对应任务卡；断线重连后
+  // 旧会话的 run 已被服务端收杀，未知 id 的输出直接忽略）
+  client.onRunOut = (run, stream, text) => {
+    setRunTasks((ts) => {
+      const idx = ts.findIndex((t) => t.id === run);
+      if (idx < 0) return ts;
+      const t = ts[idx];
+      const next = [...t.lines, { stream, text }];
+      const lines = next.length > MAX_UI_RUN_LINES ? next.slice(next.length - MAX_UI_RUN_LINES) : next;
+      return [...ts.slice(0, idx), { ...t, lines }, ...ts.slice(idx + 1)];
+    });
+  };
+  client.onRunExit = (run, exit) => {
+    setRunTasks((ts) => ts.map((t) => (t.id === run ? { ...t, exit, running: false } : t)));
+  };
 
   // 诊断推送 → 编辑器 squiggle + 右侧面板（Markdown 打开时忽略旧文档残留推送）
   lsp.onDiagnostics = (d) => {
@@ -109,9 +174,41 @@ export function App() {
   // 文档是否引用运行参数（params(...)）：完全没用就不渲染 params 输入区
   const usesRunParams = () => /\bparams\s*\(/.test(text());
 
+  // 可跳名字集（Ctrl 高亮/候选判定用）：本地符号（defs/funcs/exports/默认导出
+  // 名，来自 documentSymbol）+ import 行引入的名字（含 as 别名）与模块名。
+  // 注意放 text/view 声明之后——Solid 的 memo 创建即求值。
+  const linkNames = createMemo(() => {
+    const names = new Set<string>();
+    for (const s of symbols()) names.add(s.name);
+    for (const line of text().split("\n")) {
+      const m = /^\s*import\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*\{([^}]*)\})?/.exec(line);
+      if (!m) continue;
+      names.add(m[1]!);
+      if (m[2]) {
+        for (const item of m[2].split(",")) {
+          const name = item.trim().split(/\s+as\s+/i)[0]?.trim();
+          if (name) names.add(name);
+        }
+      }
+    }
+    return names;
+  });
+
+  createEffect(() => {
+    // 先读依赖再判 view：guard 放前面会让 Solid 首次运行不跟踪任何依赖，
+    // effect 永不重跑，scope 恒为空集（高亮/点击脱节）。
+    const names = linkNames();
+    const b = builtins();
+    if (!view) return;
+    setLinkScope(view, { names, builtins: b });
+  });
+
   client.onStatus = (s) => {
     setStatus(s);
     if (s === "connected") {
+      // 重连 = 新 WS 会话：旧会话的运行已被服务端收杀，任务卡随之清空
+      setRunTasks([]);
+      setActiveRunId(null);
       // 首连与重连统一在此初始化（WS OPEN 后才可发送）：重建 LSP 会话并
       // 重放当前文档、刷新分析/库列表/工作区树（重连后服务端工作区回到默认）
       if (!isMd()) {
@@ -297,6 +394,117 @@ export function App() {
     return parseRunParams(runParams());
   }
 
+  // ── 执行（Run 页签 / 顶栏 ▶）────────────────────────────
+
+  const isPktFile = () => {
+    const p = (current()?.path ?? "").toLowerCase();
+    return p.endsWith(".pkt") || p.endsWith(".pktl");
+  };
+  // 只运行工作区文件（库文件只读；服务端同样按工作区根解析校验）
+  const canRun = () => current()?.root === "ws" && isPktFile();
+
+  /** 选项快照 → run 信封字段（空值字段不发，服务端按 CLI 缺省）。 */
+  function buildRunOpts(name: string) {
+    const s = runSettings();
+    const wait: number | true | undefined = s.listen
+      ? true
+      : s.wait.trim() === ""
+        ? undefined
+        : Number(s.wait);
+    const count =
+      s.count.trim() === "" || Number(s.count) === 1 ? undefined : Number(s.count);
+    return {
+      name,
+      target: s.target.trim() || undefined,
+      params: buildRunParams(),
+      count: Number.isFinite(count) ? count : undefined,
+      wait: typeof wait === "number" && !Number.isFinite(wait) ? undefined : wait,
+      fuzz: s.fuzz || undefined,
+      raw: s.raw || undefined,
+      iface: s.raw && s.iface.trim() ? s.iface.trim() : undefined,
+      // listen（裸 --wait）与 --json 冲突：CLI 校验会拒绝，前端直接不发
+      json: s.json && !s.listen || undefined,
+    };
+  }
+
+  async function doRun() {
+    const cur = current();
+    if (!cur) return;
+    if (!canRun()) {
+      setFileMsg("run: open a workspace .pkt/.pktl file first");
+      return;
+    }
+    // 选项快速校验（服务端只兜底，这里给即时反馈）
+    const s = runSettings();
+    if (!s.listen && s.wait.trim() !== "" && (!Number.isFinite(Number(s.wait)) || Number(s.wait) < 0)) {
+      setFileMsg("run: wait must be a non-negative number of seconds");
+      return;
+    }
+    if (s.count.trim() !== "" && (!Number.isInteger(Number(s.count)) || Number(s.count) < 1)) {
+      setFileMsg("run: count must be a positive integer");
+      return;
+    }
+    // Run = 执行所见：未保存修改先落盘（失败即中止——运行的必须是磁盘内容）
+    if (dirty()) {
+      await saveCurrent();
+      if (text() !== savedText()) {
+        setFileMsg("run: save failed — fix the file and retry");
+        return;
+      }
+    }
+    const res = await client.run(buildRunOpts(cur.path));
+    if (!res.ok) {
+      setFileMsg("run: " + res.error);
+      return;
+    }
+    // 新任务卡入列（超上限丢最旧）；视图切到新任务
+    const task: RunTask = {
+      id: (res.data as { run: string }).run,
+      file: cur.path,
+      lines: [],
+      exit: null,
+      running: true,
+    };
+    setRunTasks((ts) => {
+      const next = [...ts, task];
+      return next.length > MAX_UI_RUN_TASKS ? next.slice(next.length - MAX_UI_RUN_TASKS) : next;
+    });
+    setActiveRunId((curId) =>
+      runTasks().some((t) => t.id === curId) ? curId : task.id,
+    );
+    setPanelPersist("run");
+  }
+
+  async function doStop() {
+    const id = activeRunId();
+    if (!id) return;
+    await client.runStop(id); // 终态经 run_exit 回调落地
+  }
+
+  /** 任务管理：停止单个任务（chip ✕ / 列表操作）；终态经 run_exit 落地后由 onCloseTask 移除 */
+  async function onStopTask(id: string) {
+    await client.runStop(id);
+  }
+
+  /** 从任务列表移除一个任务（运行中的先停）；若是当前视图则切到相邻任务 */
+  function onCloseTask(id: string) {
+    setRunTasks((ts) => {
+      const idx = ts.findIndex((t) => t.id === id);
+      if (idx < 0) return ts;
+      if (ts[idx].running) void client.runStop(id);
+      const next = ts.filter((t) => t.id !== id);
+      setActiveRunId((cur) =>
+        cur === id ? (next[idx]?.id ?? next[next.length - 1]?.id ?? null) : cur,
+      );
+      return next;
+    });
+  }
+
+  function updateRunSettings(s: RunSettings) {
+    setRunSettings(s);
+    void kvSet(Keys.runSettings, s);
+  }
+
   /** 工作区文件 → file:// URI（Windows 盘符路径折叠为 /C:/ 形式；LSP/analyze
    *  据此把 import 解析到文件所在目录，模块名取文件名）。 */
   function fileUri(root: string, rel: string): string {
@@ -308,6 +516,8 @@ export function App() {
   /** 打开文件的统一落点：替换编辑器文档 + LSP 会话重放 + 立即分析。
    *  `saved` 为磁盘文本（草稿恢复时与编辑器文本不同 → 呈现未保存状态）。 */
   function applyOpen(file: CurrentFile, content: string, uri: string, saved?: string) {
+    // 离开位置要在换文档前抓（此后光标随 setDoc 落回新文档开头）
+    const depart = navDeparture();
     setDoc(view, content);
     setText(content);
     setSavedText(saved ?? content);
@@ -317,6 +527,10 @@ export function App() {
     setDeclParams([]); // 新文件的参数声明待首次 analyze 返回
     setPendingDraft(null);
     setEditable(view, file.root === "ws");
+    // 跳转链接模式随文件类型切换（md 无跳转目标）
+    setLinkMode(view, isMd() ? "md" : isPktl() ? "pktl" : "pkt");
+    // 入导航栈（返回/前进的落点）；返回/前进自身的打开经 navigating 跳过
+    pushNav({ root: file.root, path: file.path, line0: null }, depart);
     if (isMd()) {
       // Markdown：不进 LSP 会话（诊断/补全/悬停停用）；清残留诊断与面板
       setDiags([]);
@@ -404,6 +618,216 @@ export function App() {
     void openWsFile(parts.join("/"));
   }
 
+  // ── 跳转（go-to-definition）与导航历史 ────────────────────
+
+  /** 光标当前行（0 基）；编辑器未就绪时 null。 */
+  function cursorLine0(): number | null {
+    if (!view) return null;
+    try {
+      return view.state.doc.lineAt(view.state.selection.main.head).number - 1;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 离开位置快照（当前文件 + 光标行）。跨文件打开要在 setDoc/setCurrent 之前
+   *  抓取——那时编辑器仍是旧文档，光标还在离开处。 */
+  function navDeparture(): { root: "ws" | "lib" | null; path: string | null; line0: number | null } | null {
+    const cur = current();
+    return cur ? { root: cur.root, path: cur.path, line0: cursorLine0() } : null;
+  }
+
+  /** 记录一次导航落点：先把离开条目的行号刷新为离开时的光标行（返回时回到
+   *  离开处），再截断前进分支并追加。同文件同行去重；上限 200 条。 */
+  function pushNav(
+    entry: NavEntry,
+    depart: ReturnType<typeof navDeparture> | null = navDeparture(),
+  ) {
+    if (navigating) return;
+    const list = navList();
+    const idx = navIdx();
+    if (
+      idx >= 0 &&
+      idx < list.length &&
+      depart?.root != null &&
+      depart?.path != null &&
+      list[idx].root === depart.root &&
+      list[idx].path === depart.path
+    ) {
+      list[idx] = { ...list[idx], line0: depart.line0 ?? list[idx].line0 };
+    }
+    const merged = list.slice(0, idx + 1);
+    const top = merged[merged.length - 1];
+    if (top && top.root === entry.root && top.path === entry.path && top.line0 === entry.line0) {
+      return;
+    }
+    merged.push(entry);
+    if (merged.length > 200) merged.splice(0, merged.length - 200);
+    setNavList(merged);
+    setNavIdx(merged.length - 1);
+  }
+
+  /** 返回/前进：打开目标文件或在本文件定位到落点行。 */
+  async function navTo(target: number) {
+    const entry = navList()[target];
+    if (!entry || target === navIdx()) return;
+    navigating = true;
+    try {
+      setNavIdx(target);
+      const cur = current();
+      if (cur?.root === entry.root && cur?.path === entry.path) {
+        if (view && entry.line0 != null) revealPos(view, entry.line0);
+        return;
+      }
+      await (entry.root === "ws" ? openWsFile(entry.path) : openLib(entry.path));
+      const landed = current();
+      if (
+        landed?.root === entry.root &&
+        landed?.path === entry.path &&
+        view &&
+        entry.line0 != null
+      ) {
+        revealPos(view, entry.line0);
+      }
+    } finally {
+      navigating = false;
+    }
+  }
+
+  const navBack = () => void navTo(navIdx() - 1);
+  const navForward = () => void navTo(navIdx() + 1);
+
+  /** 打开文件并定位到目标行（定义跳转的统一落点；入导航栈）。 */
+  async function openAndReveal(
+    root: "ws" | "lib",
+    path: string,
+    line0 = 0,
+    char0?: number,
+    charEnd?: number,
+  ) {
+    const same = current()?.root === root && current()?.path === path;
+    if (same) {
+      pushNav({ root, path, line0 });
+    } else {
+      await (root === "ws" ? openWsFile(path) : openLib(path));
+      const cur = current();
+      if (cur?.root !== root || cur?.path !== path) return; // 打开失败（fileMsg 已提示）
+      // applyOpen 已按文件级落点入栈（line0=null）：补上实际定位行
+      const idx = navIdx();
+      const list = navList();
+      if (idx >= 0 && list[idx] && list[idx].root === root && list[idx].path === path) {
+        setNavList(list.map((e, i) => (i === idx ? { ...e, line0 } : e)));
+      }
+    }
+    if (view) revealPos(view, line0, char0, charEnd);
+  }
+
+  /** file:// URI → 本地路径（解码 %XX；Windows 盘符折算 /C:/ → C:/）。 */
+  function uriToPath(uri: string): string {
+    let p = uri.startsWith("file://") ? uri.slice("file://".length) : uri;
+    try {
+      p = decodeURIComponent(p);
+    } catch {
+      /* 保留原样 */
+    }
+    p = p.replace(/\\/g, "/");
+    if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1);
+    return p;
+  }
+
+  /** 路径段后缀匹配长度（定义目标与工作区树/库清单的符号链接兜底比较用）。 */
+  function commonSuffixK(a: string[], b: string[]): number {
+    let k = 0;
+    while (k < a.length && k < b.length && a[a.length - 1 - k] === b[b.length - 1 - k]) k++;
+    return k;
+  }
+
+  /** 定义目标绝对路径 → 可打开条目：工作区/库目录前缀优先（服务端 canonicalize
+   *  过，这里同样规整），前缀不匹配（符号链接/挂载差异）按路径后缀在工作区树
+   *  与库清单里找最长命中。 */
+  function matchOpenable(p: string): { root: "ws" | "lib"; path: string } | null {
+    const norm = (s: string) => s.replace(/\\/g, "/").replace(/\/+$/, "");
+    const root = wsRoot();
+    if (root) {
+      const r = norm(root);
+      if (p === r || p.startsWith(`${r}/`)) return { root: "ws", path: p.slice(r.length + 1) };
+    }
+    for (const dir of libDirs()) {
+      const d = norm(dir);
+      if (p === d || p.startsWith(`${d}/`)) {
+        const rel = p === d ? p.split("/").pop()! : p.slice(d.length + 1);
+        // 库读取只收文件名（read_lib_file 限单段）；子目录文件回退按名匹配
+        const path = rel.includes("/") ? (rel.split("/").pop() ?? rel) : rel;
+        return { root: "lib", path };
+      }
+    }
+    const segs = p.split("/");
+    let best: { root: "ws" | "lib"; path: string; k: number } | null = null;
+    for (const e of entries()) {
+      if (e.dir) continue;
+      const k = commonSuffixK(segs, e.path.split("/"));
+      if (k > 0 && (!best || k > best.k)) best = { root: "ws", path: e.path, k };
+    }
+    for (const f of libs()) {
+      const k = commonSuffixK(segs, f.split("/"));
+      if (k > 0 && (!best || k > best.k)) best = { root: "lib", path: f, k };
+    }
+    return best ? { root: best.root, path: best.path } : null;
+  }
+
+  /** go-to-definition：LSP definition → 打开目标文件（跨文件）或本文件跳行。
+   *  目标是定义名的 span，落点选中名字整体。 */
+  async function gotoDefinition(pos: { line: number; character: number }) {
+    if (isMd() || isPktl()) return;
+    // 先同步全文（didChange 有 250ms 防抖，直接查会打在旧文本上——与补全/悬停同法）
+    lsp.change(text());
+    const res = await lsp.definition(pos.line, pos.character);
+    const loc = Array.isArray(res) ? res[0] : res;
+    if (!loc?.uri) {
+      const word = wordAround(pos);
+      setFileMsg(word ? `no definition found for “${word}”` : "no definition found");
+      return;
+    }
+    const line0 = loc.range?.start?.line ?? 0;
+    const char0 = loc.range?.start?.character;
+    const charEnd = loc.range?.end?.character;
+    const target = matchOpenable(uriToPath(String(loc.uri)));
+    if (!target) {
+      setFileMsg(`definition target is outside the workspace and libraries: ${uriToPath(String(loc.uri))}`);
+      return;
+    }
+    await openAndReveal(target.root, target.path, line0, char0, charEnd);
+  }
+
+  /** 点击位置所在标识符（无定义提示文案用）。 */
+  function wordAround(pos: { line: number; character: number }): string {
+    const lineText = text().split("\n")[pos.line] ?? "";
+    const w = (c: string) => /[A-Za-z0-9_]/.test(c);
+    let s = Math.min(pos.character, lineText.length);
+    let e = s;
+    while (s > 0 && w(lineText[s - 1]!)) s--;
+    while (e < lineText.length && w(lineText[e]!)) e++;
+    return lineText.slice(s, e);
+  }
+
+  /** .pktl 步骤文件 token 单击：按配方所在目录解析相对路径并打开。
+   *  与 Recipe 面板的 openRecipePkg 不同：token 是编辑器里写的相对引用。 */
+  function openRecipePkgToken(token: string) {
+    const cur = current();
+    if (!cur || cur.root !== "ws") {
+      setFileMsg("packet file lives outside the current workspace");
+      return;
+    }
+    const dir = cur.path.includes("/") ? cur.path.slice(0, cur.path.lastIndexOf("/") + 1) : "";
+    const parts: string[] = [];
+    for (const seg of `${dir}${token}`.replace(/\\/g, "/").split("/")) {
+      if (!seg || seg === ".") continue;
+      if (seg === "..") parts.pop();
+      else parts.push(seg);
+    }
+    void openAndReveal("ws", parts.join("/"), 0);
+  }
+
   /** 丢弃编辑器内容与本地草稿，回到磁盘版本（草稿被污染时的逃生门）。 */
   async function reloadFromDisk() {
     const cur = current();
@@ -471,6 +895,17 @@ export function App() {
       }
       // 删除打开中的文件：缓冲保留（保存即重建）
       if (current()?.root === "ws" && current()?.path === path) setSavedText(text());
+      // 导航历史剔除被删条目（目录删除连子路径一起），游标收拢到相邻条目
+      const idx = navIdx();
+      let nextIdx = idx;
+      const kept = navList().filter((e, i) => {
+        const hit =
+          e.root === "ws" && (e.path === path || (isDir && e.path.startsWith(`${path}/`)));
+        if (hit && i <= idx) nextIdx -= 1;
+        return !hit;
+      });
+      setNavList(kept);
+      setNavIdx(kept.length ? Math.min(Math.max(nextIdx, 0), kept.length - 1) : -1);
       void refreshTree();
     } else {
       setFileMsg(`delete failed: ${res.error}`);
@@ -501,6 +936,8 @@ export function App() {
       if (last?.root === "ws" && last.path === path) {
         void kvSet(Keys.lastFile, { root: "ws", path: to });
       }
+      // 导航历史里的旧路径一并改写（返回/前进不落空）
+      setNavList(navList().map((e) => (e.root === "ws" && e.path === path ? { ...e, path: to } : e)));
       void refreshTree();
     } else {
       setFileMsg(`rename failed: ${res.error}`);
@@ -560,6 +997,15 @@ export function App() {
       e.preventDefault();
       void saveCurrent();
     }
+    // 导航历史（VS Code 惯例键位；浏览器自身历史导航被 preventDefault 拦下）
+    if (e.altKey && e.key === "ArrowLeft") {
+      e.preventDefault();
+      navBack();
+    }
+    if (e.altKey && e.key === "ArrowRight") {
+      e.preventDefault();
+      navForward();
+    }
   }
 
   function setPanelPersist(p: Panel) {
@@ -583,12 +1029,16 @@ export function App() {
         lsp.change(text());
         return lsp.hover(pos.line, pos.character);
       },
+      // 跳转：Ctrl/Cmd/Alt+单击标识符 / 单击 import 模块名；.pktl 步骤文件名单击
+      onGoto: (pos) => void gotoDefinition(pos),
+      onGotoPktlFile: (t) => openRecipePkgToken(t),
     });
 
-    // 配置（版本号 + WS 路径）
+    // 配置（版本号 + WS 路径 + 内置原语名单）
     try {
       const cfg = await fetch("/config.json").then((r) => r.json());
       setVersion(cfg.version ?? "");
+      if (Array.isArray(cfg.builtins)) setBuiltins(new Set(cfg.builtins as string[]));
     } catch {
       /* dev 代理未起时忽略 */
     }
@@ -597,7 +1047,11 @@ export function App() {
 
     // 恢复持久化的面板选择（IndexedDB 不可用时静默跳过）
     void kvGet<Panel>(Keys.panel).then((p) => {
-      if (p === "diagnostics" || p === "layers" || p === "hex") setPanel(p);
+      if (p === "diagnostics" || p === "layers" || p === "hex" || p === "run") setPanel(p);
+    });
+    // 恢复 Run 选项快照（旧条目缺字段时并入当前默认，避免半快照）
+    void kvGet<RunSettings>(Keys.runSettings).then((s) => {
+      if (s) setRunSettings({ ...runSettings(), ...s });
     });
 
     // 连接成功后的 LSP 会话重建 / 分析刷新 / 库列表 / 目录树统一走
@@ -629,6 +1083,25 @@ export function App() {
         <span class={`status status-${status()}`} title="WebSocket status">
           {statusLabel()}
         </span>
+        {/* 导航历史：定义跳转/文件打开的返回与前进（Alt+← / Alt+→） */}
+        <span class="nav-btns">
+          <button
+            class="nav-btn"
+            disabled={navIdx() <= 0}
+            onClick={navBack}
+            title="Back (Alt+←)"
+          >
+            ←
+          </button>
+          <button
+            class="nav-btn"
+            disabled={navIdx() >= navList().length - 1}
+            onClick={navForward}
+            title="Forward (Alt+→)"
+          >
+            →
+          </button>
+        </span>
         <Show when={current()} keyed>
           {(c) => (
             <span
@@ -656,6 +1129,33 @@ export function App() {
           <button class="save-btn" onClick={() => void saveCurrent()} title="Ctrl+S">
             Save
           </button>
+          <Show when={isPktFile()}>
+            <Show
+              when={!activeTask()?.running}
+              fallback={
+                <button
+                  class="run-stop-btn header"
+                  onClick={() => void doStop()}
+                  title="stop the active run (Run tab manages all tasks)"
+                >
+                  ■ Stop
+                </button>
+              }
+            >
+              <button
+                class="run-go-btn header"
+                disabled={!canRun()}
+                onClick={() => void doRun()}
+                title={
+                  canRun()
+                    ? "run this file with prping packet (Run tab for options)"
+                    : "workspace .pkt/.pktl files only"
+                }
+              >
+                ▶ Run
+              </button>
+            </Show>
+          </Show>
         </Show>
         <Show
           when={pendingDraft() && current()?.root === "ws" && current()?.path === pendingDraft()!.path}
@@ -750,6 +1250,7 @@ export function App() {
             setPanel={setPanelPersist}
             diagCount={diags().length + (buildErrShown() ? 1 : 0)}
             recipe={isPktl()}
+            running={runningCount() > 0}
           />
           {/* 构建错误不再作横幅盖在 Layers/Hex 上——统一进 Diagnostics 页签
               （诊断行 + 页签计数），Layers/Hex 空态给指向提示 */}
@@ -826,8 +1327,26 @@ export function App() {
             <OutlinePanel
               symbols={symbols()}
               onJump={(l) => {
+                const cur = current();
+                if (cur) pushNav({ root: cur.root, path: cur.path, line0: l });
                 if (view) revealLine(view, l);
               }}
+            />
+          </Show>
+          <Show when={panel() === "run"}>
+            <RunPanel
+              tasks={runTasks()}
+              activeId={activeRunId()}
+              setActive={setActiveRunId}
+              settings={runSettings()}
+              setSettings={updateRunSettings}
+              declParams={declParams()}
+              runValues={runValues()}
+              setRunValues={setRunValues}
+              canRun={canRun()}
+              onRun={() => void doRun()}
+              onStopTask={(id) => void onStopTask(id)}
+              onCloseTask={onCloseTask}
             />
           </Show>
           </aside>

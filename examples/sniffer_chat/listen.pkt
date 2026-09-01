@@ -1,10 +1,8 @@
-# 服务端监听规则（prping packet --wait，无值 = 持续监听）：
-# 收到的数据报反解为 DNS 查询（flags=0x0100 且不是应答 0x8180）即回显。
+# server 配方 · 步骤 1：持续监听（wait: 无值）——有 udp 传输层 → 自动选 UDP
+# 数据报监听（绑定 :55353，载荷反解后按 sniffer 匹配），命中后配方继续。
+#
 # 注意：sniffer 字段集只含 proto 实际解析的字段（dns: id/flags——opcode 不
 # 在线格式中独立解析，用 flags 位即可）。
-#
-# 运行：prping packet --wait server.pkt 127.0.0.1:55353
-# （Ctrl+C 停止；省略 127.0.0.1:55353 时按包内 udp dport=55353 推导监听端口）
 #
 # 这里的包定义仅用于推导监听端口（最外层 udp dport）与文档说明；
 # 实际匹配完全由 sniffer 规则决定。sniffer 支持 and/or/not 组合与

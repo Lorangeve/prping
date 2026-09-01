@@ -1,13 +1,14 @@
-# 客户端配方：与 `prping packet --wait server.pkt`（裸 --wait = 持续监听）模拟一次「查询-回显」对话。
+# 客户端配方：与服务端配方 server.pktl（wait: 无值监听触发 + extract + 触发回显）
+# 模拟一次「查询-回显」对话。
 #
 # 运行（两个终端）：
-#   终端 1（服务端）：prping packet --wait examples/sniffer_chat/server.pkt 127.0.0.1:55353
+#   终端 1（服务端）：prping packet examples/sniffer_chat/server.pktl
 #   终端 2（客户端）：prping packet examples/sniffer_chat/client.pktl 127.0.0.1:55353
 #
 # 流程：
-#   步骤 1 发 DNS 查询（id=0x4242）→ 服务端按规则匹配并回显 → 客户端从**发包**
-#         提取真实 dns.id 存入 global.tid（`sent.` 来源，无需 wait）。
-#   步骤 2 用 global("tid") 再发查询 → 服务端回显 → 客户端 `--wait` + sniffer
+#   步骤 1 发 DNS 查询（id=0x4242）→ 服务端配方按规则匹配并重建回发 → 客户端从
+#         **发包**提取真实 dns.id 存入 global.tid（`sent.` 来源，无需 wait）。
+#   步骤 2 用 global("tid") 再发查询 → 服务端配方回显 → 客户端 `wait:` + sniffer
 #         匹配回显（id 与发包一致）→ 从**回包**提取 dns.id 存入 global.echoed_id。
 global:
 - tid=0x1111

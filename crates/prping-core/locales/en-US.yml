@@ -86,8 +86,7 @@ engine:
   note_wait_reply: 'note: waiting up to %{secs}s for a matching reply'
   note_wait_recipe: 'note: waiting up to %{secs}s for replies (per-step wait: overrides)'
   listen_requires_sniffer: 'listen mode requires a `sniffer:` section in the .pkt (match rule for incoming datagrams)'
-  listen_binding: 'listening on %{addr} — echo datagrams matching the sniffer rule (Ctrl+C to stop)'
-  listen_echo_fail: 'echo to %{peer} failed: %{err}'
+  listen_binding: 'listening on %{addr} — match datagrams against the sniffer rule and print details (Ctrl+C to stop)'
   listen_matched: '✓ matched %{bytes} B from %{peer}'
   listen_ignored: '- ignored %{bytes} B from %{peer}'
   listen_done: 'listen finished: %{matched}/%{total} datagrams matched'
@@ -95,9 +94,8 @@ engine:
   listen_multi_dport: 'packet exports use different destination ports (%{ports}); specify ADDR:PORT explicitly'
   listen_send_phase_failed: 'send phase failed — continuing to listen (waiting for the peer): %{error}'
   listen_bind_fail: 'failed to bind %{addr}: %{err}'
-  listen_raw_requires_reply: '--wait --raw needs a reply template: the .pkt default export (use reply("layer","field") to read fields of the received frame)'
-  listen_raw_binding: 'raw listen on %{iface} — match frames with the sniffer rule, inject the reply template on a hit (Ctrl+C to stop; root/Npcap required)'
-  listen_raw_matched: '✓ matched %{frame} B — replied %{sent} B (%{source})'
+  listen_raw_binding: 'raw listen on %{iface} — match frames against the sniffer rule and print details (Ctrl+C to stop; root/Npcap required)'
+  listen_raw_matched: '✓ matched %{frame} B'
   listen_raw_done: 'raw listen finished: %{matched}/%{total} frames matched'
   listen_recipe_udp: 'listening on %{addr}'
   listen_recipe_raw: 'link-layer listen on %{iface}'
@@ -118,7 +116,7 @@ engine:
   parse_retry_zero: '`on_timeout: retry` count must be >= 1'
   recipe_on_timeout_fail: 'failed to send the on_timeout packet: %{err}'
   recipe_extract_no_sent: 'no packet was sent in this step; cannot extract from `sent.` sources'
-  recipe_extract_no_reply: 'no reply received; cannot extract %{n} extract(s) (sniffer/echo did not match)'
+  recipe_extract_no_reply: 'no reply received; cannot extract %{n} extract(s) (sniffer did not match)'
   recipe_extract_failed: 'extract failed (see above)'
   recipe_step_failed_summary: '✗ step %{step}/%{total} failed (%{n} issues)'
   recipe_failed_total: 'recipe %{file}: %{n} step(s) failed'
@@ -190,7 +188,6 @@ engine:
   recipe_as_str: 'need a string or integer'
   recipe_as_bytes: 'to convert a number to bytes, wrap it in the expression with primitives like be16()/u8()'
   recipe_extract_needs_wait: 'step has reply-sourced extract but no wait (`sent.` sources take the sent packet and need no wait; reply sources need this step`s `wait:` (no value or seconds) or `--wait`)'
-  listen_template_note: 'note: reply template — `reply(layer,field)` needs the --wait --raw listen context, packets not expanded (engine only parses, does not send)'
   raw_ip4_need_target: 'raw IPv4 send needs a target address (HOST or the packet IP-layer dst)'
   raw_ip4_not_v4: 'target is not an IPv4 address: %{ip}'
   raw_ip4_send_fail: 'raw IPv4 send failed: %{err}'
@@ -243,7 +240,7 @@ errors:
   lsp_requires_eng: "--lsp only applies with --eng"
   raw_requires_pkg: "--raw only applies with --pkt"
   iface_requires_raw: "--iface only applies with --pkt --raw"
-  listen_conflict: "continuous listen (bare --wait) cannot be combined with --fuzz/--out (receives and echoes; --raw = link-layer listen, pairs with --iface)"
+  listen_conflict: "continuous listen (bare --wait) cannot be combined with --fuzz/--out (receives and prints match details; --raw = link-layer listen, pairs with --iface)"
   params_requires_eng_pkg: "--params only applies with --eng or --pkt"
   params_format: "--params expects k=v format: `%{value}`"
   global_requires_eng_pkg: "--global only applies with --eng or --pkt"
@@ -349,7 +346,7 @@ help:
       Recipe globals injected into the global store (k=v,k2=v2; read via global("name") in the
       script; with a .pktl recipe this seeds global: declarations, -g overrides init)
     wait: Wait up to SECS for a matching reply (like scapy sr1), print RTT and dissect it (with --pkt)
-    listen: 'listen mode: match incoming UDP datagrams against the .pkt sniffer rule and echo them (server side of a pktlang conversation; HOST:PORT is the listen address, derived from the packet dport when omitted)'
+    listen: 'listen mode: match incoming UDP datagrams against the .pkt sniffer rule and print match details (pure listen; responses are orchestrated by a .pktl recipe; HOST:PORT is the listen address, derived from the packet dport when omitted)'
     fuzz: Randomize all unset fields before sending (like scapy fuzz(), with --pkt)
     out: Save built packets to a pcap file (like scapy wrpcap, with --pkt)
     ls: List all builtin layer functions with fields and auto behavior (with --eng)
@@ -409,7 +406,7 @@ help:
       prping packet --raw --wait 2 file.pkt 8.8.8.8
       prping packet arp_request.pkt --raw   # 链路层帧（ARP 等）：目标可省略
       prping packet arp_request.pkt --raw   # link-layer frame (ARP etc.): target optional
-      prping packet --wait server.pkt 127.0.0.1:5353      # bare --wait: continuous listen, echo on match
+      prping packet --wait server.pkt 127.0.0.1:5353      # bare --wait: continuous listen, match and print details
   overview: |-
     prping — ping, latency, bandwidth measurement utility
 
@@ -478,3 +475,10 @@ web:
   ws_mkdir_failed: 'failed to create folder: %{err}'
   ws_target_exists: 'target already exists'
   ws_binary: 'binary or non-UTF-8 file — cannot display'
+  run_spawn_failed: 'failed to spawn packet process: %{err}'
+  run_slot_failed: 'internal slot error — please reconnect'
+  run_too_many: 'too many concurrent runs on the server (max %{max}) — stop some tasks first'
+  run_bad_file: 'only workspace .pkt/.pktl files can be run'
+  run_bad_count: '--count must be a positive integer'
+  run_bad_wait: '--wait must be a non-negative number of seconds (or true for continuous listen)'
+  run_bad_param: 'invalid param/global entry: %{name} (values must not contain commas)'

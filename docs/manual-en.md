@@ -965,8 +965,7 @@ reproduce capture pacing; hand-written recipes can use it too.
 **sniffer block** (reply validation / listen rule): with `--wait`, replies are matched
 against the `sniffer` declaration in the `.pkt` file; a match prints
 `✓ reply matched: field=value (rtt)`, a timeout prints `✗ no matching reply`.
-With a bare `--wait` the same declaration becomes the **listen rule** (match incoming
-datagrams and echo them):
+With a bare `--wait` (or a recipe's no-value `wait:`) the same declaration becomes the **listen rule** (match incoming datagrams and print details):
 
 ```pkt
 sniffer:
@@ -981,29 +980,28 @@ sniffer:
   # listen rules cannot reference sent fields (no sent packet — build-time error)
 ```
 
-**bare `--wait` mode** (server side of a pktlang conversation): `packet --wait FILE.pkt [HOST:PORT]`
-sends the file's send section first if any (a reply template with `reply()` leaves is not sendable and is skipped), then binds a UDP address and keeps receiving datagrams (address derived from the outermost
+**bare `--wait` mode** (pure listen: match + report + stats): `packet --wait FILE.pkt [HOST:PORT]`
+sends the file's send section first if any (a packet with `reply()` leaves fails to
+evaluate → nothing sendable, skipped), then binds a UDP address and keeps receiving datagrams (address derived from the outermost
 udp/tcp dport when omitted), dissects each one and matches the `.pkt` sniffer rule —
-a hit **echoes the datagram back** to the sender (`✓ matched ... from peer` + dissect),
-misses are ignored, Ctrl+C exits and prints match statistics. Pair it with a client
-`--wait` (send + match the reply with the same rule) and two processes can simulate a
-conversation with export + sniffer (demo & walkthrough → `examples/sniffer_chat/`:
-server `packet --wait server.pkt`, client recipe `packet client.pktl`, covering
+a hit prints the match details (`✓ matched ... from peer` + dissect),
+misses are ignored, Ctrl+C exits and prints match statistics. It **does not send
+anything back** — building a response is orchestration and belongs to a `.pktl`
+recipe (`wait:` no-value listen trigger + extract + a later send step; demo &
+walkthrough → `examples/sniffer_chat/`: server recipe `server.pktl`,
+client recipe `packet client.pktl`, covering
 `sent.`/`reply.` extract end to end).
 
-**`--wait --raw` link-layer listen** (full frames): `packet --wait --raw FILE.pkt [--iface NIC]`
+**`--wait --raw` link-layer listen** (full frames, pure listen): `packet --wait --raw FILE.pkt [--iface NIC]`
 keeps receiving **full frames** (Linux AF_PACKET; macOS/Windows via libpcap/Npcap;
-root/admin required), matches the sniffer rule (listen has no sent packet — use
-literals/predicates), and on a hit builds the **reply template** — the `.pkt` default
-export, reading fields of the received frame via `reply("layer","field")` (e.g.
-`icmp(type=0, id=reply("icmp","id"))`) — and raw-injects it; a **bare-IP outer
-template (no eth layer) is injected through the kernel IP stack** (Linux
-IPPROTO_RAW+IP_HDRINCL / macOS protocol raw socket — loopback and LAN need no MAC
-resolution, so macOS lo0 bare-IP frames work too), eth-outer templates still use
-link-layer injection; Ctrl+C stops and prints
-match stats. Demo → `examples/icmp_echo_server/`: `sudo prping packet --wait --raw
-server.pkt`, then `prping ping 127.0.0.1` gets answered by it (a pure-pktlang ICMP
-echo server).
+root/admin required) and matches the sniffer rule (listen has no sent packet — use
+literals/predicates); a hit prints the matched fields + dissect (no reply-template
+injection — `reply("layer","field")` is now a recipe-extract-only primitive and is an
+error inside a `.pkt`); Ctrl+C stops and prints match stats. For a "listen +
+respond" server, use a **`.pktl` recipe**: a no-value `wait:` listen trigger →
+extract into globals → a later step builds and sends the response
+(demos → `examples/icmp_echo_server/`, `examples/tcp_handshake_listen/`,
+`examples/dns_echo_listen/`).
 
 Example:
 

@@ -764,6 +764,51 @@ fn explicit_lib_overrides_default_eng_lib_import() {
     );
 }
 
+/// 库模块进程级缓存（semantic.rs `cached_module`）：文件落盘修改后必须重载，
+/// 不得把旧 AST 串到后续解析（缓存正确性的核心契约）。
+#[test]
+fn cached_lib_module_reloads_on_file_change() {
+    let lib = common::TempDir::new("cache-invalidate-lib");
+    lib.write(
+        "net.pkt",
+        "func net4(dst) { ipv4(dst=dst) |> eth() }
+export:
+- net4
+",
+    );
+    let main = lib.write(
+        "main.pkt",
+        "p = raw(bytes=\"x\")\nuse(p) |> net4(dst=\"1.2.3.4\")\n",
+    );
+    let libs = [lib.path().to_path_buf()];
+    let m1 = packet_dsl::semantic::parse_file_with_libs(&main, &libs).expect("首次解析");
+    assert!(
+        matches!(
+            packet_dsl::resolve(&m1).unwrap().packets[0].layers[1],
+            packet_dsl::ir::Layer::Ipv4(_)
+        ),
+        "首版库：raw+ipv4"
+    );
+    // 改库（net4 换成 UDP 层；内容长度不同 → len 指纹必变）
+    lib.write(
+        "net.pkt",
+        "func net4(dst) { udp(dport=5353) |> ipv4(dst=dst) |> eth() }
+export:
+- net4
+",
+    );
+    let m2 = packet_dsl::semantic::parse_file_with_libs(&main, &libs).expect("库修改后再次解析");
+    let built = packet_dsl::resolve(&m2).expect("求值成功");
+    assert!(
+        built.packets[0]
+            .layers
+            .iter()
+            .any(|l| matches!(l, packet_dsl::ir::Layer::Udp(_))),
+        "库文件修改后缓存应失效重载（拿到新版 net4）: {:?}",
+        built.packets[0].layers
+    );
+}
+
 // ── import 别名（`x as ax`）──────────────────────────────────
 
 /// `import a { x as ax }`：ax 可用且命中 a.x；原名 x 不再可见。

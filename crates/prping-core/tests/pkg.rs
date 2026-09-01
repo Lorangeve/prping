@@ -1174,10 +1174,10 @@ sniffer:\n  - match dns(id=nonexistent_func())\n",
 
 // ── 监听模式（packet --listen）────────────────────────────────
 
-/// 监听模式端到端：按 sniffer 规则匹配收到的 UDP 数据报并**回显**；
-/// 不匹配的数据报被忽略（客户端超时无回包）。
+/// 监听模式端到端（纯监听）：按 sniffer 规则匹配收到的 UDP 数据报；
+/// 匹配与否都**不发包回应**（回应包的构造属编排，由 .pktl 配方完成）。
 #[test]
-fn listen_echoes_matching_datagrams() {
+fn listen_does_not_reply_to_matching_datagrams() {
     ensure_registry();
     prping_core::reset_interrupt();
     let dir = temp_recipe_dir("listen");
@@ -1217,7 +1217,7 @@ sniffer:\n  - match dns(id=0x1234)\n",
     client
         .set_read_timeout(Some(std::time::Duration::from_millis(300)))
         .unwrap();
-    // 1) 不匹配的数据报（id=0x9999）→ 忽略，无回显
+    // 1) 不匹配的数据报（id=0x9999）→ 忽略，无回应
     let bad = {
         let mut b = payload.clone();
         b[0..2].copy_from_slice(&0x9999u16.to_be_bytes());
@@ -1232,12 +1232,19 @@ sniffer:\n  - match dns(id=0x1234)\n",
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut
         ),
-        "不匹配的数据报不应回显"
+        "不匹配的数据报不应回应"
     );
-    // 2) 匹配的数据报 → 原样回显
+    // 2) 匹配的数据报 → 同样不发包回应（纯监听：命中只打印匹配详情）
     client.send_to(&payload, target).unwrap();
-    let (n, _) = client.recv_from(&mut buf).unwrap();
-    assert_eq!(&buf[..n], payload.as_slice(), "回显应字节保真");
+    assert!(
+        matches!(
+            client.recv_from(&mut buf),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut
+        ),
+        "纯监听不应回应匹配的数据报"
+    );
     // 3) 结束监听（模拟 Ctrl+C）
     prping_core::set_interrupted(true);
     handle.join().unwrap().expect("监听正常退出");
@@ -1265,34 +1272,6 @@ fn listen_raw_requires_sniffer_errors() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("sniffer"), "{err}");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// raw 监听缺默认导出（应答模板）→ 报错。
-#[test]
-fn listen_raw_requires_reply_template_errors() {
-    ensure_registry();
-    let dir = temp_recipe_dir("lr-no-reply");
-    std::fs::write(
-        dir.join("s.pkt"),
-        "q = dns(id=1, questions=[\"example.com\"])\nq2 = use(q) |> udp(dport=53) |> ipv4() |> eth()\nexport:\n- q2\nsniffer:\n  - match icmp(type=8)\n",
-    )
-    .unwrap();
-    let err = prping_core::listen_raw_packets(
-        &dir.join("s.pkt"),
-        &PkgOptions {
-            mode: SendMode::Raw { iface: None },
-            ..Default::default()
-        },
-    )
-    .unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("应答模板")
-            || msg.contains("reply template")
-            || msg.contains("listen_raw_requires_reply"),
-        "{msg}"
-    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

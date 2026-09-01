@@ -141,6 +141,14 @@ export class LspClient {
     });
   }
 
+  /** go-to-definition（Location[] | null；跨文件目标 uri 指向目标文件）。 */
+  definition(line: number, character: number): Promise<any> {
+    return this.lspRequest("textDocument/definition", {
+      textDocument: { uri: this.uri },
+      position: { line, character },
+    });
+  }
+
   get documentUri(): string {
     return this.uri;
   }

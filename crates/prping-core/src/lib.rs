@@ -79,6 +79,7 @@ pub(crate) mod ping;
 mod serve;
 mod stats;
 mod util;
+#[cfg(feature = "web")]
 pub mod web;
 
 // ── 公开 API ─────────────────────────────────────────────────────────────
@@ -120,6 +121,7 @@ pub use engine::recipe::{
 };
 
 // Web 编辑器服务器（`prping web`）
+#[cfg(feature = "web")]
 pub use web::{WebConfig, serve_web};
 
 // ── 核心类型 ──────────────────────────────────────────────────────────────

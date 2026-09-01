@@ -849,7 +849,9 @@ pub fn parse_ast(src: &str) -> crate::diag::PktResult<AstFile> {
         return Err(crate::diag::Diagnostic {
             message: e.message.clone(),
             file: None,
-            span: Some(crate::diag::SourceSpan::from_ast(e.span, e.offset, 1)),
+            span: Some(Box::new(crate::diag::SourceSpan::from_ast(
+                e.span, e.offset, 1,
+            ))),
             kind: crate::diag::DiagnosticKind::General,
         });
     }
@@ -865,7 +867,7 @@ pub fn parse_ast(src: &str) -> crate::diag::PktResult<AstFile> {
             message: "`proto` 关键字语法已移除：请改用 `#[proto] func name(params) { concat(...) }`（字段 = concat 参数，可带 `#[meta]` 标注，如 `#[meta(auto)] be16(checksum)`；`#[proto(\"族\")]` 带协议族标签）"
                 .to_string(),
             file: None,
-            span: Some(crate::diag::SourceSpan::from_ast(
+            span: Some(Box::new(crate::diag::SourceSpan::from_ast(
                 crate::ast::Span {
                     start: crate::ast::Pos {
                         line: tok.line,
@@ -878,7 +880,7 @@ pub fn parse_ast(src: &str) -> crate::diag::PktResult<AstFile> {
                 },
                 tok.offset,
                 tok.len,
-            )),
+            ))),
             kind: crate::diag::DiagnosticKind::General,
         });
     }
@@ -1770,7 +1772,9 @@ pub fn parse_value_expr<'src>(src: &'src str) -> crate::diag::PktResult<Value> {
         return Err(crate::diag::Diagnostic {
             message: e.message.clone(),
             file: None,
-            span: Some(crate::diag::SourceSpan::from_ast(e.span, e.offset, 1)),
+            span: Some(Box::new(crate::diag::SourceSpan::from_ast(
+                e.span, e.offset, 1,
+            ))),
             kind: crate::diag::DiagnosticKind::General,
         });
     }
@@ -1809,7 +1813,7 @@ fn render_parse_err<'a, T>(
         return Err(Diagnostic {
             message,
             file: None,
-            span: Some(SourceSpan::from_ast(span, 0, 0)),
+            span: Some(Box::new(SourceSpan::from_ast(span, 0, 0))),
             kind: crate::diag::DiagnosticKind::General,
         });
     }

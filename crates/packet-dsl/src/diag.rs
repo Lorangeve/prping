@@ -27,23 +27,29 @@ impl SourceSpan {
 }
 
 /// 诊断类别：宿主按类别分支处理（避免对消息文本做字符串匹配）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DiagnosticKind {
     /// 普通错误。
     #[default]
     General,
-    /// `reply(层, 字段)` 在无回包上下文中被调用（配方 extract / `--listen --raw`
-    /// 应答模板专用原语）：engine 分析遇到时渲染监听模板而非报错。
+    /// `reply(层, 字段)` 在无回包上下文中被调用（配方 extract 的 `from:`
+    /// 表达式专用原语）：回应包的构造属于编排，一律走 .pktl 配方。
     ReplyOutsideRecipe,
+    /// 未知名字（元件 / 函数 / 调用名）：结构化携带名字，宿主（LSP 打词中间态
+    /// 豁免）按类别分支，无需对消息文本做字符串匹配。
+    UnknownName { name: String },
 }
 
 /// 一条诊断（错误）。
+///
+/// `span` 装箱：错误是冷路径，装箱让 `Diagnostic`（即 `PktResult` 的 `Err`）
+/// 保持小尺寸（clippy `result_large_err` 阈值内），`kind` 才能携带结构化数据。
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub message: String,
     /// 出错的文件/模块名（None = 未知或内存中的源码）。
     pub file: Option<String>,
-    pub span: Option<SourceSpan>,
+    pub span: Option<Box<SourceSpan>>,
     /// 诊断类别（默认普通）。
     pub kind: DiagnosticKind,
 }
@@ -62,13 +68,19 @@ impl Diagnostic {
         Self {
             message: message.into(),
             file: None,
-            span: Some(SourceSpan::from_ast(span, 0, 0)),
+            span: Some(Box::new(SourceSpan::from_ast(span, 0, 0))),
             kind: DiagnosticKind::General,
         }
     }
 
     pub fn with_file(mut self, file: impl Into<String>) -> Self {
         self.file = Some(file.into());
+        self
+    }
+
+    /// 设置诊断类别（链式；类别见 [`DiagnosticKind`]）。
+    pub fn with_kind(mut self, kind: DiagnosticKind) -> Self {
+        self.kind = kind;
         self
     }
 }

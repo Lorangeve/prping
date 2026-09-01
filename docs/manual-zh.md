@@ -932,7 +932,7 @@ prping engine --pcap x.pcap --to-pkt dir/ --threads 8       # 8 线程并行解�
 
 **sniffer 段**（回包校验 / 监听规则）：`--wait` 时按 `.pkt` 里的 sniffer 声明匹配应答
 （匹配成功显示 `✓ reply matched: 字段=值 (rtt)`，超时显示 `✗ no matching reply`）；
-裸 `--wait` 时同一声明作为**监听规则**（匹配收到的数据报并回显）：
+裸 `--wait`（或配方 `wait:` 无值）时同一声明作为**监听规则**（匹配收到的数据报并打印详情）：
 
 ```pkt
 sniffer:
@@ -947,24 +947,22 @@ sniffer:
   # 监听规则不能引用发包字段（无发包可引用，构建期报错）
 ```
 
-**裸 `--wait` 监听模式**（pktlang 对话的服务端）：`packet --wait FILE.pkt [HOST:PORT]`
+**裸 `--wait` 监听模式**（纯监听：匹配 + 报告 + 统计）：`packet --wait FILE.pkt [HOST:PORT]`
 **发送段先行**（文件有可发送的导出就先发送，再进入监听），随后绑定 UDP 地址持续接收数据报（地址省略时按包内最外层 udp/tcp dport 推导），反解后
-按 `.pkt` 的 sniffer 规则匹配——命中**原样回显**给发送方（`✓ matched ... from peer`
-+ 反解展示），未命中忽略，Ctrl+C 结束并打印匹配统计。与客户端 `--wait`（发送 +
-同一规则匹配应答）配对即可让两个进程用 export + sniffer **模拟通信**
-（demo 与说明 → `examples/sniffer_chat/`：服务端 `packet --wait server.pkt`，
-客户端配方 `packet client.pktl`，含 `sent.`/`reply.` extract 全链路）。
+按 `.pkt` 的 sniffer 规则匹配——命中打印匹配详情（`✓ matched ... from peer`
++ 反解展示），未命中忽略，Ctrl+C 结束并打印匹配统计。**不发包回应**——回应包
+的构造属编排，由 `.pktl` 配方完成（`wait:` 无值监听触发 + extract + 后续步骤
+发包，demo 与说明 → `examples/sniffer_chat/`：服务端配方 `server.pktl`，
+客户端配方 `client.pktl`，含 `sent.`/`reply.` extract 全链路）。
 
-**`--wait --raw` 链路层监听**（完整帧）：`packet --wait --raw FILE.pkt [--iface 网卡]`
+**`--wait --raw` 链路层监听**（完整帧，纯监听）：`packet --wait --raw FILE.pkt [--iface 网卡]`
 持续接收**完整帧**（Linux AF_PACKET；macOS/Windows 走 libpcap/Npcap；需 root/管理员），
-按 sniffer 规则匹配（监听无发包，规则用字面量/谓词），命中后按 **应答模板**——
-`.pkt` 的默认导出，可经 `reply("层","字段")` 取收到的帧字段（如
-`icmp(type=0, id=reply("icmp","id"))`）——构造应答帧并 raw 注入；**应答模板为裸
-IP 外层（无 eth 层）时经内核 IP 栈路由注入**（Linux IPPROTO_RAW+IP_HDRINCL /
-macOS 按协议 raw socket，回环与局域网均无需 MAC 解析，macOS lo0 裸 IP 帧也能
-工作），eth 外层走链路层注入；Ctrl+C 停止并打印
-匹配统计。demo → `examples/icmp_echo_server/`：`sudo prping packet --wait --raw
-server.pkt` 后 `prping ping 127.0.0.1` 即被它应答（纯 pktlang 的 ICMP echo 服务端）。
+按 sniffer 规则匹配（监听无发包，规则用字面量/谓词），命中打印匹配字段 +
+反解展示（无应答模板注入——`reply("层","字段")` 现为配方 extract 专用原语，
+`.pkt` 内出现即报错）；Ctrl+C 停止并打印匹配统计。要"监听 + 回应"的
+服务端，用 **`.pktl` 配方**：`wait:` 无值监听触发 → extract 取值写 global →
+后续步骤构造回应包发回（demo → `examples/icmp_echo_server/`、
+`examples/tcp_handshake_listen/`、`examples/dns_echo_listen/`）。
 
 示例：
 

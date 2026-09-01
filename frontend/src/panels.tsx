@@ -1,6 +1,6 @@
 // 右侧面板：诊断 / 层栈 / HEX 预览（数据来自 LSP publishDiagnostics 与 analyze 信封）。
 
-import { For, Show, createMemo } from "solid-js";
+import { For, Index, Show, createEffect, createMemo } from "solid-js";
 
 export interface LspDiag {
   line: number;
@@ -42,7 +42,49 @@ function fieldsRows(fields: string): { k: string; v: string }[] {
   });
 }
 
-export type Panel = "diagnostics" | "layers" | "hex" | "recipe" | "globals" | "outline";
+export type Panel =
+  | "diagnostics"
+  | "layers"
+  | "hex"
+  | "recipe"
+  | "globals"
+  | "outline"
+  | "run";
+
+/** Run 面板的选项快照（kv 持久化；count/wait 以字符串承载输入框原文）。 */
+export interface RunSettings {
+  target: string;
+  count: string;
+  wait: string;
+  /** 裸 --wait：持续监听（覆盖 wait 数值） */
+  listen: boolean;
+  fuzz: boolean;
+  raw: boolean;
+  iface: string;
+  /** --json：JSONL 结构化渲染（listen 时自动失效——CLI 禁 --json × 持续监听） */
+  json: boolean;
+}
+
+/** run_out 行 + run_exit 终态（App 聚合后传入）。 */
+export interface RunLine {
+  stream: string;
+  text: string;
+}
+/** 一次运行的任务卡（Run 面板多标签；App 聚合 run_out/run_exit）。 */
+export interface RunTask {
+  id: string;
+  /** 运行的文件（工作区相对路径） */
+  file: string;
+  lines: RunLine[];
+  exit: RunExitState | null;
+  running: boolean;
+}
+
+export interface RunExitState {
+  code: number | null;
+  stopped: boolean;
+  truncated: boolean;
+}
 
 /** .pktl 配方概览（服务端 parse_text 同构 JSON）。 */
 export interface RecipeDoc {
@@ -421,16 +463,17 @@ function HexView(props: { hex: string }) {
   );
 }
 
-/** 面板页签（.pktl 配方文档切换为 Recipe/Globals 组）。 */
+/** 面板页签（.pktl 配方文档切换为 Recipe/Globals 组；Run 页签两种文档都有）。 */
 export function PanelTabs(props: {
   panel: Panel;
   setPanel: (p: Panel) => void;
   diagCount: number;
   recipe?: boolean;
+  running?: boolean;
 }) {
   // 派生而非一次性 signal：props.recipe 随打开文件类型变化，页签须跟随
-  const tabs = () =>
-    props.recipe
+  const tabs = () => [
+    ...(props.recipe
       ? [
           { id: "diagnostics" as Panel, label: "Diagnostics" },
           { id: "recipe" as Panel, label: "Recipe" },
@@ -441,7 +484,9 @@ export function PanelTabs(props: {
           { id: "layers" as Panel, label: "Layers" },
           { id: "hex" as Panel, label: "Hex" },
           { id: "outline" as Panel, label: "Outline" },
-        ];
+        ]),
+    { id: "run" as Panel, label: "Run" },
+  ];
   return (
     <div class="tabs">
       <For each={tabs()}>
@@ -455,9 +500,336 @@ export function PanelTabs(props: {
             <Show when={t.id === "diagnostics" && props.diagCount > 0}>
               <span class="tab-badge">{props.diagCount}</span>
             </Show>
+            <Show when={t.id === "run" && props.running}>
+              <span class="tab-badge run-badge" title="process running">
+                ●
+              </span>
+            </Show>
           </button>
         )}
       </For>
+    </div>
+  );
+}
+
+/** Run 面板：packet 选项 + 执行控制台（服务端 spawn 自身 CLI，见 web/run.rs）。 */
+export function RunPanel(props: {
+  /** 全部任务卡（运行中 + 已结束）；chip 即任务管理 */
+  tasks: RunTask[];
+  /** 当前查看的任务 id */
+  activeId: string | null;
+  setActive: (id: string) => void;
+  settings: RunSettings;
+  setSettings: (s: RunSettings) => void;
+  /** 文件声明的运行参数（params("名", 默认)）；与 Layers 页签共用同一份输入值 */
+  declParams: { name: string; default: string | null }[];
+  runValues: Record<string, string>;
+  setRunValues: (v: Record<string, string>) => void;
+  canRun: boolean;
+  onRun: () => void;
+  onStopTask: (id: string) => void;
+  onCloseTask: (id: string) => void;
+}) {
+  let consoleHost: HTMLDivElement | undefined;
+  const active = () => props.tasks.find((t) => t.id === props.activeId) ?? null;
+  // 新输出到达 / 切换任务 → 跟随滚动到底
+  createEffect(() => {
+    props.activeId;
+    active()?.lines.length;
+    if (consoleHost) consoleHost.scrollTop = consoleHost.scrollHeight;
+  });
+  const set = (patch: Partial<RunSettings>) =>
+    props.setSettings({ ...props.settings, ...patch });
+  const exitText = () => {
+    const e = active()?.exit;
+    if (!e) return "";
+    if (e.stopped) return "stopped";
+    if (e.code == null) return "exit ?"; // unix 被 kill 等无退出码情形
+    return "exit " + e.code;
+  };
+  // 任务卡状态图标（chip 即任务管理：● 运行中 / ✓✗ 终态 / ■ 已停止）
+  const taskIcon = (t: RunTask) => {
+    if (t.running) return "●";
+    if (t.exit?.stopped) return "■";
+    if (t.exit?.code == null) return "?";
+    return t.exit.code === 0 ? "✓" : "✗";
+  };
+  const baseName = (f: string) => f.split("/").pop() ?? f;
+  // JSONL 模式（settings.json && !listen）：逐行解析渲染结构化行；非 JSON 行
+  // （stderr 的 raw 升级提示等）原样回退文本
+  const jsonMode = () => props.settings.json && !props.settings.listen;
+  const rows = createMemo(() => {
+    const lines = active()?.lines ?? [];
+    return jsonMode()
+      ? lines.map((l) => ({ raw: l, node: jsonLineNode(l) }))
+      : lines.map((l) => ({ raw: l, node: null }));
+  });
+  function jsonLineNode(l: RunLine): { cls: string; text: string; title?: string } | null {
+    let o: any;
+    try {
+      o = JSON.parse(l.text);
+    } catch {
+      return null;
+    }
+    if (o.type === "packet") {
+      const ok = o.status === "sent";
+      const layers = Array.isArray(o.layers) ? o.layers.join("·") : "";
+      const t = o.target ? " → " + o.target : "";
+      const err = o.error ? "  ✗ " + o.error : "";
+      const rtt = o.rtt_ms != null ? "  " + o.rtt_ms + "ms" : "";
+      // 失败包无 bytes 字段（raw 等失败场景）——有值才显示字节数
+      const size = o.bytes != null ? o.bytes + " B " : "";
+      return {
+        cls: ok ? "run-line-ok" : "run-line-err",
+        text: (ok ? "✓ " : "✗ ") + o.idx + "/" + o.total + "  " + (o.proto ?? "") + " " +
+          size + layers + t + rtt + err,
+        title: l.text,
+      };
+    }
+    if (o.type === "step") {
+      return {
+        cls: "run-line-step",
+        text: "step " + o.step + "/" + o.total + ":  " + o.pkt,
+        title: l.text,
+      };
+    }
+    if (o.type === "summary") {
+      const ok = (o.failed ?? o.steps_failed ?? 0) === 0;
+      const parts: string[] = [];
+      if (o.sent != null) parts.push("sent " + o.sent);
+      if (o.failed != null) parts.push("failed " + o.failed);
+      if (o.skipped != null) parts.push("skipped " + o.skipped);
+      if (o.packets_sent != null) parts.push("packets sent " + o.packets_sent);
+      if (o.steps != null) parts.push("steps " + o.steps);
+      if (o.steps_failed != null) parts.push("failed " + o.steps_failed);
+      return {
+        cls: ok ? "run-line-summary" : "run-line-err",
+        text: "summary: " + parts.join(" · "),
+        title: l.text,
+      };
+    }
+    return null; // 其它 JSONL 类型：原样文本
+  }
+  return (
+    <div class="panel-body run-panel">
+      <div class="run-controls">
+        <Show
+          when={!active()?.running}
+          fallback={
+            <button
+              class="run-stop-btn"
+              onClick={() => active() && props.onStopTask(active()!.id)}
+              title="stop the active run"
+            >
+              ■ Stop
+            </button>
+          }
+        >
+          <button
+            class="run-go-btn"
+            disabled={!props.canRun}
+            onClick={props.onRun}
+            title={
+              props.canRun
+                ? "run with prping packet — a new task tab is created; runs run in parallel"
+                : "open a workspace .pkt/.pktl file to run"
+            }
+          >
+            ▶ Run
+          </button>
+        </Show>
+        <span class="run-status" classList={{ running: !!active()?.running }}>
+          <Show when={active()?.running} fallback={exitText()}>
+            running…
+          </Show>
+          <Show when={active()?.exit?.truncated}>
+            <span
+              class="run-truncated"
+              title="output line limit reached — process kept running"
+            >
+              {" "}· truncated
+            </span>
+          </Show>
+        </span>
+        <Show when={props.tasks.length > 0}>
+          <span class="run-tasks-hint" title="switch consoles via the task chips below">
+            {props.tasks.filter((t) => t.running).length}/{props.tasks.length} tasks
+          </span>
+        </Show>
+      </div>
+      {/* 任务标签条 = 任务管理：chip 即任务（● 运行中 / ✓✗■ 终态），点击切换控制台，✕ 停止并移除 */}
+      <Show when={props.tasks.length > 0}>
+        <div class="run-tabs">
+          <For each={props.tasks}>
+            {(t) => (
+              <div
+                class="run-chip"
+                classList={{ active: props.activeId === t.id, running: t.running }}
+                onClick={() => props.setActive(t.id)}
+                title={t.file + "  (" + t.id + ")"}
+              >
+                <span class="run-chip-state">{taskIcon(t)}</span>
+                <span class="run-chip-name">
+                  {baseName(t.file)} · {t.id.replace("run-", "#")}
+                </span>
+                <button
+                  class="run-chip-close"
+                  title={t.running ? "stop and remove task" : "remove task"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.onCloseTask(t.id);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+      <label class="run-field">
+        <span>target</span>
+        <input
+          value={props.settings.target}
+          placeholder="HOST[:PORT]"
+          onInput={(e) => set({ target: e.currentTarget.value })}
+        />
+      </label>
+      <div class="run-row">
+        <label class="run-mini">
+          count
+          <input
+            class="run-num"
+            value={props.settings.count}
+            placeholder="1"
+            onInput={(e) => set({ count: e.currentTarget.value })}
+          />
+        </label>
+        <label class="run-mini">
+          wait s
+          <input
+            class="run-num"
+            value={props.settings.wait}
+            placeholder="off"
+            onInput={(e) => set({ wait: e.currentTarget.value })}
+          />
+        </label>
+        <label class="run-check" title="bare --wait: keep listening for matched packets">
+          <input
+            type="checkbox"
+            checked={props.settings.listen}
+            onInput={(e) => set({ listen: e.currentTarget.checked })}
+          />
+          listen
+        </label>
+        <label
+          class="run-check"
+          title="--json: structured JSONL output (auto-off with listen — CLI forbids the pair)"
+        >
+          <input
+            type="checkbox"
+            checked={props.settings.json && !props.settings.listen}
+            disabled={props.settings.listen}
+            onInput={(e) => set({ json: e.currentTarget.checked })}
+          />
+          json
+        </label>
+        <label class="run-check" title="--fuzz">
+          <input
+            type="checkbox"
+            checked={props.settings.fuzz}
+            onInput={(e) => set({ fuzz: e.currentTarget.checked })}
+          />
+          fuzz
+        </label>
+        <label class="run-check" title="--raw (link-layer send / listen)">
+          <input
+            type="checkbox"
+            checked={props.settings.raw}
+            onInput={(e) => set({ raw: e.currentTarget.checked })}
+          />
+          raw
+        </label>
+        <Show when={props.settings.raw}>
+          <input
+            class="run-iface"
+            value={props.settings.iface}
+            placeholder="--iface"
+            onInput={(e) => set({ iface: e.currentTarget.value })}
+          />
+        </Show>
+      </div>
+      <Show when={props.declParams.length > 0}>
+        <div class="run-params">
+          <Index each={props.declParams}>
+            {(p) => (
+              <label
+                class="param-item"
+                title={
+                  p().default == null
+                    ? "required — no default"
+                    : "default " + (p().default ?? "")
+                }
+              >
+                <span class="badge">param</span>
+                <span
+                  class="param-name"
+                  classList={{
+                    "param-missing": p().default == null && !props.runValues[p().name],
+                  }}
+                >
+                  {p().name}
+                </span>
+                <input
+                  class="param-input"
+                  placeholder={p().default ?? "required"}
+                  value={props.runValues[p().name] ?? ""}
+                  onInput={(e) =>
+                    props.setRunValues({ ...props.runValues, [p().name]: e.currentTarget.value })
+                  }
+                />
+              </label>
+            )}
+          </Index>
+        </div>
+      </Show>
+      <div class="run-console" ref={consoleHost}>
+        <For each={rows()}>
+          {(row) => {
+            const n = row.node;
+            return n ? (
+              <div class={n.cls} title={n.title}>
+                {n.text}
+              </div>
+            ) : (
+              <div
+                class="run-line"
+                classList={{ err: row.raw.stream === "err" }}
+                title={jsonMode() ? "raw output line" : undefined}
+              >
+                {row.raw.text}
+              </div>
+            );
+          }}
+        </For>
+        <Show when={(active()?.lines ?? []).length === 0}>
+          <div class="empty-hint">
+            <Show
+              when={active()}
+              fallback={
+                <>
+                  Run starts a task (multiple runs run in parallel — switch via
+                  the task chips); set target/count/wait above.
+                </>
+              }
+            >
+              <Show when={active()?.running} fallback="no output yet">
+                waiting for output…
+              </Show>
+            </Show>
+          </div>
+        </Show>
+      </div>
     </div>
   );
 }

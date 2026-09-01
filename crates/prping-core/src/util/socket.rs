@@ -154,50 +154,15 @@ pub fn ipv6_frame_skip(buf: &[u8]) -> &[u8] {
     }
 }
 
-/// 裸 IPv4 应答注入（`packet --wait --raw` 监听应答用）：把完整 IPv4 报文交给
-/// 内核 IP 栈路由（回环/局域网均可，无需 MAC 解析——绕开 pcap 链路层注入对
-/// EN10MB 的依赖，macOS lo0 裸 IP 应答走此路径）。需 root/cap_net_raw。
-/// - Linux：IPPROTO_RAW + IP_HDRINCL **整包**注入（校验和由序列化器算好）；
-/// - macOS：不支持 IP_HDRINCL——按报文协议（byte 9）开 raw socket，**只发 IP 载荷**
-///   （内核建 IP 头；与 ping 的 raw ICMP 同一模型）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// 裸 IPv4 注入（macOS raw 发送路径专用，`engine/pkg/raw.rs` 调用）：把完整
+/// IPv4 报文交给内核 IP 栈路由（回环/局域网均可，无需 MAC 解析——绕开 pcap
+/// 链路层注入对 EN10MB 的依赖，macOS lo0 的 DLT_NULL 裸 IP 走此路径）。
+/// 需 root/管理员。macOS 不支持 IP_HDRINCL——按报文协议（byte 9）开 raw socket，
+/// **只发 IP 载荷**（内核建 IP 头；与 ping 的 raw ICMP 同一模型）。
+/// Linux 的裸 IPv4 发送走 IPPROTO_RAW + IP_HDRINCL（raw.rs 自有路径）。
+#[cfg(target_os = "macos")]
 pub fn inject_ip4(bytes: &[u8], dst: std::net::Ipv4Addr) -> std::io::Result<usize> {
     use std::io;
-    #[cfg(target_os = "linux")]
-    {
-        use std::mem::size_of;
-        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_RAW) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let one: libc::c_int = 1;
-        unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_HDRINCL,
-                &one as *const libc::c_int as *const libc::c_void,
-                size_of::<libc::c_int>() as libc::socklen_t,
-            );
-        }
-        let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-        addr.sin_family = libc::AF_INET as _;
-        addr.sin_port = 0;
-        addr.sin_addr.s_addr = u32::from_ne_bytes(dst.octets());
-        let n = unsafe {
-            libc::sendto(
-                fd,
-                bytes.as_ptr() as *const libc::c_void,
-                bytes.len(),
-                0,
-                &addr as *const libc::sockaddr_in as *const libc::sockaddr,
-                size_of::<libc::sockaddr_in>() as libc::socklen_t,
-            )
-        };
-        let err = io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        if n < 0 { Err(err) } else { Ok(n as usize) }
-    }
     #[cfg(target_os = "macos")]
     {
         use std::mem::size_of;

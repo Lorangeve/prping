@@ -420,7 +420,7 @@ pub fn resolve_sources_with_globals(
 }
 
 /// 按来源分组求值（带运行时参数 + 全局存储 + **回包访问器**）：`reply("层","字段")`
-/// 值原语从 `reply` 取收到的帧反解字段（`packet --listen --raw` 的应答模板求值用；
+/// 值原语从 `reply` 取收到的帧反解字段（配方 extract 求值专用入口；
 /// 无访问器时 `reply` 回退用户函数）。
 pub fn resolve_sources_with_reply<'a>(
     module: &Module,
@@ -541,7 +541,7 @@ fn builtin_only_module() -> Module {
     graph.modules.push(Arc::new(ModuleData {
         name: "<sniffer>".into(),
         path: path.clone(),
-        ast: crate::ast::AstFile { stmts: Vec::new() },
+        ast: Arc::new(crate::ast::AstFile { stmts: Vec::new() }),
         is_lib: false,
     }));
     graph.module_imports.push(Vec::new());
@@ -557,6 +557,7 @@ fn builtin_only_module() -> Module {
         sniffer: None,
         imports: Vec::new(),
         graph: Arc::new(graph),
+        entry: 0,
     }
 }
 
@@ -1676,14 +1677,14 @@ impl EvalCtx<'_> {
                     })
                 } else if args.len() == 2 {
                     // 无回包访问器（普通解析/`engine` 分析）但按 2 参调用：
-                    // 这是配方 extract / `--listen --raw` 应答模板的专用原语，
-                    // 给出可操作的报错而不是「参数过多」（eng_lib 的 0 参
-                    // `func reply()` 撞名仍走用户函数分支）。
+                    // 这是配方 extract 的专用原语，给出可操作的报错而不是
+                    // 「参数过多」（eng_lib 的 0 参 `func reply()` 撞名仍走用户
+                    // 函数分支）。
                     Err(Diagnostic {
                         kind: crate::diag::DiagnosticKind::ReplyOutsideRecipe,
                         ..Diagnostic::at(
-                            "`reply(层, 字段)` 只能在配方 extract 的 `from:` 表达式或 \
-                             `--listen --raw` 应答模板中使用（本上下文没有回包可读取）"
+                            "`reply(层, 字段)` 只能在配方 extract 的 `from:` 表达式中 \
+                             使用（本上下文没有回包可读取；回应包请用 .pktl 配方编排）"
                                 .to_string(),
                             span,
                         )

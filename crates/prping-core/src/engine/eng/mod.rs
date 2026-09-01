@@ -22,9 +22,7 @@ use crate::output::{
 };
 use crate::util::hex_str;
 
-use display::{
-    describe_packet_layers, render_listen_template, render_module_header, stack_warning_messages,
-};
+use display::{describe_packet_layers, render_module_header, stack_warning_messages};
 
 /// 列表项展示：字节项（0..=255 的 Int/Hex）→ 两位小写十六进制，其余递归 `value_display`。
 ///
@@ -264,6 +262,76 @@ pub(crate) fn validate_expr_reply_leaves(
     Ok(())
 }
 
+/// 配方 extract 校验（共享）：`analyze_recipe` 概览（首个错误即 bail）与
+/// LSP/web 配方诊断（全部收集为行级诊断）同一口径。直取形态的层/字段名
+/// （字面量参数才静态校验；动态参数留给执行期报错）。
+/// 返回 (行号 1 基, 本地化消息) 列表，按步骤 / 子句顺序。
+pub(crate) fn validate_recipe_extract(
+    recipe: &crate::engine::recipe::Recipe,
+) -> Vec<(usize, String)> {
+    use crate::engine::recipe::FromSpec;
+
+    let mut out = Vec::new();
+    for step in &recipe.steps {
+        for e in &step.extract {
+            match &e.from {
+                FromSpec::PeerField { field } => {
+                    if !matches!(field.as_str(), "ip" | "port") {
+                        out.push((
+                            e.line,
+                            t!(
+                                "engine.recipe_peer_field_only",
+                                line = e.line,
+                                field = field
+                            )
+                            .to_string(),
+                        ));
+                    }
+                }
+                FromSpec::Field { layer, field } | FromSpec::SentField { layer, field } => {
+                    let kind = if matches!(e.from, FromSpec::SentField { .. }) {
+                        t!("engine.recipe_src_label_sent")
+                    } else {
+                        t!("engine.recipe_src_label_reply")
+                    };
+                    match crate::engine::pkg::sniffer_field_names(layer) {
+                        None => out.push((
+                            e.line,
+                            t!(
+                                "engine.recipe_unknown_layer",
+                                line = e.line,
+                                kind = kind,
+                                layer = layer
+                            )
+                            .to_string(),
+                        )),
+                        Some(names) if !names.contains(&field.as_str()) => {
+                            out.push((
+                                e.line,
+                                t!(
+                                    "engine.recipe_unknown_field",
+                                    line = e.line,
+                                    layer = layer,
+                                    field = field,
+                                    names = names.join("/")
+                                )
+                                .to_string(),
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                }
+                FromSpec::Expr(v) => {
+                    if let Err(err) = validate_expr_reply_leaves(v, e.line) {
+                        out.push((e.line, err.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 注入默认 DNS 解析器（ToSocketAddrs，v4 优先）；进程级，首个生效。
 /// `dns("host")` 原语与地址字段的域名解析依赖它（packet-dsl 本身不发网络请求）。
 pub fn ensure_dns_resolver() {
@@ -276,35 +344,13 @@ pub fn ensure_dns_resolver() {
     });
 }
 
-/// 注册表加载用库目录：编译期烘焙的 `eng_lib` 优先；缺失（发布版布局，只有
-/// `lib/` 没有 `eng_lib/`）时回退运行时 `lib/`——先找可执行文件同目录，再找
-/// 当前工作目录（与 CLI `resolve_libs` 的 CWD `lib/` 语义一致；serve 在部署
-/// 目录运行、engine/packet 在仓库运行都能加载到协议声明）。
-pub(crate) fn registry_libs() -> Vec<PathBuf> {
-    let baked = packet_dsl::default_libs();
-    if !baked.is_empty() {
-        return baked;
-    }
-    let mut runtime = Vec::new();
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-        && dir.join("lib").is_dir()
-    {
-        runtime.push(dir.join("lib"));
-    }
-    let cwd = Path::new("lib");
-    if cwd.is_dir() {
-        runtime.push(cwd.to_path_buf());
-    }
-    runtime
-}
-
-/// 从默认 eng_lib 目录加载 proto 声明进注册表（进程级，首个生效）。
+/// 从默认库目录（运行时 `lib/` 发现：二进制同目录 + 当前工作目录，见
+/// `packet_dsl::default_libs`）加载 proto 声明进注册表（进程级，首个生效）。
 pub fn ensure_proto_registry() {
     if !packet_dsl::proto_registry().is_empty() {
         return;
     }
-    let libs = registry_libs();
+    let libs = packet_dsl::default_libs();
     let mut protos = Vec::new();
     for dir in libs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -340,7 +386,7 @@ pub fn ensure_proto_registry() {
     packet_dsl::set_proto_registry(protos);
 }
 
-/// 实际生效的库目录 = 默认 eng_lib（编译期路径，发布态可能为空）+ 显式 libs。
+/// 实际生效的库目录 = 默认 lib 目录（运行时发现）+ 显式 libs。
 /// 与 `parse_file_with_libs` 内部合并顺序一致（默认在前、显式追加）。
 pub fn effective_libs(libs: &[PathBuf]) -> Vec<PathBuf> {
     let mut all = packet_dsl::default_libs();
@@ -553,18 +599,10 @@ pub fn analyze_file(
     let module =
         packet_dsl::parse_file_with_libs(path, libs).map_err(|d| anyhow::anyhow!("{d}"))?;
     let p: packet_dsl::Params = params.iter().cloned().collect();
-    let sources = match packet_dsl::resolve_sources_with_globals(&module, &p, globals) {
-        Ok(s) => s,
-        // 监听应答模板（`reply(层,字段)` 需 --wait --raw 上下文）：engine 只做解析，
-        // 展示模块结构（defs/sniffer）并说明包未展开；其余求值错误照常报出。
-        // 按诊断类别判别（此前对消息文本做字符串匹配，改文案即静默漂移）。
-        Err(d) if d.kind == packet_dsl::diag::DiagnosticKind::ReplyOutsideRecipe => {
-            let mut w = StandardStream::stdout(ColorChoice::Auto);
-            return render_listen_template(&mut w, path, &module, &effective_libs(libs), params)
-                .map_err(anyhow::Error::from);
-        }
-        Err(d) => return Err(anyhow::anyhow!("{d}")),
-    };
+    // reply() 在 .pkt 的求值（含 .pktl extract 之外的任何上下文）= 普通诊断错误
+    // （ReplyOutsideRecipe：回应包的构造属编排，一律走 .pktl 配方）
+    let sources = packet_dsl::resolve_sources_with_globals(&module, &p, globals)
+        .map_err(|d| anyhow::anyhow!("{d}"))?;
     let total: usize = sources.iter().map(|(_, p)| p.len()).sum();
     if total == 0 {
         anyhow::bail!("没有可求值的包：文件既无默认导出，也无命名导出");
@@ -673,7 +711,7 @@ fn analyze_sources_doc(
 /// 内存文本分析（web 编辑器用）：与 `engine --json` 同构的结构化文档。
 ///
 /// `uri` 用 `file:///` 形式（供相对 import 与错误定位）；`params` 为运行时
-/// 参数；`libs` 为附加库目录（烘焙 eng_lib 自动生效）。解析/求值失败返回 Err
+/// 参数；`libs` 为附加库目录（默认 lib 目录自动生效）。解析/求值失败返回 Err
 /// （诊断文本与 CLI 一致）。
 pub fn analyze_text_json(
     uri: &str,
@@ -754,60 +792,10 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
     use crate::engine::recipe::{ExtractAs, FromSpec, OnError};
 
     let recipe = crate::engine::recipe::parse(path)?;
-    // 校验 extract 的层/字段名（执行期同样报错，这里提前暴露笔误）：
-    // - 直取形态 `reply.<层>.<字段>`：sniffer 字段集；
-    // - 表达式形态：遍历 AST 里的 `reply("层","字段")` 叶子（字面量参数才校验）
-    for step in &recipe.steps {
-        for e in &step.extract {
-            match &e.from {
-                FromSpec::PeerField { field } => {
-                    if !matches!(field.as_str(), "ip" | "port") {
-                        anyhow::bail!(
-                            "{}",
-                            t!(
-                                "engine.recipe_peer_field_only",
-                                line = e.line,
-                                field = field
-                            )
-                        );
-                    }
-                }
-                FromSpec::Field { layer, field } | FromSpec::SentField { layer, field } => {
-                    let kind = if matches!(e.from, FromSpec::SentField { .. }) {
-                        t!("engine.recipe_src_label_sent")
-                    } else {
-                        t!("engine.recipe_src_label_reply")
-                    };
-                    let names =
-                        crate::engine::pkg::sniffer_field_names(layer).ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "{}",
-                                t!(
-                                    "engine.recipe_unknown_layer",
-                                    line = e.line,
-                                    kind = kind,
-                                    layer = layer
-                                )
-                            )
-                        })?;
-                    if !names.contains(&field.as_str()) {
-                        anyhow::bail!(
-                            "{}",
-                            t!(
-                                "engine.recipe_unknown_field",
-                                line = e.line,
-                                layer = layer,
-                                field = field,
-                                names = names.join("/")
-                            )
-                        );
-                    }
-                }
-                FromSpec::Expr(v) => {
-                    validate_expr_reply_leaves(v, e.line)?;
-                }
-            }
-        }
+    // 校验 extract 的层/字段名（执行期同样报错，这里提前暴露笔误）——校验逻辑
+    // 与 LSP/web 配方诊断共享（validate_recipe_extract），首个错误即 bail
+    if let Some((_, message)) = validate_recipe_extract(&recipe).first() {
+        anyhow::bail!("{message}");
     }
     // 步骤 .pkt 用到的 params（词法收集 `params("名", 默认)`）。解析失败 = 配方在
     // 执行期同样失败，概览提前暴露（与 extract 字段校验同一「提前报错」哲学）。

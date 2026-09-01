@@ -2,7 +2,7 @@
 //!
 //! - 文件名 = 包名；`import a { a, b }` 以当前文件目录为根递归搜索 `a.pkt`。
 //! - import 按**每模块目录**解析：同名文件在不同目录可共存，各自绑定到本目录
-//!   找到的模块实例；库目录从后往前搜索（显式 lib 优先于默认 eng_lib）。
+//!   找到的模块实例；库目录从后往前搜索（显式 lib 优先于默认 lib/ 目录）。
 //! - `import a`（不带大括号）引入默认导出（模块名）+ 全部命名导出。
 //! - 名字冲突（本地定义 vs import、重复定义、重复导入）一律报错并带 span。
 //! - 转出口（import 再 export）在解析期解析到最终定义模块；转出口来自库
@@ -11,10 +11,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use crate::ast::{self, AstFile, Call, Expr, ImportStmt, LenTarget, Pipeline, Span, Stmt, Value};
-use crate::diag::{Diagnostic, PktResult};
+use crate::diag::{Diagnostic, DiagnosticKind, PktResult};
 use crate::parser::parse_ast;
 use crate::registry::is_builtin;
 
@@ -38,7 +39,9 @@ pub(crate) struct ModuleGraph {
 pub(crate) struct ModuleData {
     pub name: String,
     pub path: PathBuf,
-    pub ast: AstFile,
+    /// AST 以 Arc 共享：库 / import 模块来自进程级缓存（[`cached_module`]），
+    /// 同一文件全进程只解析一次，入图零拷贝；入口模块首次解析后同样入 Arc。
+    pub ast: Arc<AstFile>,
     /// 是否库模块（libs 目录自动加载；其 export 对全体模块隐式可见）。
     pub is_lib: bool,
 }
@@ -110,6 +113,8 @@ pub struct Module {
     /// 解析后的 import（names=None = 引入全部）。
     pub imports: Vec<ResolvedImport>,
     pub(crate) graph: Arc<ModuleGraph>,
+    /// 入口模块在图中的下标（go-to-definition 区分「本文件/跨文件」用）。
+    pub(crate) entry: usize,
 }
 
 /// 一个命名元件定义。
@@ -131,6 +136,9 @@ pub struct Func {
     pub span: Span,
     /// 紧贴函数上方的 `#` doc 注释（LSP 悬停等展示用；无则 None）。
     pub doc: Option<ast::FuncDoc>,
+    /// 值函数体与返回类型（`-> bytes` / `-> int`）；None = 层函数。
+    /// 静态形状检查（check.rs）走查函数体；层函数体在 `body`。
+    pub value_body: Option<(ast::ValueRet, ast::Value)>,
 }
 
 /// 一个声明式协议（`#[proto] func`，注解 `#[proto(kind=...)]? #[rule(...)]*`）。
@@ -145,7 +153,24 @@ pub struct Proto {
     /// 值参数（只参与构造：字段默认值/宽度可引用）。
     pub params: Vec<FuncParam>,
     pub fields: Vec<ast::FieldDecl>,
+    /// 紧贴函数上方的 `#` doc 注释（LSP 悬停等展示用；无则 None）。
+    pub doc: Option<ast::FuncDoc>,
     pub span: Span,
+}
+
+impl Proto {
+    /// 字段 → 参数视图（字段即参数；与 `lib_exports` 的 `LibExport.params` 同构，
+    /// LSP 实参名补全 / 悬停共用）。
+    pub fn field_params(&self) -> Vec<ast::FuncParam> {
+        self.fields
+            .iter()
+            .map(|f| ast::FuncParam {
+                name: f.name.clone(),
+                span: f.name_span,
+                default: f.default.clone(),
+            })
+            .collect()
+    }
 }
 
 /// 函数参数：`IDENT`（未设）或 `IDENT = 默认值`。
@@ -166,17 +191,171 @@ pub struct ResolvedImport {
     pub span: Span,
 }
 
+/// go-to-definition 的目标位置（LSP definition / Web 编辑器跳转用）。
+#[derive(Debug, Clone)]
+pub struct DefinitionSite {
+    /// 定义所在文件。None = 入口模块自身（调用方按当前文档定位，跳转不换文件）。
+    pub path: Option<PathBuf>,
+    /// 定义名的 1 基 span（默认导出 = 顶层流水线 span）。
+    pub span: Span,
+    /// true = 目标是模块的默认导出（span 指向顶层流水线；无默认导出时为 1:1）。
+    pub is_default: bool,
+}
+
+impl Module {
+    /// 名字 → 定义位置（go-to-definition）。
+    ///
+    /// 覆盖：本文件 defs/funcs/protos；import（含别名与转出口）；库 prelude 隐式
+    /// 可见的导出（`tcp()` 无需 import 即可跳到库源文件）。`export:` 列表里的
+    /// 名字优先解析到真实定义（经作用域），仅当无法解析时回退到本文件的
+    /// export 行。返回 None = 无法定位（原语/未知名）。
+    pub fn definition_of(&self, name: &str) -> Option<DefinitionSite> {
+        // 本文件真实定义（与 export 行区分：跳定义要去定义处，不是 export 行）
+        if let Some(d) = self.defs.iter().find(|d| d.name == name) {
+            return Some(DefinitionSite {
+                path: None,
+                span: d.name_span,
+                is_default: false,
+            });
+        }
+        if let Some(f) = self.funcs.iter().find(|f| f.name == name) {
+            return Some(DefinitionSite {
+                path: None,
+                span: f.name_span,
+                is_default: false,
+            });
+        }
+        if let Some(p) = self.protos.iter().find(|p| p.name == name) {
+            return Some(DefinitionSite {
+                path: None,
+                span: p.name_span,
+                is_default: false,
+            });
+        }
+        // 作用域：import / 转出口 / 库 prelude 均已解析为图内位置
+        let scope = self.graph.scopes.get(self.entry)?;
+        match scope.get(name)? {
+            ScopeEntry::Local(j) => {
+                let d = defs_of(&self.graph.modules[self.entry].ast);
+                Some(DefinitionSite {
+                    path: None,
+                    span: d.get(*j)?.name_span,
+                    is_default: false,
+                })
+            }
+            ScopeEntry::Func(j) => {
+                let fs = funcs_of(&self.graph.modules[self.entry].ast);
+                Some(DefinitionSite {
+                    path: None,
+                    span: fs.get(*j)?.name_span,
+                    is_default: false,
+                })
+            }
+            ScopeEntry::Imported(m, orig) => self.site_in_module(*m, orig),
+            ScopeEntry::Default(m) => self.default_site(*m),
+        }
+        .or_else(|| {
+            // export 行兜底：名字在别处定义但作用域缺失（理论不可达，防御保留）
+            self.exports
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, s)| DefinitionSite {
+                    path: None,
+                    span: *s,
+                    is_default: false,
+                })
+        })
+    }
+
+    /// import 语句的模块名（`import foo { … }` 的 foo）→ 目标模块文件。
+    /// 点击 import 行的模块名跳转到对应 .pkt：定位到默认导出流水线，无则文件头。
+    pub fn import_module_site(&self, module: &str) -> Option<DefinitionSite> {
+        // self.imports 与 AST import 语句同序，module_imports 与之逐项对齐
+        let idx = self.imports.iter().position(|i| i.module == module)?;
+        let target = self.graph.module_imports.get(self.entry)?.get(idx)?.0;
+        let mut site = self.default_site(target)?;
+        if site.span == Span::new(1, 1, 1, 1) {
+            site.is_default = false; // 目标无默认导出：只是跳到文件头
+        }
+        Some(site)
+    }
+
+    /// 模块 `m` 内名字 `orig` 的定义位置（AST 层查找，别名/转出口已在此前解析）。
+    fn site_in_module(&self, m: usize, orig: &str) -> Option<DefinitionSite> {
+        let md = &self.graph.modules[m];
+        let path = (m != self.entry).then(|| md.path.clone());
+        if let Some(d) = defs_of(&md.ast).into_iter().find(|d| d.name == orig) {
+            return Some(DefinitionSite {
+                path,
+                span: d.name_span,
+                is_default: false,
+            });
+        }
+        if let Some(f) = funcs_of(&md.ast).into_iter().find(|f| f.name == orig) {
+            return Some(DefinitionSite {
+                path,
+                span: f.name_span,
+                is_default: false,
+            });
+        }
+        None
+    }
+
+    /// 模块 `m` 的默认导出位置（无默认导出 = 文件头 1:1）。
+    fn default_site(&self, m: usize) -> Option<DefinitionSite> {
+        let md = &self.graph.modules[m];
+        let path = (m != self.entry).then(|| md.path.clone());
+        let span = default_of(&md.ast)
+            .map(|(_, s)| s)
+            .unwrap_or(Span::new(1, 1, 1, 1));
+        Some(DefinitionSite {
+            path,
+            span,
+            is_default: true,
+        })
+    }
+}
+
 // ── 入口 ─────────────────────────────────────────────────────
 
 /// 解析文件（含其 import 图）+ 语义分析，返回入口模块。
-/// 默认库目录：仓库 `eng_lib/`（pkglang 标准库，发布为 `lib/`）。
+/// 默认库目录：运行时发现的 `lib/`（pkglang 标准库，`just dist` 同步到二进制同目录）。
 ///
-/// 路径在编译期烘焙（`CARGO_MANIFEST_DIR/../eng_lib`）：源码构建时指向仓库标准库；
-/// 发布到其他机器后该路径不存在 → 返回空（宿主用运行时 `lib/` + `--lib` 兜底）。
-/// 宿主展示实际生效的库目录时也应调用本函数（与解析器使用的列表一致）。
+/// 运行时发现：可执行文件同目录 `lib/` + 当前工作目录 `lib/`（存在才收录，
+/// canonical 去重）——二进制不再烘焙/默认读取仓库 `eng_lib/`，部署与开发统一走
+/// `lib/` 布局。宿主展示实际生效的库目录时也应调用本函数（与解析器使用的列表一致）。
+///
+/// 测试构建（`test-stdlib` feature，仅 dev-dependencies 激活）：运行时发现落空
+/// （cargo test 的 exe 在 `target/*/deps`、cwd 在 crate 目录，都没有 `lib/`）时
+/// 回退编译期烘焙的仓库 `eng_lib/`——测试共享真实标准库 prelude，产物不受影响。
 pub fn default_libs() -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../eng_lib");
-    if dir.is_dir() { vec![dir] } else { Vec::new() }
+    let mut libs: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && dir.join("lib").is_dir()
+    {
+        libs.push(dir.join("lib"));
+    }
+    let cwd = Path::new("lib");
+    if cwd.is_dir() && !libs.iter().any(|p| same_dir(p, cwd)) {
+        libs.push(cwd.to_path_buf());
+    }
+    #[cfg(feature = "test-stdlib")]
+    if libs.is_empty() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../eng_lib");
+        if dir.is_dir() {
+            libs.push(dir);
+        }
+    }
+    libs
+}
+
+/// 目录等价判断（canonicalize 后比较；不可解析时退回字面路径比较）。
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
 }
 
 pub fn parse_file(path: impl AsRef<Path>) -> PktResult<Module> {
@@ -187,17 +366,17 @@ pub fn parse_file(path: impl AsRef<Path>) -> PktResult<Module> {
 ///
 /// `libs`：库目录列表（pkglang 标准库，如发布目录的 `lib/`）。import 解析顺序：
 /// 入口文件所在目录（直接 + 递归子目录）优先，随后从后往前逐个搜索库目录
-/// （直接 + 递归）——显式 lib（如 `./lib`、`--lib`）优先于默认 eng_lib。
+/// （直接 + 递归）——显式 lib（如 `./lib`、`--lib`）优先于默认 lib/ 目录。
 pub fn parse_file_with_libs(path: impl AsRef<Path>, libs: &[PathBuf]) -> PktResult<Module> {
     let path = path.as_ref();
     let src = std::fs::read_to_string(path)
         .map_err(|e| Diagnostic::new(format!("读取文件失败（{}）：{e}", path.display())))?;
     let name = file_stem(path);
     let ast = parse_ast(&src).map_err(|d| d.with_file(path.display().to_string()))?;
-    // 默认 eng_lib（标准库）总是可用，显式 libs 追加其后
+    // 默认 lib 目录（运行时发现）总是可用，显式 libs 追加其后
     let mut all = default_libs();
     all.extend_from_slice(libs);
-    let mut graph = build_graph(&name, path, &ast, &all)?;
+    let mut graph = build_graph(&name, path, Arc::new(ast), &all)?;
     resolve_names(&mut graph)?;
     let graph = Arc::new(graph);
     finish_module(&graph, 0)
@@ -209,7 +388,7 @@ pub fn parse_file_with_libs(path: impl AsRef<Path>, libs: &[PathBuf]) -> PktResu
 pub fn parse_str(name: &str, src: &str) -> PktResult<Module> {
     let ast = parse_ast(src)?;
     let libs = default_libs();
-    let mut graph = build_graph(name, Path::new(""), &ast, &libs)?;
+    let mut graph = build_graph(name, Path::new(""), Arc::new(ast), &libs)?;
     resolve_names(&mut graph)?;
     let graph = Arc::new(graph);
     finish_module(&graph, 0)
@@ -231,7 +410,7 @@ pub fn parse_source_at_with_libs(
     let entry = dir.join(format!("{name}.pkt"));
     let mut all = default_libs();
     all.extend_from_slice(libs);
-    let mut graph = build_graph(name, &entry, &ast, &all)?;
+    let mut graph = build_graph(name, &entry, Arc::new(ast), &all)?;
     resolve_names(&mut graph)?;
     let graph = Arc::new(graph);
     finish_module(&graph, 0)
@@ -245,14 +424,80 @@ fn file_stem(path: &Path) -> String {
 
 // ── import 图 ────────────────────────────────────────────────
 
+// ── 已解析模块文件的进程级缓存 ────────────────────────────────
+// 每次入口解析（LSP 每次击键的诊断 / 补全 / 悬停会触发 3~5 次）都要读取并解析
+// 全部库模块（默认 eng_lib 21 个文件）+ import 的用户模块。此缓存按
+// （规范化路径, mtime, len）复用解析产物：AST 以 Arc 共享、零拷贝入图，库文件
+// 在进程生命周期内只读盘 + 解析一次。文件落盘修改（mtime/len 任一变化）自动
+// 失效；Web 模式每条 WS 连接一个 LSP 会话、CLI `engine --lsp` 长会话同样受益。
+struct CachedModule {
+    mtime: SystemTime,
+    len: u64,
+    ast: Arc<AstFile>,
+}
+
+/// 模块文件缓存取用失败的两种形态（调用方按原语义包装诊断）。
+enum ModuleSourceError {
+    /// 读取失败（不存在 / 无权限…），由调用方生成带上下文的诊断。
+    Read(std::io::Error),
+    /// 语法解析失败（已带文件名）。
+    Parse(Diagnostic),
+}
+
+/// 读取并解析一个模块文件（库种子 / import 目标），命中进程级缓存时零解析。
+/// 模块名由调用方自持（库种子 = 收集时的 file_stem，import 目标 = 语句模块名，
+/// 二者恒等于文件名主干，缓存无需重复携带）。
+fn cached_module(path: &Path) -> Result<Arc<AstFile>, ModuleSourceError> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedModule>>> = OnceLock::new();
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let meta = std::fs::metadata(&canon).map_err(ModuleSourceError::Read)?;
+    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let len = meta.len();
+    {
+        let map = CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = map.get(&canon)
+            && c.mtime == mtime
+            && c.len == len
+        {
+            return Ok(c.ast.clone());
+        }
+    }
+    // 未命中：锁外读盘 + 解析（毫秒级，避免长时间占锁）
+    let src = std::fs::read_to_string(&canon).map_err(ModuleSourceError::Read)?;
+    let ast = Arc::new(
+        parse_ast(&src)
+            .map_err(|d| ModuleSourceError::Parse(d.with_file(canon.display().to_string())))?,
+    );
+    let mut map = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // 安全阀：异常会话（海量临时文件）下缓存有界
+    if map.len() > 512 {
+        map.clear();
+    }
+    map.insert(
+        canon,
+        CachedModule {
+            mtime,
+            len,
+            ast: ast.clone(),
+        },
+    );
+    Ok(ast)
+}
+
 fn build_graph(
     entry_name: &str,
     entry_path: &Path,
-    entry_ast: &AstFile,
+    entry_ast: Arc<AstFile>,
     libs: &[PathBuf],
 ) -> PktResult<ModuleGraph> {
     let mut graph = ModuleGraph::default();
-    let mut work: Vec<(String, PathBuf, AstFile, bool)> = Vec::new();
+    let mut work: Vec<(String, PathBuf, Arc<AstFile>, bool)> = Vec::new();
     // 库模块种子：libs 目录下全部 .pkt（其 export 隐式可见，无需 import）。
     // 先 push 库种子、最后 push 入口：work 是 LIFO，保证入口模块第一个入图（下标 0）。
     // 库目录错误不静默丢弃：不可读 / 模块语法错 / 同目录导出名重复都报诊断，
@@ -260,7 +505,7 @@ fn build_graph(
     let mut seen_lib_files: HashSet<PathBuf> = HashSet::new();
     let entry_canon =
         std::fs::canonicalize(entry_path).unwrap_or_else(|_| entry_path.to_path_buf());
-    // 入口是否本身是库成员（如 ensure_proto_registry 把 eng_lib 文件当入口解析）：
+    // 入口是否本身是库成员（如 ensure_proto_registry 把库文件当入口解析）：
     // 是 → 入口以 is_lib=true 入图（其 export 参与 prelude 注入，供其他库模块
     // 引用）；否 → 普通入口（is_lib=false，不注入全局）。
     let mut entry_is_lib = false;
@@ -287,10 +532,16 @@ fn build_graph(
                 entry_is_lib = true;
                 continue;
             }
-            let src = std::fs::read_to_string(&lib_path).map_err(|e| {
-                Diagnostic::new(format!("读取库模块失败（{}）：{e}", lib_path.display()))
-            })?;
-            let ast = parse_ast(&src).map_err(|d| d.with_file(lib_path.display().to_string()))?;
+            let ast = match cached_module(&lib_path) {
+                Ok(ast) => ast,
+                Err(ModuleSourceError::Read(e)) => {
+                    return Err(Diagnostic::new(format!(
+                        "读取库模块失败（{}）：{e}",
+                        lib_path.display()
+                    )));
+                }
+                Err(ModuleSourceError::Parse(d)) => return Err(d),
+            };
             for stmt in &ast.stmts {
                 if let Stmt::Export(e) = stmt {
                     for (name, span) in &e.names {
@@ -315,7 +566,7 @@ fn build_graph(
     work.push((
         entry_name.to_string(),
         entry_path.to_path_buf(),
-        entry_ast.clone(),
+        entry_ast,
         entry_is_lib,
     ));
     // 入口模块路径可能是相对路径；用其所在目录做 import 根
@@ -361,13 +612,16 @@ fn build_graph(
                 Diagnostic::at(msg, imp.span)
             })?;
             import_paths[idx].push((imp.module.clone(), imp.span, found.clone()));
-            let src = std::fs::read_to_string(&found).map_err(|e| {
-                Diagnostic::at(
-                    format!("读取模块文件失败（{}）：{e}", found.display()),
-                    imp.span,
-                )
-            })?;
-            let ast = parse_ast(&src).map_err(|d| d.with_file(found.display().to_string()))?;
+            let ast = match cached_module(&found) {
+                Ok(ast) => ast,
+                Err(ModuleSourceError::Read(e)) => {
+                    return Err(Diagnostic::at(
+                        format!("读取模块文件失败（{}）：{e}", found.display()),
+                        imp.span,
+                    ));
+                }
+                Err(ModuleSourceError::Parse(d)) => return Err(d),
+            };
             work.push((imp.module.clone(), found, ast, false));
         }
     }
@@ -410,25 +664,36 @@ pub struct LibExport {
     pub is_proto: bool,
 }
 
-/// 枚举库目录（默认 eng_lib + 显式 libs）下全部模块的命名导出。
-///
-/// 库导出隐式可见（无需 import 即可调用），LSP 补全 / 悬停应提供它们。
-pub fn lib_exports(libs: &[PathBuf]) -> Vec<LibExport> {
+/// 生效的库目录：默认 lib 目录 + 显式 libs，按 canonical 路径去重（调用方可能
+/// 已含默认库目录，如 effective_libs——不去重会让每个导出被枚举两次）。
+fn effective_lib_dirs(libs: &[PathBuf]) -> Vec<PathBuf> {
     let mut all = default_libs();
     all.extend_from_slice(libs);
-    // 去重（canonical 路径）：调用方可能已含默认 eng_lib（如 effective_libs），
-    // 与 default_libs 重叠会让每个导出被枚举两次。
     let mut seen = std::collections::HashSet::new();
     all.retain(|p| {
         let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
         seen.insert(key)
     });
+    all
+}
+
+/// 库目录下全部模块（递归）：(模块名 = 文件名, 路径)。
+///
+/// go-to-definition 用：LSP 把库函数（含未导出、不在作用域的名字）按来源模块名
+/// 映射回源文件，跳转落到对应 .pkt 的定义处。
+pub fn lib_module_paths(libs: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    collect_lib_modules(&effective_lib_dirs(libs))
+}
+
+/// 枚举库目录（默认 eng_lib + 显式 libs）下全部模块的命名导出。
+///
+/// 库导出隐式可见（无需 import 即可调用），LSP 补全 / 悬停应提供它们。
+pub fn lib_exports(libs: &[PathBuf]) -> Vec<LibExport> {
+    let all = effective_lib_dirs(libs);
     let mut out = Vec::new();
     for (mod_name, path) in collect_lib_modules(&all) {
-        let Ok(src) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(ast) = parse_ast(&src) else {
+        // 走进程级缓存：不可读 / 语法错的库文件跳过（与原行为一致）
+        let Ok(ast) = cached_module(&path) else {
             continue;
         };
         let funcs: HashMap<&str, &ast::FuncStmt> = ast
@@ -504,10 +769,8 @@ pub fn lib_functions(libs: &[PathBuf]) -> Vec<LibExport> {
     });
     let mut out = Vec::new();
     for (mod_name, path) in collect_lib_modules(&all) {
-        let Ok(src) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(ast) = parse_ast(&src) else {
+        // 走进程级缓存：不可读 / 语法错的库文件跳过（与原行为一致）
+        let Ok(ast) = cached_module(&path) else {
             continue;
         };
         for stmt in &ast.stmts {
@@ -823,7 +1086,8 @@ fn resolve_names(graph: &mut ModuleGraph) -> PktResult<()> {
                             format!("export 的元件 `{name}` 未定义（本文件定义或 import）"),
                             *span,
                         )
-                        .with_file(file.clone()));
+                        .with_file(file.clone())
+                        .with_kind(DiagnosticKind::UnknownName { name: name.clone() }));
                     }
                 }
             }
@@ -988,7 +1252,8 @@ fn check_pipeline_names(
                 format!("use 的元件 `{name}` 未定义（本文件定义或 import）"),
                 *span,
             )
-            .with_file(file));
+            .with_file(file)
+            .with_kind(DiagnosticKind::UnknownName { name: name.clone() }));
         }
     }
     for call in &p.layers {
@@ -1011,7 +1276,10 @@ fn check_call_name(
             ),
             c.name_span,
         )
-        .with_file(file));
+        .with_file(file)
+        .with_kind(DiagnosticKind::UnknownName {
+            name: c.name.clone(),
+        }));
     }
     Ok(())
 }
@@ -1598,6 +1866,7 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                         })
                         .collect(),
                     fields: schema.fields.clone(),
+                    doc: f.doc.clone(),
                     span: f.span,
                 });
             }
@@ -1616,6 +1885,7 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
                 body: (*f.body).clone(),
                 span: f.span,
                 doc: f.doc.clone(),
+                value_body: f.value_body.clone(),
             }),
             Stmt::Pipeline(p) => {
                 if default.is_some() {
@@ -1640,6 +1910,7 @@ fn finish_module(graph: &Arc<ModuleGraph>, entry: usize) -> PktResult<Module> {
         sniffer,
         imports,
         graph: graph.clone(),
+        entry,
     })
 }
 

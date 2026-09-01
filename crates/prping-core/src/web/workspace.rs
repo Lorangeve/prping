@@ -11,7 +11,7 @@
 //! - 单文件内容上限 MAX_SAVE_TEXT。
 //!
 //! 发现顺序（default_workspace）：**二进制所在目录/examples → 启动目录/examples**，
-//! 与 UI 目录（assets.rs）和 lib 目录（engine registry_libs）的就近查找一致——
+//! 与 UI 目录（assets.rs）和 lib 目录（packet_dsl::default_libs）的就近查找一致——
 //! just dist 的产物布局 {prping, lib/, examples/, UI/} 就地可用。
 
 use std::path::{Path, PathBuf};
@@ -298,7 +298,7 @@ fn home_dir() -> Option<PathBuf> {
 /// 相对路径词法校验 → 路径（'/' 分隔各段）。规则见模块注释；
 /// `require_pkt` = 是否要求 .pkt/.pktl 扩展名（保存/新建 DSL 文件为 true，
 /// 任意文件读/删/改名/建目录为 false）。
-fn validate_rel(rel: &str, require_pkt: bool) -> anyhow::Result<PathBuf> {
+pub(crate) fn validate_rel(rel: &str, require_pkt: bool) -> anyhow::Result<PathBuf> {
     if rel.is_empty() || rel.len() > MAX_REL_LEN {
         anyhow::bail!("{}", t!("web.ws_bad_path"));
     }
@@ -359,7 +359,11 @@ fn is_windows_reserved(seg: &str) -> bool {
 ///
 /// 已存在的文件 canonicalize 后断言仍在根内（防符号链接把工作区条目指向根外）；
 /// 新文件要求父目录已存在（同样断言根内）。
-fn resolve_in_root(root: &Path, rel: &str, require_pkt: bool) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_in_root(
+    root: &Path,
+    rel: &str,
+    require_pkt: bool,
+) -> anyhow::Result<PathBuf> {
     let rel_path = validate_rel(rel, require_pkt)?;
     let root_canon = std::fs::canonicalize(root)
         .map_err(|e| anyhow::anyhow!(t!("web.ws_read_failed", err = e.to_string())))?;

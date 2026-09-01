@@ -88,7 +88,7 @@ errors:
   lsp_requires_eng: "--lsp 只能与 --eng 一起使用"
   raw_requires_pkg: "--raw 只能与 --pkt 一起使用"
   iface_requires_raw: "--iface 只能与 --pkt --raw 一起使用"
-  listen_conflict: '持续监听（--wait 无值）不能与 --fuzz/--out 组合（持续接收并回显；--raw = 链路层监听，可配合 --iface 选网卡）'
+  listen_conflict: '持续监听（--wait 无值）不能与 --fuzz/--out 组合（持续接收并打印匹配详情；--raw = 链路层监听，可配合 --iface 选网卡）'
   listen_raw_no_target: '--wait --raw（链路层监听）不需要 ADDR:PORT（帧按帧内 MAC/IP 决定去向）'
   params_requires_eng_pkg: "--params 只能与 --eng 或 --pkt 一起使用"
   params_format: "--params 需要 k=v 格式: `%{value}`"
@@ -209,7 +209,7 @@ help:
     pkt_count: 每个包重复发送次数（配方步骤 `count:` 覆盖；--wait 无值不支持）
     wait: >-
       等待/监听模式：`--wait SECS` = 发送后等一个匹配应答（对标 scapy sr1），打印 RTT 并反解展示；
-      `--wait`（无值）或负数（如 `--wait=-2`）= 无限等待/持续监听（服务端，命中回显/按应答模板应答，Ctrl+C 退出）
+      `--wait`（无值）或负数（如 `--wait=-2`）= 无限等待/持续监听（服务端，纯监听：命中打印匹配详情，Ctrl+C 退出）
     fuzz: 发送前把未填字段全部随机化（对标 scapy fuzz()，配合 --pkt）
     out: 把构建的包存成 pcap 文件（对标 scapy wrpcap，配合 --pkt）
     summary: 摘要模式：只打印一行结果（包数、目标、发送/失败数），隐藏逐包详情
@@ -221,7 +221,7 @@ help:
     skip: 转码跳过前 N 条记录（配合 --to-pkt）
     limit: 转码最多转换 N 条记录（配合 --to-pkt）
     threads: 转码解析/渲染并发线程数（0 = 自动，记录数≥1024 时按 CPU 并行；1 = 单线程）
-    lib: pkglang 库目录（可多次；引擎/包子命令，排在默认 eng_lib 之后）
+    lib: pkglang 库目录（可多次；引擎/包子命令，排在默认 lib/ 目录之后）
     quiet: 不输出每次测试结果
     histogram: '直方图: 桶数（如 20）或逗号分隔的毫秒阈值（如 1,5,10,50）'
     warmup: 预热迭代次数（默认 4）

@@ -37,8 +37,11 @@ cargo build --release --features pcap
 |------|------|
 | `--release` | Release 构建（推荐） |
 | `--features pcap` | Linux 启用 pcap（macOS/Windows 默认启用） |
+| `--features web` | 启用 `prping web` Web 编辑器子命令（默认不编译；`just build`/`just check`/`just test` 等统一启用） |
 
 > **pcap 说明**：`packet --raw` 在 Windows/macOS 始终走 pcap 链路层注入；Linux 默认走原生 raw socket（AF_PACKET/IPPROTO_RAW），无需 pcap。启用 `--features pcap` 后 Linux 也走 pcap，与 Windows/macOS 行为一致。
+
+> **web 说明**：`prping web` 子命令由 `--features web` 门控（默认不编译，产物体积更小）。workspace 需包名限定：`cargo build --features prping/web`。justfile 的 build/check/test 配方统一启用，产物默认具备完整功能。
 
 ## Windows 7
 
@@ -75,7 +78,7 @@ prping engine FILE.pkt          # .pkt 分析（层栈 + hexdump）
 prping engine --lsp             # .pkt 语言服务器（JSON-RPC over stdio）
 prping packet FILE.pkt [HOST:PORT]  # 构建并发送（目标可省略）
 prping engine --pcap x.pcap --to-pkt dir/  # pcap → 每记录一个 .pkt + .pktl 配方（--structured 语义化）
-# Web 编辑器（前端默认随产物 UI/ 目录分发；--features web-embed 内嵌二进制）：
+# Web 编辑器（子命令由 --features web 启用；前端默认随产物 UI/ 目录分发，--features web-embed 内嵌二进制）：
 prping web --open               # 启动并自动打开浏览器（左栏文件管理：examples 可编辑保存/Ctrl+S、eng_lib 只读；CodeMirror + LSP + 实时层栈/HEX 预览）
 ```
 

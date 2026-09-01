@@ -156,6 +156,8 @@ pub(crate) async fn dispatch(stream: &mut TcpStream, head: &RequestHead) -> std:
         let body = serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "wsPath": "/ws",
+            // 内置原语名单：前端据此排除「跳不到任何定义」的调用名高亮
+            "builtins": packet_dsl::builtin_docs().iter().map(|d| d.name).collect::<Vec<_>>(),
         })
         .to_string();
         return respond(

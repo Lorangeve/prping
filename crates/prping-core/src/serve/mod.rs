@@ -164,11 +164,11 @@ pub async fn serve(
     // （OnceLock 一次性；非 verbose 不加载，保持零开销）。
     if verbose {
         crate::engine::eng::ensure_proto_registry();
-        // 注册表为空（eng_lib/lib 库目录都缺失，或全部解析失败）时，抓到的
+        // 注册表为空（lib 库目录都缺失，或全部解析失败）时，抓到的
         // 帧/载荷只能 hexdump、无法反解层栈（每帧都显示「未能识别任何层」）——
         // 提前警告并给出实际查找的库目录，避免看不出原因。
         if packet_dsl::proto_registry().is_empty() {
-            let libs = crate::engine::eng::libs_display(&crate::engine::eng::registry_libs());
+            let libs = crate::engine::eng::libs_display(&packet_dsl::default_libs());
             let mut w = output::stderr();
             let _ = output::writeln_orange(
                 &mut w,

@@ -1,0 +1,27 @@
+# 服务端配方（server.pktl）：监听触发 + extract 取值 + 触发回显。
+#
+# 步骤 1：`wait:`（无值 = 持续监听）——UDP 数据报监听 :55353，sniffer 匹配 DNS
+#         查询（and/not 组合规则，见 listen.pkt），命中后 extract 写 global。
+# 步骤 2：触发发包——echo.pkt 用 global 重建查询（同 id）发回查询方。
+#
+# 运行（终端 1）：prping packet examples/sniffer_chat/server.pktl
+# 客户端（终端 2）：prping packet examples/sniffer_chat/client.pktl 127.0.0.1:55353
+global:
+- tid
+- cip
+- cport
+
+recipe:
+- packet: listen.pkt
+  wait:
+  extract:
+  - name: tid
+    from: reply.dns.id
+    as: int
+  - name: cip
+    from: reply.peer.ip
+    as: str
+  - name: cport
+    from: reply.peer.port
+    as: int
+- packet: echo.pkt

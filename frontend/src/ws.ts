@@ -9,6 +9,29 @@
 
 export type Status = "connected" | "connecting" | "closed";
 
+/** run 信封参数：工作区内 .pkt/.pktl + packet 子命令选项（未给的字段不发）。 */
+export interface RunOpts {
+  name: string;
+  target?: string;
+  params?: Record<string, string>;
+  globals?: Record<string, string>;
+  count?: number;
+  /** 数字 = --wait SECS（发后等一个应答）；true = 裸 --wait（持续监听） */
+  wait?: number | true;
+  raw?: boolean;
+  iface?: string;
+  out?: string;
+  /** --json：JSONL 结构化输出（前端按行渲染包/步骤/汇总） */
+  json?: boolean;
+}
+
+/** run_exit 信封数据：code null = 被 kill（stop）。 */
+export interface RunExit {
+  code: number | null;
+  stopped: boolean;
+  truncated: boolean;
+}
+
 export class PrpingClient {
   private ws: WebSocket | null = null;
   private seq = 0;
@@ -20,6 +43,10 @@ export class PrpingClient {
   /** LSP JSON-RPC 消息回调（服务端 → 客户端方向）。 */
   onLsp: ((message: any) => void) | null = null;
   onStatus: ((s: Status) => void) | null = null;
+  /** packet 运行输出（run_out 信封，流式；stream = "out" | "err"）。 */
+  onRunOut: ((run: string, stream: string, text: string) => void) | null = null;
+  /** packet 运行结束（run_exit 信封）。 */
+  onRunExit: ((run: string, exit: RunExit) => void) | null = null;
 
   connect(): void {
     this.closedByUs = false;
@@ -40,6 +67,14 @@ export class PrpingClient {
       }
       if (env.type === "lsp") {
         this.onLsp?.(env.message);
+      } else if (env.type === "run_out") {
+        this.onRunOut?.(env.run, env.stream, env.text);
+      } else if (env.type === "run_exit") {
+        this.onRunExit?.(env.run, {
+          code: typeof env.code === "number" ? env.code : null,
+          stopped: !!env.stopped,
+          truncated: !!env.truncated,
+        });
       } else if (env.type === "result" && typeof env.id === "number") {
         const resolve = this.pending.get(env.id);
         this.pending.delete(env.id);
@@ -153,5 +188,17 @@ export class PrpingClient {
   /** 浏览目录（文件夹选择对话框数据源；path 缺省 = 服务端用户主目录）。 */
   browse(path?: string): Promise<any> {
     return this.request(path ? { type: "browse", path } : { type: "browse" });
+  }
+
+  /** 运行工作区 .pkt/.pktl：应答 = 启动 ack（data.run = run_id）；输出/退出走
+   *  onRunOut / onRunExit 推送。 */
+  run(opts: RunOpts): Promise<any> {
+    return this.request({ type: "run", ...opts });
+  }
+
+  /** 停止活跃运行：带 run id 停单个（任务管理）；缺省停本连接全部。
+   *  kill 后子进程由服务端 waiter 收尸，终态经 run_exit 推送。 */
+  runStop(run?: string): Promise<any> {
+    return this.request(run ? { type: "run_stop", run } : { type: "run_stop" });
   }
 }

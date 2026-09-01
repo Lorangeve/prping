@@ -262,7 +262,7 @@ ubuntu 增设 `test-pcap`（非门禁）；llvm-cov 汇总上报（非门禁）�
 ### 5.3 engine/（包构造引擎）
 
 > 现状：tests/pkg.rs 64、tests/engine.rs 14（LSP）、tests/convert.rs 11、tests/pcap.rs 3；
-> 内联散布在 eng/mod(6)、pkg/recipe(11)、listen_raw(4)、rawpcap(10)、convert(2)、display(2)。
+> 内联散布在 eng/mod(6)、pkg/recipe(11)、listen_raw(1)、rawpcap(10)、convert(2)、display(2)。
 > 零覆盖文件：pkg/send、pkg/raw、pkg/listen、pkg/sniffer、pkg/mod、engine/recipe（.pktl 解析）、
 > engine/pcap、rawpcap/device（Linux 默认构建）、eng/lsp（仅集成覆盖）。
 
@@ -305,13 +305,11 @@ ubuntu 增设 `test-pcap`（非门禁）；llvm-cov 汇总上报（非门禁）�
 | PKG-8 | recipe_listen_step_requires_sniffer | L4 | wait: 无值 + .pkt 无 sniffer → 步骤失败 stop | P1 |
 | PKG-9 | step_params_override_cli_params | L1 | 步骤 params 同名覆盖 CLI `--params`（dport 参数化验证） | P1 |
 | PKG-10 | match_reply_sniffer_requires_sent_report | L0 | sniffer+None report→Err("内部错误") | P1 |
-| PKG-11 | reply_is_v6_packet_versions（需放宽 cfg 至 test） | L0 | eth\|ipv6(v6)→true；ipv4→false；无 IP→false | P1 |
 | PKG-12 | send_raw_bytes_rejects_non_raw_outer | L0 | 最外层非 eth/ipv4/ipv6 → raw 提示错误（先于系统调用，跨平台可测） | P1 |
-| PKG-13 | build_reply_bytes_template_eval_failure | L0 | 模板引用帧中不存在层/字段 → Err 不 panic | P1 |
 | PKG-14 | stack_summary_raw_layer_identity / fmt_target_forms | L0 | http/dns 挂非标端口仍显 `<dns…|>`；port=0→仅 IP | P2 |
 | PKG-15 | is_fake_ip_boundaries / wait_mode_one_shot_secs | L0 | 198.18–198.19 真、198.17/198.20/::1 假；OneShot/Off/Continuous 三态 | P2 |
 | PKG-16 | recipe_retry_exhausted / recipe_delay_interrupted_stops | L1 | retry N 全超时计数正确；delay 期间 `set_interrupted` 提前返回 | P2 |
-| PKG-17 | listen_survives_send_phase_failure | L1 | 发送段失败→警告后仍监听并回显 | P2 |
+| PKG-17 | listen_survives_send_phase_failure | L1 | 发送段失败→警告后仍监听并打印匹配详情 | P2 |
 | PKG-18 | handle_frame_dedup_and_stats（需抽纯核小重构） | L0 | 同帧重复不增 total；注入帧回读跳过 | P2 |
 
 #### 5.3.4 recipe.rs（.pktl 解析器，现零内联测试）

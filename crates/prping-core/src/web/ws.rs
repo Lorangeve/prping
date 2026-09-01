@@ -19,9 +19,18 @@
 //!   { "type": "workspace", "id": 9, "path": "/dir" }     打开自定义文件夹（"" 重置默认）
 //!   { "type": "browse",  "id": 11, "path": "/dir" }      浏览目录（文件夹选择对话框数据源；
 //!                                                        path 缺省 = 用户主目录）
+//!   { "type": "run",     "id": 12, "name": "a.pktl",    运行工作区 .pkt/.pktl（spawn 自身
+//!                    "target": "h:p", "params": {...},  二进制 `packet` 子命令；见 run.rs）；
+//!                    "count": N, "wait": SECS|true,     wait=true = 裸 --wait（持续监听）
+//!                    "raw": bool, "iface": "eth0", "out": "run.pcap" }
+//!   { "type": "run_stop", "id": 13, "run": "run-0" }     停止运行：带 run id 停单个
+//!                                                        （多标签任务管理）；缺省停本连接全部
 //! server → client
 //!   { "type": "lsp", "message": {…publishDiagnostics/响应…} }
 //!   { "type": "result", "id": 1, "ok": true, "data": … | "ok": false, "error": "…" }
+//!   { "type": "run_out", "run": "run-0", "stream": "out"|"err", "text": "…" }  运行输出（流式）
+//!   { "type": "run_exit", "run": "run-0", "code": 0|null, "stopped": bool,    运行结束
+//!                         "truncated": bool }                                  （code null = 被 kill）
 //! ```
 //!
 //! LSP 桥：每个 WS 连接一个独立 LSP 会话——客户端消息按 Content-Length 分帧写入
@@ -30,6 +39,7 @@
 //! → 回推通道关闭 → 会话任务结束（无泄漏）。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use async_tungstenite::WebSocketStream;
@@ -43,6 +53,7 @@ use smol::io::AsyncWriteExt;
 use smol::net::TcpStream;
 
 use super::pipe::{ChanReader, ChanWriter};
+use super::run;
 use super::workspace;
 
 /// 单条 LSP 消息上限（与 lsp.rs 的 MAX_LSP_MSG 同量级，防异常帧耗内存）。
@@ -67,7 +78,7 @@ pub(crate) async fn accept(
 }
 
 /// 会话主体：读任务（WS→分派）+ 转发任务（LSP 帧→信封）+ 回推循环（信封→WS）。
-/// `libs` 为 `--lib` 附加目录（与 engine/packet 同语义；烘焙库目录在分析/列库函数
+/// `libs` 为 `--lib` 附加目录（与 engine/packet 同语义；默认 lib/ 目录在分析/列库函数
 /// 内部合并）；`default_ws` 为本连接的初始工作区根（examples 发现结果，可被
 /// workspace 信封按连接切换）。
 pub(crate) async fn session(
@@ -82,6 +93,8 @@ pub(crate) async fn session(
     let sess = Arc::new(Session {
         libs: libs.clone(),
         root: Mutex::new(default_ws),
+        active: Arc::new(Mutex::new(Vec::new())),
+        run_seq: AtomicU64::new(0),
     });
 
     // LSP 会话：阻塞 run_lsp_on 放线程池；EOF/退出由管道两端 drop 传导
@@ -112,7 +125,9 @@ pub(crate) async fn session(
         })
     };
 
-    // WS 读 → 信封分派（客户端断开时本任务结束，in_tx drop → LSP EOF）
+    // WS 读 → 信封分派（客户端断开时本任务结束，in_tx drop → LSP EOF）。
+    // 断开时显式收杀活跃运行：run 的读流/waiter 任务持有 reply_tx 克隆，
+    // 回推通道不会因此关闭，poller 的 is_closed 兜底探测不到——必须显式 kill
     let reader = {
         let reply_tx = reply_tx.clone();
         let sess = sess.clone();
@@ -126,6 +141,7 @@ pub(crate) async fn session(
                 };
                 dispatch(&text, &in_tx, &reply_tx, &sess).await;
             }
+            run::stop(&sess.active, None);
         })
     };
     // reply_tx 的最后持有者是上面两个任务——主动释放手中副本，客户端断开时
@@ -138,15 +154,20 @@ pub(crate) async fn session(
             break;
         }
     }
+    // 会话收尾兜底：无论经哪条路径退出（含 sink 失败），都不留运行中的子进程
+    run::stop(&sess.active, None);
     reader.cancel().await;
     fwd.cancel().await;
     lsp.cancel().await;
 }
 
-/// 单连接会话状态：库目录（服务级共享）+ 工作区根（每连接独立，workspace 信封可切换）。
+/// 单连接会话状态：库目录（服务级共享）+ 工作区根（每连接独立，workspace 信封可切换）
+/// + 活跃 packet 运行槽（每连接最多一个，run/run_stop 信封操作）。
 struct Session {
     libs: Vec<PathBuf>,
     root: Mutex<Option<PathBuf>>,
+    active: Arc<run::RunSlot>,
+    run_seq: run::RunSeq,
 }
 
 /// 当前工作区根快照（Mutex 中毒按 None 处理——会话级状态，不值得传播 panic）。
@@ -155,8 +176,9 @@ fn root_of(sess: &Session) -> Option<PathBuf> {
 }
 
 /// 信封分派：lsp 透传 / analyze / list / read / tree / save / delete / rename /
-/// mkdir / workspace / browse。
-/// 目录树、文件读写、目录浏览走 `smol::unblock`（磁盘操作不阻塞异步循环）。
+/// mkdir / workspace / browse / run / run_stop。
+/// 目录树、文件读写、目录浏览、运行文件解析走 `smol::unblock`（磁盘操作不阻塞
+/// 异步循环）。
 async fn dispatch(
     text: &str,
     in_tx: &Sender<Vec<u8>>,
@@ -465,6 +487,49 @@ async fn dispatch(
             })
             .detach();
         }
+        Some("run") => {
+            // 运行工作区 .pkt/.pktl：spawn 自身二进制 packet 子命令（run.rs 桥）。
+            // 文件解析是磁盘操作 → unblock；成功即回 ack（run_id），后续输出与
+            // 退出经 run_out / run_exit 信封异步推送（不受请求-应答 id 关联约束）
+            let Some(root) = root_of(sess) else {
+                let _ = reply_tx
+                    .send(json!({ "type": "result", "id": id, "ok": false,
+                        "error": t!("web.ws_not_found").to_string() }))
+                    .await;
+                return;
+            };
+            let libs = sess.libs.clone();
+            let sess = sess.clone();
+            let ack_tx = reply_tx.clone();
+            let stream_tx = reply_tx.clone();
+            smol::spawn(async move {
+                let started = smol::unblock(move || {
+                    run::spec_from_envelope(&env, &root, libs)
+                        .and_then(|spec| run::start(spec, stream_tx, &sess.active, &sess.run_seq))
+                })
+                .await;
+                let reply = match started {
+                    Ok(run_id) => {
+                        json!({ "type": "result", "id": id, "ok": true, "data": { "run": run_id } })
+                    }
+                    Err(e) => {
+                        json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
+                    }
+                };
+                let _ = ack_tx.send(reply).await;
+            })
+            .detach();
+        }
+        Some("run_stop") => {
+            // 停止活跃运行：带 "run" id 停单个（任务管理），缺省停本连接全部；
+            // kill 后 waiter 收尸推 run_exit
+            let target = env.get("run").and_then(Value::as_str);
+            let stopped = run::stop(&sess.active, target);
+            let _ = reply_tx
+                .send(json!({ "type": "result", "id": id, "ok": true,
+                    "data": { "stopped": stopped } }))
+                .await;
+        }
         _ => {
             let _ = reply_tx
                 .send(json!({ "type": "error", "id": id, "message": "unknown envelope type" }))
@@ -594,7 +659,7 @@ fn params_decl_json(decl: &[(String, Option<packet_dsl::ast::Value>)]) -> Value 
     )
 }
 
-/// 生效库目录（烘焙 eng_lib + `--lib` 附加；展示用）。
+/// 生效库目录（运行时 lib/ 发现 + `--lib` 附加；展示用）。
 fn lib_dirs(libs: &[PathBuf]) -> Vec<String> {
     crate::engine::eng::effective_libs(libs)
         .iter()

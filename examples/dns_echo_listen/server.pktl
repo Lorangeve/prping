@@ -1,0 +1,30 @@
+# DNS 发包/回包模拟 · 服务端配方（server.pktl）：监听触发 + extract 取值 + 触发发包。
+#
+# 步骤 1：`wait:`（无值 = 持续监听）——UDP 数据报监听 :53，sniffer 匹配 DNS 查询
+#         （flags=0x0100），命中后 extract 匹配包字段写 global：
+#         tid=查询 id；cip/cport=查询方 IP/端口（reply.peer.*，来自 socket）。
+# 步骤 2：触发发包——reply.pkt 用 global 构造带 A 记录的 DNS 应答发回查询方。
+#
+# 运行（绑定 :53 需 root/管理员）：
+#   sudo prping packet examples/dns_echo_listen/server.pktl
+# 客户端（另一终端，payload 模式无需 root）：
+#   prping packet --wait 2 examples/dns_echo_listen/client.pkt 127.0.0.1:53
+global:
+- tid
+- cip
+- cport
+
+recipe:
+- packet: listen.pkt
+  wait:
+  extract:
+  - name: tid
+    from: reply.dns.id
+    as: int
+  - name: cip
+    from: reply.peer.ip
+    as: str
+  - name: cport
+    from: reply.peer.port
+    as: int
+- packet: reply.pkt

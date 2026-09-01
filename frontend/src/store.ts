@@ -115,4 +115,5 @@ export const Keys = {
   workspaceRoot: "workspaceRoot", // 自定义工作区根（重载后恢复）
   lastFile: "lastFile", // { root, path } 上次打开的文件
   panel: "panel", // 右侧面板选择
+  runSettings: "runSettings", // Run 面板选项快照（target/count/wait/...）
 } as const;

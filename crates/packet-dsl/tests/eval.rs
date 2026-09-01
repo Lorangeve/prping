@@ -224,7 +224,7 @@ fn params_missing_is_error() {
     let err = packet_dsl::resolve_with_params(&m, &Params::new()).unwrap_err();
     assert!(err.message.contains("未提供"), "{}", err.message);
     // `params(` 起始于第 2 行第 21 列；Display 前缀即 `2:21:`
-    let sp = err.span.expect("缺参诊断应带 span");
+    let sp = err.span.as_ref().expect("缺参诊断应带 span");
     assert_eq!(sp.start.line, 2, "定位到调用行：{}", err);
     assert_eq!(sp.start.col, 21, "定位到 params( 起始列：{}", err);
     assert!(
@@ -2188,7 +2188,7 @@ fn eval_extract_value_builtin_only() {
     assert_eq!(val, Value::List(vec![Value::Int(0), Value::Int(3)]));
 
     // 非 extract 上下文（reply 访问器未注入）→ 可操作的报错（而非回退用户函数的
-    // 「未知函数」：`reply(层,字段)` 是 extract/应答模板专用原语）
+    // 「未知函数」：`reply(层,字段)` 是配方 extract 专用原语）
     let v = packet_dsl::parser::parse_value_expr(r#"reply("icmp", "seq")"#).unwrap();
     let err = packet_dsl::eval_sniffer_value(None, &Params::new(), &v)
         .unwrap_err()
@@ -2200,7 +2200,7 @@ fn eval_extract_value_builtin_only() {
 }
 
 /// `resolve_sources_with_reply`：`reply("层","字段")` 值原语在包定义中生效
-/// （`packet --listen --raw` 的应答模板求值路径）。
+/// （公开 API——当前仅配方 extract 表达式经 `eval_extract_value` 使用）。
 #[test]
 fn resolve_sources_with_reply_accessor() {
     common::register_eng_lib();

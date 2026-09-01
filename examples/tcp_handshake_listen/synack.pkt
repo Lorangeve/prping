@@ -1,0 +1,10 @@
+# server 配方 · 步骤 2（触发发包）：构造 SYN-ACK 发回请求方。
+# 字段来自 listen 步骤的 extract（global）：
+#   r_sport = 请求的 tcp.sport → SYN-ACK 的 dport；
+#   r_seq   = 请求的 tcp.seq → ack = r_seq + 1（三次握手的确认号推导）；
+#   r_src_ip（请求方）→ dst、r_dst_ip（本机）→ src。
+# seq=0x2000 为服务端固定 ISN（直观展示数值关系；真实场景应随机化）。
+# 裸 IP 外层（无 eth）：配 raw: true 走内核 IP 栈路由注入，无需 MAC 解析；
+# 校验和由序列化器自动重算。位常量 syn()/ack() 来自 eng_lib（勿用同名变量遮蔽）。
+payload = raw(bytes="")
+use(payload) |> tcp(sport=80, dport=global("r_sport"), seq=0x2000, ack=global("r_seq") + 1, flags=bor(syn(), ack()), window=65535) |> ipv4(dst=global("r_src_ip"), src=global("r_dst_ip"))

@@ -74,7 +74,7 @@ pub enum WaitMode {
     Off,
     /// `--wait SECS`：发送后等一个匹配应答（超时退出）。
     OneShot(f64),
-    /// `--wait`（无值）：持续监听，命中回显/按应答模板应答（Ctrl+C 退出）。
+    /// `--wait`（无值）：持续监听，命中打印匹配详情（纯监听，Ctrl+C 退出）。
     Continuous,
 }
 
@@ -100,7 +100,7 @@ pub struct PkgOptions {
     /// 普通 `--pkt` 也生效，配方执行时步骤间由 extract 更新）。
     pub globals: packet_dsl::Globals,
     /// 等待/监听模式：`--wait SECS` = 发送后等一个匹配应答（对标 scapy `sr1`）；
-    /// `--wait`（无值）= 持续监听（服务端，命中回显/应答）。
+    /// `--wait`（无值）= 持续监听（纯监听：命中打印匹配详情，回应由 .pktl 配方编排）。
     pub wait: WaitMode,
     /// 每个包重复发送次数（`--count N` / 配方步骤 `count: N`，默认 1）。
     pub count: usize,
@@ -141,13 +141,13 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
 }
 
 /// 监听模式（`--listen`）：绑定 UDP 地址，按 .pkt 的 sniffer 规则匹配收到的
-/// 数据报并回显（pktlang 对话的服务端；与客户端 `--wait` 配对模拟通信）。
+/// 数据报并打印匹配详情（纯监听；回应包由 .pktl 配方编排）。
 pub fn listen_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     listen::listen_packets(file, opts)
 }
 
 /// 链路层监听（`--listen --raw`）：持续接收完整帧（AF_PACKET / libpcap），
-/// 按 .pkt 的 sniffer 规则匹配，命中后按应答模板（默认导出）构造应答帧注入。
+/// 按 .pkt 的 sniffer 规则匹配，命中打印匹配详情与反解展示（纯监听）。
 pub fn listen_raw_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     listen_raw::listen_raw_packets(file, opts)
 }

@@ -8,9 +8,14 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
 import { highlightSelectionMatches, search } from "@codemirror/search";
-import { Compartment, EditorState, type Text, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, Facet, RangeSetBuilder, type Text, type Extension } from "@codemirror/state";
 import {
+  Decoration,
+  type DecorationSet,
   EditorView,
+  ViewPlugin,
+  type ViewUpdate,
+  crosshairCursor,
   drawSelection,
   dropCursor,
   highlightActiveLine,
@@ -19,6 +24,7 @@ import {
   hoverTooltip,
   keymap,
   lineNumbers,
+  rectangularSelection,
   tooltips,
 } from "@codemirror/view";
 import { renderMarkdown } from "./markdown";
@@ -190,6 +196,230 @@ export interface EditorOpts {
   completion: (pos: { line: number; character: number }) => Promise<any>;
   /** LSP 悬停源（返回 {contents} 或 null）。 */
   hover: (pos: { line: number; character: number }) => Promise<any>;
+  /** go-to-definition：Ctrl/Cmd/Alt+单击标识符（.pkt）时回调
+   *  （行列 0 基；解析/打开/导航由调用方完成）。 */
+  onGoto?: (pos: { line: number; character: number }) => void;
+  /** .pktl 配方步骤的文件 token Ctrl/Cmd/Alt+单击回调（如 `dns_query.pkt`，按写法原样）。 */
+  onGotoPktlFile?: (file: string) => void;
+}
+
+// ── 跳转链接（go-to-definition）────────────────────────────
+
+/** 当前文档的跳转模式：pkt（可跳名字）/ pktl（步骤文件名）/ md（无）。 */
+const linkMode = Facet.define<string, string>({ combine: (v) => v[v.length - 1] ?? "pkt" });
+
+/** 切换跳转模式（applyOpen 按扩展名设置；md 无跳转目标）。 */
+const linkModeCompartment = new Compartment();
+export function setLinkMode(view: EditorView, mode: "pkt" | "pktl" | "md"): void {
+  view.dispatch({ effects: linkModeCompartment.reconfigure(linkMode.of(mode)) });
+}
+
+/** 可跳判定数据：names = 确定可跳的名字（本地符号 + import 引入名/模块名），
+ *  builtins = 内置原语（调用它们没有任何定义可跳）。App 组装下传。 */
+export interface LinkScope {
+  names: Set<string>;
+  builtins: Set<string>;
+}
+
+const EMPTY_SCOPE: LinkScope = { names: new Set(), builtins: new Set() };
+const linkScope = Facet.define<LinkScope, LinkScope>({
+  combine: (v) => v[v.length - 1] ?? EMPTY_SCOPE,
+});
+
+const linkScopeCompartment = new Compartment();
+/** 下传可跳判定数据（名字集/内置名单变化时调用；装饰随之重建）。 */
+export function setLinkScope(view: EditorView, link: LinkScope): void {
+  view.dispatch({ effects: linkScopeCompartment.reconfigure(linkScope.of(link)) });
+}
+
+/** 语句关键字：即使长得像调用（use(…)）也没有定义可跳。 */
+const LINK_KEYWORDS = new Set(["use", "import", "func"]);
+
+/** 逐字符扫出行内标识符（跳过字符串字面量与 `#` 注释，含 `#[` 注解行）。 */
+function identifiersOnLine(lineText: string, cb: (start: number, end: number) => void): void {
+  const isWordStart = (c: string) => /[A-Za-z_]/.test(c);
+  const isWordChar = (c: string) => /[A-Za-z0-9_]/.test(c);
+  let inStr = false;
+  let i = 0;
+  while (i < lineText.length) {
+    const c = lineText[i]!;
+    if (inStr) {
+      if (c === "\\") i += 1; // 跳过转义字符
+      else if (c === '"') inStr = false;
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      i += 1;
+      continue;
+    }
+    if (c === "#") return; // 行内注释起点（含 #[ 注解）：其后不算
+    if (isWordStart(c)) {
+      let j = i + 1;
+      while (j < lineText.length && isWordChar(lineText[j]!)) j += 1;
+      cb(i, j);
+      i = j;
+      continue;
+    }
+    i += 1;
+  }
+}
+
+/** 一行里的跳转候选（行内偏移，按出现序、互不重叠）——只收**确定可跳**的：
+ *  - pkt：①名字在作用域集（本地符号 / import 引入名与模块名）；②调用名且
+ *    非内置原语（语义分析保证非内置调用必有定义；内置没有定义可跳）；
+ *    字段名（x=）/参数名/裸关键字不在集里，不亮。跳过字符串与 `#` 注释。
+ *  - pktl：步骤文件 token（`- packet: a/b.pkt` 或裸 `- a/b.pkt`）是唯一目标。
+ *  跳转一律 Ctrl/Cmd+单击触发，无修饰键单击保持光标定位。 */
+function linkTargetsOnLine(mode: string, lineText: string, link: LinkScope): [number, number][] {
+  if (mode === "pktl") {
+    const m = /^\s*-\s*(?:packet\s*:\s*)?([A-Za-z0-9_./\\-]+\.(?:pkt|pktl))/.exec(lineText);
+    if (m) {
+      const start = lineText.indexOf(m[1]);
+      if (start >= 0) return [[start, start + m[1].length]];
+    }
+    return [];
+  }
+  const out: [number, number][] = [];
+  identifiersOnLine(lineText, (start, end) => {
+    const word = lineText.slice(start, end);
+    if (link.names.has(word)) {
+      out.push([start, end]);
+      return;
+    }
+    let k = end;
+    while (k < lineText.length && lineText[k] === " ") k += 1;
+    if (lineText[k] === "(" && !LINK_KEYWORDS.has(word) && !link.builtins.has(word)) {
+      out.push([start, end]);
+    }
+  });
+  return out;
+}
+
+const linkMark = Decoration.mark({ class: "cm-ident" });
+
+function buildLinkDecorations(view: EditorView): DecorationSet {
+  const mode = view.state.facet(linkMode);
+  const link = view.state.facet(linkScope);
+  const b = new RangeSetBuilder<Decoration>();
+  if (mode === "md") return b.finish();
+  for (const range of view.visibleRanges) {
+    const text = view.state.doc.sliceString(range.from, range.to);
+    let offset = 0;
+    for (const lineText of text.split("\n")) {
+      const lineFrom = range.from + offset;
+      offset += lineText.length + 1;
+      for (const [s, e] of linkTargetsOnLine(mode, lineText, link)) {
+        b.add(lineFrom + s, lineFrom + e, linkMark);
+      }
+    }
+  }
+  return b.finish();
+}
+
+/** 可跳目标标记：重建时机 = 文档/视口变化、跳转模式切换或可跳数据下传
+ *  （setLinkScope 每次传新对象，按身份比较）。 */
+const linkMarks = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    private mode: string;
+    private scope: LinkScope;
+    constructor(view: EditorView) {
+      this.mode = view.state.facet(linkMode);
+      this.scope = view.state.facet(linkScope);
+      this.decorations = buildLinkDecorations(view);
+    }
+    update(u: ViewUpdate) {
+      const mode = u.view.state.facet(linkMode);
+      const scope = u.view.state.facet(linkScope);
+      if (u.docChanged || u.viewportChanged || mode !== this.mode || scope !== this.scope) {
+        this.mode = mode;
+        this.scope = scope;
+        this.decorations = buildLinkDecorations(u.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations },
+);
+
+/** Ctrl/Cmd 按住状态 → body 上的 cm-mod-goto 类（跳转候选点亮）。
+ *
+ *  两个坑：①只听编辑器上的 key 事件会漏——焦点不在编辑器（刚打开页面、点过
+ *  侧栏/面板/页签）时按 Ctrl，keydown 到不了 view.dom；按键前指针已悬停且
+ *  焦点在外同理——结果「视效不亮但 Ctrl+点击仍可跳」。②状态类**不能挂在
+ *  .cm-editor 上**：CM6 在焦点变化时会整写它的 class 属性（cm-editor +
+ *  cm-focused + themeClasses），imperative 加的类会被抹掉。所以用窗口级
+ *  keydown/keyup（捕获）+ 编辑器 mousemove（指针携带按键状态移入）跟踪，
+ *  状态挂 body，窗口失焦清理。 */
+const modGotoTracking = ViewPlugin.fromClass(
+  class {
+    private view: EditorView;
+    private onKey: (ev: KeyboardEvent) => void;
+    private onMouse: (ev: MouseEvent) => void;
+    private clear: () => void;
+    constructor(view: EditorView) {
+      this.view = view;
+      const body = view.dom.ownerDocument.body;
+      this.onKey = (ev) => body.classList.toggle("cm-mod-goto", ev.ctrlKey || ev.metaKey);
+      this.onMouse = (ev) => body.classList.toggle("cm-mod-goto", ev.ctrlKey || ev.metaKey);
+      this.clear = () => body.classList.remove("cm-mod-goto");
+      window.addEventListener("keydown", this.onKey, true);
+      window.addEventListener("keyup", this.onKey, true);
+      window.addEventListener("blur", this.clear);
+      view.dom.addEventListener("mousemove", this.onMouse);
+    }
+    destroy() {
+      window.removeEventListener("keydown", this.onKey, true);
+      window.removeEventListener("keyup", this.onKey, true);
+      window.removeEventListener("blur", this.clear);
+      this.view.dom.removeEventListener("mousemove", this.onMouse);
+      this.view.dom.ownerDocument.body.classList.remove("cm-mod-goto");
+    }
+  },
+);
+
+/** 光标所在标识符（含点击落在词中间/末尾）。 */
+function identAt(text: string, col: number): { word: string; start: number } | null {
+  const isWord = (c: string) => /[A-Za-z0-9_]/.test(c);
+  let s = Math.min(col, text.length);
+  while (s > 0 && isWord(text[s - 1]!)) s--;
+  let e = s;
+  while (e < text.length && isWord(text[e]!)) e++;
+  return s < e ? { word: text.slice(s, e), start: s } : null;
+}
+
+/** 修饰键单击（Ctrl/Cmd；Alt 让给多光标/块选）→ onGoto / onGotoPktlFile。
+ *  返回 true = 已消费。 */
+function gotoClick(opts: EditorOpts): Extension {
+  const modHeld = (e: KeyboardEvent | MouseEvent) => e.ctrlKey || e.metaKey;
+  return EditorView.domEventHandlers({
+    mousedown(event, view) {
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (pos == null) return false;
+      const mode = view.state.facet(linkMode);
+      if (mode === "md") return false;
+      // 无修饰键单击 = 光标定位，绝不跳转（import 模块名/.pktl 文件名一视同仁）
+      if (!modHeld(event)) return false;
+      const line = view.state.doc.lineAt(pos);
+      const lineText = view.state.doc.sliceString(line.from, line.to);
+      const col = pos - line.from;
+      if (mode === "pktl") {
+        const tok = linkTargetsOnLine(mode, lineText, view.state.facet(linkScope)).find(
+          (t) => col >= t[0] && col <= t[1],
+        );
+        if (!tok) return false;
+        event.preventDefault();
+        opts.onGotoPktlFile?.(lineText.slice(tok[0], tok[1]));
+        return true;
+      }
+      const ident = identAt(lineText, col);
+      if (!ident) return false;
+      event.preventDefault();
+      opts.onGoto?.({ line: line.number - 1, character: ident.start });
+      return true;
+    },
+  });
 }
 
 export function createEditor(parent: HTMLElement, opts: EditorOpts): EditorView {
@@ -400,6 +630,17 @@ export function createEditor(parent: HTMLElement, opts: EditorOpts): EditorView 
     highlight,
     theme,
     editableCompartment.of(editableExt(true)),
+    // 多光标/块选（Alt）：单击加光标、拖拽矩形选区（Ctrl/Cmd 让给跳转）
+    EditorView.clickAddsSelectionRange.of(
+      (event) => event.altKey && event.button === 0 && !event.ctrlKey && !event.metaKey,
+    ),
+    rectangularSelection(),
+    crosshairCursor(),
+    linkModeCompartment.of(linkMode.of("pkt")),
+    linkScopeCompartment.of(linkScope.of(EMPTY_SCOPE)),
+    linkMarks,
+    modGotoTracking,
+    gotoClick(opts),
     tooltips({ position: "absolute" }),
     cmCompletion,
     cmHover,
@@ -446,13 +687,26 @@ export function setDoc(view: EditorView, text: string): void {
   view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
 }
 
-/** 跳到指定行（0-based）：移动光标、滚动到视区中间并聚焦——大纲点击用。 */
-export function revealLine(view: EditorView, line0: number): void {
+/** 跳到指定位置（0 基行 + 可选字符区间）：选中目标、滚动到视区中部并聚焦——
+ *  定义跳转用；charEnd 给出时选中定义名整体。 */
+export function revealPos(
+  view: EditorView,
+  line0: number,
+  char0?: number,
+  charEnd?: number,
+): void {
   const doc = view.state.doc;
   const l = doc.line(Math.min(Math.max(line0 + 1, 1), doc.lines));
+  const from = Math.min(l.from + Math.max(char0 ?? 0, 0), l.to);
+  const to = charEnd != null ? Math.min(l.from + Math.max(charEnd, 0), l.to) : from;
   view.dispatch({
-    selection: { anchor: l.from },
-    effects: EditorView.scrollIntoView(l.from, { y: "center" }),
+    selection: { anchor: from, head: Math.max(to, from) },
+    effects: EditorView.scrollIntoView(from, { y: "center" }),
   });
   view.focus();
+}
+
+/** 跳到指定行（0-based）：移动光标、滚动到视区中间并聚焦——大纲点击用。 */
+export function revealLine(view: EditorView, line0: number): void {
+  revealPos(view, line0);
 }

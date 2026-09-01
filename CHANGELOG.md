@@ -6,6 +6,24 @@
 
 ### 新增
 
+- **WebUI 执行功能**（`prping web` 编辑器可运行包/配方）：Run 页签 + 顶栏 ▶ 运行当前
+  工作区 `.pkt/.pktl`——`run`/`run_stop` 信封 → 服务端 spawn 自身二进制的 `packet`
+  子命令（ADR #8，零改动复用 CLI 全语义与本地化报错），stdout/stderr 逐行流式回传
+  （`run_out`/`run_exit`），输出行数/单行长度封顶（超限继续排水并标记 `truncated`）；
+  target/count/wait/listen（裸 `--wait`）/fuzz/raw/--iface/--out/json（`--json` JSONL
+  结构化输出）选项，`--out` 落工作区根内（`validate_rel` 防逃逸）；**json 默认开**——
+  控制台按 JSONL 解析渲染（✓/✗ 包行+层栈/字节/目标/错误、步骤行、汇总行，悬停看
+  原始 JSON），非 JSON 行（stderr 提示）原样回退，listen 与 json 互斥（CLI 校验）；
+  **多标签并行运行 + 任务管理**：每次 Run 新建任务卡（● 运行中 / ✓✗■ 终态），点击
+  切换控制台、✕ 停止并移除；`run_stop` 带 `run` id 停单个、缺省停本连接全部；全服
+  并发上限 8；run_stop、连接断开与服务端进程死亡（stdin 生命线：子进程监视 stdin
+  EOF 自行退出）三条路径均不留孤儿；未保存修改先落盘再执行；选项快照与运行参数
+  输入（与 Layers 页签共用 `runValues`）经 IndexedDB 持久化。
+- **`web` feature 门控 `prping web` 子命令**（默认不启用）：core `web/` 模块与 CLI web
+  子命令整体由 `--features web` 门控——纯 `cargo build` 不编译 web 模块、CLI 无 `web`
+  子命令（产物体积更小）。justfile 的 build/check/test 配方统一以 `--features prping/web`
+  启用，产物默认具备完整功能；`web-embed` 隐含 `web`（内嵌只对 web 子命令有意义）。
+
 - **sniffer 统一谓词引擎**（packet-dsl `matchpred`，与 `#[rule]` 共享字段取值内核）：
   `.pkt` 的 `sniffer:` 段支持 `and(...)`/`or(...)`/`not(...)` 组合（跨层 AND、取反）、
   层内 `ne(字段, 值)` 不等、`mask(0xc0)`/`startswith`/`endswith`/`contains("...")`
@@ -170,6 +188,13 @@
 
 ### 变更
 
+- **引擎不再默认读取 eng_lib**：编译期烘焙的仓库 `eng_lib` 路径已移除，默认库目录
+  一律运行时发现（二进制同目录 `lib/` + 当前目录 `lib/`，存在才收录、canonical
+  去重；`just dist` 同步 eng_lib → lib/）——部署与开发统一 `lib/` 布局，显式
+  `--lib` 优先级不变。测试构建经 packet-dsl 新增的 `test-stdlib` feature（由
+  packet-dsl / prping-core 的 dev-dependencies 激活，产物永不启用）在运行时发现落空时
+  回退仓库 eng_lib，测试共享真实标准库 prelude；`resolve_libs` 随之只归集 `--lib`
+  （默认目录不再重复收录）
 - **`bandwidth` 缺省次数改为 1000**（对齐 psping 的 `-n` 默认；原为「不带 `-n` 发 0 包」的静默空跑）
 - **`ping HOST:PORT -l N` 从「静默变 latency」改为报错**（负载大小仅限无端口 ICMP ping；带端口负载请用 latency/bandwidth）
 - **`packet --wait` 发送段先行失败从「中止」改为「警告并继续监听」**

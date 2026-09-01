@@ -21,6 +21,7 @@
 mod assets;
 mod http;
 mod pipe;
+mod run;
 mod workspace;
 mod ws;
 

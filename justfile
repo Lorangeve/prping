@@ -20,7 +20,27 @@
 #   - Win7 目标：nightly + rust-src（rustup toolchain install nightly --profile minimal
 #     && rustup component add rust-src --toolchain nightly）
 #
-# 沙箱/只读 registry 环境：export CARGO_HOME=<可写目录> 后运行（just 继承环境变量）。
+# Web 子命令（`prping web`）由 `web` feature 门控（默认不启用，产物体积更小）。
+# justfile 是项目唯一构建/检查入口：下列所有编译配方统一以 `--features prping/web`
+# 启用 web 子命令，保证产物具备完整功能。个别配方（如 check-web-embed）经
+# `web-embed` 隐含启用 web。
+#
+# 沙箱/只读 registry 环境：export CARGO_HOME=<可写目录> 后运行（just 继承环境变量），
+# 或写入仓库根 .env（dotenv-load 自动加载；真实环境变量优先，.env 属本地配置不提交）。
+#
+# 平台标限：标注 [linux] 的配方仅 Linux 可运行/列出（其他平台 just --list 隐藏、
+# 直接调用报错）；未标注配方三平台皆可用（内部按 ${OS:-} = Windows_NT 分派）。
+
+# ── 全局设置 ──────────────────────────────────────────────
+
+# 仓库根存在 .env 时自动加载（无 .env 不报错；本地配置勿提交——沙箱场景把
+# CARGO_HOME 等写进 .env 免每次 export，真实环境变量优先于 .env）
+set dotenv-load
+
+# cargo-xwin 下载的 MSVC 库架构：默认只下载 x86_64+aarch64 且 DONE 标记只记录
+# 最近一次架构，不统一指定会在换架构时反复重下载；本项目只用 x86/x86_64。
+# 导出后对全部 xwin 配方（含 check-all 的 cargo xwin check）统一生效
+export XWIN_ARCH := "x86,x86_64"
 
 # 默认配方（= just build）
 default: build
@@ -38,7 +58,7 @@ build: web-dist
         just windows-deps
         export LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64
     fi
-    cargo build
+    cargo build --features prping/web
     just dist target/debug
 
 # Release 构建（本机）。Windows 原生 MSVC：pcap crate 静态链接 wpcap.lib，
@@ -49,7 +69,7 @@ build-release: web-dist
         just windows-deps
         export LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64
     fi
-    cargo build --release
+    cargo build --release --features prping/web
     just dist target/release
 
 # 资源打包：lib/（← eng_lib）、examples/、UI/（← frontend/dist）同步到 DIR
@@ -74,6 +94,7 @@ dist DIR:
 # 给本机二进制授予 cap_net_raw（raw socket 必需；`cargo build` 覆盖二进制后
 # cap 失效需重跑；免密 sudo 时 .cargo/run-with-cap.sh 在 cargo run/test 自动做）。
 # 用法：just cap（对 debug/release 已有产物执行）
+[linux]
 [script]
 cap:
     if ! command -v setcap >/dev/null 2>&1; then
@@ -151,10 +172,10 @@ fetch-npcap-sdk:
 build-windows-msvc-impl: windows-deps
     if [ "${OS:-}" = "Windows_NT" ]; then
         LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64 \
-            cargo build --release --target x86_64-pc-windows-msvc
+            cargo build --release --target x86_64-pc-windows-msvc --features prping/web
     else
-        XWIN_ARCH=x86,x86_64 LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64 \
-            cargo xwin build --target x86_64-pc-windows-msvc --release
+        LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64 \
+            cargo xwin build --target x86_64-pc-windows-msvc --release --features prping/web
     fi
 
 # Windows MSVC x86_64（先构建，再经 dist 打包 lib/、examples/、UI/ 到产物目录；
@@ -165,8 +186,8 @@ build-windows-msvc: build-windows-msvc-impl (dist "target/x86_64-pc-windows-msvc
 # 首次自动下载 SDK；.cargo/config.toml 已配 crt-static 静态链接 CRT/C++ 运行库）
 [private]
 build-win7-impl: windows-deps
-    XWIN_ARCH=x86,x86_64 LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64 \
-        cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release
+    LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64 \
+        cargo +nightly xwin build -Z build-std --target x86_64-win7-windows-msvc --release --features prping/web
 
 # Windows 7 x64（先构建，再经 dist 打包资源到产物目录）
 build-win7: build-win7-impl (dist "target/x86_64-win7-windows-msvc/release")
@@ -174,8 +195,8 @@ build-win7: build-win7-impl (dist "target/x86_64-win7-windows-msvc/release")
 # Windows 7 x86 构建步骤（私有；32 位 MSVC，同上）
 [private]
 build-win7-32-impl: windows-deps
-    XWIN_ARCH=x86,x86_64 LIBPCAP_LIBDIR=target/npcap-sdk/Lib \
-        cargo +nightly xwin build -Z build-std --target i686-win7-windows-msvc --release
+    LIBPCAP_LIBDIR=target/npcap-sdk/Lib \
+        cargo +nightly xwin build -Z build-std --target i686-win7-windows-msvc --release --features prping/web
 
 # Windows 7 x86（先构建，再经 dist 打包资源到产物目录）
 build-win7-32: build-win7-32-impl (dist "target/i686-win7-windows-msvc/release")
@@ -185,24 +206,29 @@ build-windows: build-windows-msvc build-win7 build-win7-32
 
 # ── Linux 交叉编译（需对应工具链；本机同架构直接用 build-release） ──
 # Linux 32-bit（i686）：需 gcc-multilib（Ubuntu）或 gcc-i686-linux-gnu（Debian）
+[linux]
 build-linux-32:
     rustup target add i686-unknown-linux-gnu
-    cargo build --release --target i686-unknown-linux-gnu
+    cargo build --release --target i686-unknown-linux-gnu --features prping/web
 
 # Linux ARM 32-bit（armv7hf）：需交叉工具链 gcc-arm-linux-gnueabihf
+[linux]
 build-linux-arm:
     rustup target add armv7-unknown-linux-gnueabihf
-    cargo build --release --target armv7-unknown-linux-gnueabihf
+    cargo build --release --target armv7-unknown-linux-gnueabihf --features prping/web
 
 # Linux ARM64（aarch64）：需交叉工具链 gcc-aarch64-linux-gnu
+[linux]
 build-linux-arm64:
     rustup target add aarch64-unknown-linux-gnu
-    cargo build --release --target aarch64-unknown-linux-gnu
+    cargo build --release --target aarch64-unknown-linux-gnu --features prping/web
 
-# 全部 Linux 产物（本机 + 交叉）
+# 全部 Linux 产物（本机 + 交叉；子配方需 Linux 交叉工具链）
+[linux]
 build-linux-all: build-release build-linux-32 build-linux-arm build-linux-arm64
 
-# 全平台产物（本机 + Windows + Linux 交叉）
+# 全平台产物（本机 + Windows + Linux 交叉；子配方含 Linux 交叉，仅 Linux 主机）
+[linux]
 build-all: build-release build-windows build-linux-all
 
 # ── 发布 ──────────────────────────────────────────────────
@@ -210,7 +236,7 @@ build-all: build-release build-windows build-linux-all
 # 本机 release 构建步骤（私有：仅作依赖被编排，见 publish）
 [private]
 publish-impl:
-    cargo build --release -p prping
+    cargo build --release -p prping --features prping/web
 
 # 发布：release 构建（-p prping）+ dist 资源打包
 # → target/release 完整布局（import 库搜索命中 lib/、prping web 命中 UI/）
@@ -260,12 +286,13 @@ fmt-check:
 
 # 本机 check（快速编译检查）
 check:
-    cargo check --workspace
+    cargo check --workspace --features prping/web
 
 # pcap feature 语法检查（check + clippy -D warnings；需 libpcap-dev）
+[linux]
 check-pcap:
-    cargo check --workspace --features pcap
-    cargo clippy --all-targets --workspace --features pcap -- -D warnings
+    cargo check --workspace --features pcap,prping/web
+    cargo clippy --all-targets --workspace --features pcap,prping/web -- -D warnings
 
 # web-embed feature 语法检查（check + clippy -D warnings；首次自动构建前端）
 check-web-embed:
@@ -294,13 +321,13 @@ check-all:
         fi
         echo ""
     }
-    run_check "本机（x86_64-unknown-linux-gnu）" "true" cargo check --workspace
-    run_check "Windows MSVC x86_64" "command -v cargo-xwin" cargo xwin check --target x86_64-pc-windows-msvc --workspace
-    run_check "Windows 7 x64" "command -v cargo-xwin && rustup toolchain list | grep -q nightly" cargo +nightly xwin check -Z build-std --target x86_64-win7-windows-msvc --workspace
-    run_check "Windows 7 x86" "command -v cargo-xwin && rustup toolchain list | grep -q nightly" cargo +nightly xwin check -Z build-std --target i686-win7-windows-msvc --workspace
-    run_check "Linux 32-bit" "rustup target list --installed | grep -q i686-unknown-linux-gnu || rustup target add i686-unknown-linux-gnu >/dev/null 2>&1" cargo check --target i686-unknown-linux-gnu --workspace
-    run_check "Linux ARM 32-bit" "rustup target list --installed | grep -q armv7-unknown-linux-gnueabihf || rustup target add armv7-unknown-linux-gnueabihf >/dev/null 2>&1" cargo check --target armv7-unknown-linux-gnueabihf --workspace
-    run_check "Linux ARM64" "rustup target list --installed | grep -q aarch64-unknown-linux-gnu || rustup target add aarch64-unknown-linux-gnu >/dev/null 2>&1" cargo check --target aarch64-unknown-linux-gnu --workspace
+    run_check "本机（x86_64-unknown-linux-gnu）" "true" cargo check --workspace --features prping/web
+    run_check "Windows MSVC x86_64" "command -v cargo-xwin" cargo xwin check --target x86_64-pc-windows-msvc --workspace --features prping/web
+    run_check "Windows 7 x64" "command -v cargo-xwin && rustup toolchain list | grep -q nightly" cargo +nightly xwin check -Z build-std --target x86_64-win7-windows-msvc --workspace --features prping/web
+    run_check "Windows 7 x86" "command -v cargo-xwin && rustup toolchain list | grep -q nightly" cargo +nightly xwin check -Z build-std --target i686-win7-windows-msvc --workspace --features prping/web
+    run_check "Linux 32-bit" "rustup target list --installed | grep -q i686-unknown-linux-gnu || rustup target add i686-unknown-linux-gnu >/dev/null 2>&1" cargo check --target i686-unknown-linux-gnu --workspace --features prping/web
+    run_check "Linux ARM 32-bit" "rustup target list --installed | grep -q armv7-unknown-linux-gnueabihf || rustup target add armv7-unknown-linux-gnueabihf >/dev/null 2>&1" cargo check --target armv7-unknown-linux-gnueabihf --workspace --features prping/web
+    run_check "Linux ARM64" "rustup target list --installed | grep -q aarch64-unknown-linux-gnu || rustup target add aarch64-unknown-linux-gnu >/dev/null 2>&1" cargo check --target aarch64-unknown-linux-gnu --workspace --features prping/web
     if [ "$fail" -ne 0 ]; then
         echo "=== 存在编译失败（见上方 ✗ 行）==="
         exit 1
@@ -313,7 +340,7 @@ doc-sync-check:
 
 # Lint（clippy 零警告 + 原语文档同步门禁）
 lint: doc-sync-check
-    cargo clippy --all-targets --workspace -- -D warnings
+    cargo clippy --all-targets --workspace --features prping/web -- -D warnings
 
 # 全部测试（Windows 原生 MSVC 先经 windows-deps 就位 Npcap SDK）
 [script]
@@ -322,19 +349,21 @@ test:
         just windows-deps
         export LIBPCAP_LIBDIR=target/npcap-sdk/Lib/x64
     fi
-    cargo test --all-targets --workspace
+    cargo test --all-targets --workspace --features prping/web
 
 # rustdoc 生成检查
 doc:
-    cargo doc --no-deps --workspace
+    cargo doc --no-deps --workspace --features prping/web
 
 # ── packet-dsl（.pkt 网络包构建 DSL）────────────────────────
 
 # packet 发送有效性测试（python -m http.server + tcpdump 验证）
+[linux]
 test-pkt:
     python3 pktlang_tests/test_raw_effectiveness.py
 
 # 冒烟测试（tcpdump 验证各子命令基本工作）
+[linux]
 test-smoke:
     python3 pktlang_tests/test_smoke_tcpdump.py
 
@@ -343,14 +372,17 @@ test-engine:
     python3 pktlang_tests/test_engine.py
 
 # 配方测试（多步 .pktl：global/extract/sniffer/--fuzz/--out）
+[linux]
 test-recipe:
     python3 pktlang_tests/test_recipe.py
 
 # 协议测试（ARP/UDP/ICMP/TCP/IPv6/QUIC 原始包 via tcpdump）
+[linux]
 test-protocol:
     python3 pktlang_tests/test_protocols.py
 
-# 全部 pktlang 测试
+# 全部 pktlang 测试（除 test-engine 外均依赖 tcpdump/unshare，仅 Linux）
+[linux]
 test-all-pkt: test-pkt test-smoke test-engine test-recipe test-protocol
 
 # DSL 测试（解析器/语义/求值/golden 字节）

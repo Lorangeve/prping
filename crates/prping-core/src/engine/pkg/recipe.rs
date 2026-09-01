@@ -393,9 +393,6 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                 }
                 super::SendMode::Raw { iface } => {
                     match super::listen_raw::listen_raw_once(
-                        Arc::new(module.clone()),
-                        Arc::new(step_params.clone()),
-                        Arc::new(globals.clone()),
                         Arc::new(matcher),
                         iface.as_deref(),
                         timeout,
@@ -1141,7 +1138,7 @@ fn src_label(sent: bool) -> String {
 
 /// `reply("层","字段")` 取值：sniffer 字段集 + 扩展字节字段（icmp.payload /
 /// http.body / raw.bytes；raw.bytes 无 Raw 层时兜底 remaining——裸应用层回显）。
-/// 供配方 `extract` 的 `from:` 表达式与 `packet --listen --raw` 的应答模板共用。
+/// 供配方 `extract` 的 `from:` 表达式专用（唯一注入回包访问器的上下文）。
 pub(crate) fn reply_field_value(
     report: &packet_dsl::DissectReport,
     layer: &str,

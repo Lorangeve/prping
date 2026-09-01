@@ -86,8 +86,7 @@ engine:
   note_wait_reply: 'note: 等待匹配应答最多 %{secs}s'
   note_wait_recipe: 'note: 等待应答最多 %{secs}s（每步 wait: 覆盖）'
   listen_requires_sniffer: '监听模式需要 .pkt 声明 `sniffer:` 段（收到的数据报匹配规则）'
-  listen_binding: '监听 %{addr} —— 回显匹配 sniffer 规则的数据报（Ctrl+C 停止）'
-  listen_echo_fail: '回显到 %{peer} 失败：%{err}'
+  listen_binding: '监听 %{addr} —— 匹配 sniffer 规则的数据报并打印详情（Ctrl+C 停止）'
   listen_matched: '✓ matched %{bytes} B from %{peer}'
   listen_ignored: '- ignored %{bytes} B from %{peer}'
   listen_done: 'listen finished: %{matched}/%{total} datagrams matched'
@@ -95,9 +94,8 @@ engine:
   listen_multi_dport: '导出包使用了不同的目的端口（%{ports}）；请显式指定 ADDR:PORT'
   listen_send_phase_failed: '发送段先行失败 —— 继续监听（等待对端发包）：%{error}'
   listen_bind_fail: '绑定监听地址 %{addr} 失败：%{err}'
-  listen_raw_requires_reply: '--wait --raw 需要应答模板：.pkt 的默认导出（可经 reply("层","字段") 取收到的帧字段构造应答帧）'
-  listen_raw_binding: 'raw listen on %{iface} — 按 sniffer 规则匹配完整帧，命中后按应答模板注入（Ctrl+C 停止；需 root/Npcap）'
-  listen_raw_matched: '✓ matched %{frame} B — replied %{sent} B (%{source})'
+  listen_raw_binding: 'raw listen on %{iface} — 按 sniffer 规则匹配完整帧并打印详情（Ctrl+C 停止；需 root/Npcap）'
+  listen_raw_matched: '✓ matched %{frame} B'
   listen_raw_done: 'raw listen finished: %{matched}/%{total} frames matched'
   listen_recipe_udp: '监听 %{addr}'
   listen_recipe_raw: '链路层监听 %{iface}'
@@ -118,7 +116,7 @@ engine:
   parse_retry_zero: '`on_timeout: retry` 的次数必须 ≥ 1'
   recipe_on_timeout_fail: 'on_timeout 包发送失败：%{err}'
   recipe_extract_no_sent: '步骤没有发出任何包，无法提取 sent 来源的 extract'
-  recipe_extract_no_reply: '步骤没有收到回包，无法提取 %{n} 条 extract（sniffer/回显未匹配）'
+  recipe_extract_no_reply: '步骤没有收到回包，无法提取 %{n} 条 extract（sniffer 未匹配）'
   recipe_extract_failed: 'extract 失败（见上）'
   recipe_step_failed_summary: '✗ 步骤 %{step}/%{total} 失败（%{n} 个问题）'
   recipe_failed_total: '配方 %{file}：%{n} 个步骤有失败'
@@ -190,7 +188,6 @@ engine:
   recipe_as_str: '需要字符串或整数'
   recipe_as_bytes: '数值转字节请在表达式里用 be16()/u8() 等原语包一层'
   recipe_extract_needs_wait: '步骤有回包来源的 extract 但没有 wait（`sent.` 来源取发包不需要 wait，回包来源需要：本步 `wait:`（无值或秒数）或 `--wait`）'
-  listen_template_note: 'note: 应答模板——`reply(层,字段)` 需 --wait --raw 监听上下文，包未展开（engine 只解析不发包）'
   raw_ip4_need_target: 'raw IPv4 发送需要目标地址（HOST 或包内 IP 层 dst）'
   raw_ip4_not_v4: '目标不是 IPv4 地址：%{ip}'
   raw_ip4_send_fail: 'raw IPv4 发送失败：%{err}'
@@ -242,7 +239,7 @@ errors:
   lsp_requires_eng: "--lsp 只能与 --eng 一起使用"
   raw_requires_pkg: "--raw 只能与 --pkt 一起使用"
   iface_requires_raw: "--iface 只能与 --pkt --raw 一起使用"
-  listen_conflict: '持续监听（--wait 无值）不能与 --fuzz/--out 组合（持续接收并回显；--raw = 链路层监听，可配合 --iface 选网卡）'
+  listen_conflict: '持续监听（--wait 无值）不能与 --fuzz/--out 组合（持续接收并打印匹配详情；--raw = 链路层监听，可配合 --iface 选网卡）'
   params_requires_eng_pkg: "--params 只能与 --eng 或 --pkt 一起使用"
   params_format: "--params 需要 k=v 格式: `%{value}`"
   global_requires_eng_pkg: "--global 只能与 --eng 或 --pkt 一起使用"
@@ -346,7 +343,7 @@ help:
       注入配方全局存储的键值（k=v,k2=v2；脚本内用 global("name") 读取；配合 .pktl
       配方时作为 global: 声明的初始值，-g 覆盖 init）
     wait: 发送后等待最多 SECS 秒的匹配应答（对标 scapy sr1），打印 RTT 并反解展示（配合 --pkt）
-    listen: '监听模式：按 .pkt 的 sniffer 规则匹配收到的 UDP 数据报并回显（pktlang 对话的服务端；HOST:PORT 为监听地址，省略时按包内 dport 推导）'
+    listen: '监听模式：按 .pkt 的 sniffer 规则匹配收到的 UDP 数据报并打印匹配详情（纯监听；回应包由 .pktl 配方编排；HOST:PORT 为监听地址，省略时按包内 dport 推导）'
     fuzz: 发送前把未填字段全部随机化（对标 scapy fuzz()，配合 --pkt）
     out: 把构建的包存成 pcap 文件（对标 scapy wrpcap，配合 --pkt）
     ls: 列出全部内置层函数的字段表与自动行为（配合 --eng）
@@ -405,7 +402,7 @@ help:
       prping packet file.pkt 192.168.1.1:9000
       prping packet --raw --wait 2 file.pkt 8.8.8.8
       prping packet arp_request.pkt --raw   # 链路层帧（ARP 等）：目标可省略
-      prping packet --wait server.pkt 127.0.0.1:5353      # 裸 --wait：持续监听并按 sniffer 规则回显
+      prping packet --wait server.pkt 127.0.0.1:5353      # 裸 --wait：持续监听，按 sniffer 规则匹配并打印详情
       prping packet arp_request.pkt --raw   # link-layer frame (ARP etc.): target optional
   overview: |-
     prping — ping, 延迟, 带宽测量工具
@@ -474,3 +471,10 @@ web:
   ws_mkdir_failed: '新建目录失败: %{err}'
   ws_target_exists: '目标已存在'
   ws_binary: '二进制或非 UTF-8 文件——无法显示'
+  run_spawn_failed: '启动 packet 子进程失败: %{err}'
+  run_slot_failed: '内部槽位错误——请重新连接'
+  run_too_many: '服务器并发运行数已达上限（%{max}）——请先停止部分任务'
+  run_bad_file: '只能运行工作区内的 .pkt/.pktl 文件'
+  run_bad_count: '--count 必须为正整数'
+  run_bad_wait: '--wait 必须为非负秒数（或 true = 持续监听）'
+  run_bad_param: '无效的 param/global 条目: %{name}（值不能包含逗号）'

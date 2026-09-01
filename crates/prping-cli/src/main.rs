@@ -20,6 +20,7 @@ const SUBCOMMANDS: &[&str] = &[
     "engine",
     "packet",
     "document",
+    #[cfg(feature = "web")]
     "web",
 ];
 
@@ -247,7 +248,7 @@ struct EngineArgs {
     lang: Option<String>,
 }
 
-/// packet 子命令（构建 .pkt 并发送；.pktl 配方执行；--wait 无值 = 持续监听回显）
+/// packet 子命令（构建 .pkt 并发送；.pktl 配方执行；--wait 无值 = 持续监听）
 #[derive(Clone)]
 struct PacketArgs {
     raw: bool,
@@ -273,6 +274,7 @@ struct DocumentArgs {
 }
 
 /// web 子命令（内嵌 Web 编辑器：SolidJS SPA + CodeMirror + LSP 桥）
+#[cfg(feature = "web")]
 #[derive(Clone)]
 struct WebArgs {
     addr: Option<String>,
@@ -292,6 +294,7 @@ enum Command {
     Engine(EngineArgs),
     Packet(PacketArgs),
     Document(DocumentArgs),
+    #[cfg(feature = "web")]
     Web(WebArgs),
 }
 
@@ -468,8 +471,8 @@ fn packet_cmd() -> impl Parser<Command> {
             .argument::<String>("IFACE")
             .help(t!("help.options.iface").as_ref())
             .optional()),
-        // --wait：无值 = 持续监听（服务端，命中回显/应答）；--wait SECS = 发送后
-        // 等一个匹配应答（对标 scapy sr1）；负数 = 无限等待（= 无值）
+        // --wait：无值 = 持续监听（服务端，纯监听：命中打印匹配详情）；
+        // --wait SECS = 发送后等一个匹配应答（对标 scapy sr1）；负数 = 无限等待（= 无值）
         wait({
             let bare = long("wait")
                 .help(t!("help.options.wait").as_ref())
@@ -557,6 +560,7 @@ fn document_cmd() -> impl Parser<Command> {
 }
 
 /// web 子命令（内嵌 Web 编辑器：单端口 HTTP + WebSocket，--open 打开浏览器）
+#[cfg(feature = "web")]
 fn web_cmd() -> impl Parser<Command> {
     construct!(WebArgs {
         addr(long("addr")
@@ -583,18 +587,35 @@ fn web_cmd() -> impl Parser<Command> {
 }
 
 /// 顶层解析器：9 个子命令平行组合（bpaf 要求子命令是首个 token）。
+/// web 由 `web` feature 门控（默认不编译；justfile 统一以 --features prping/web 启用）。
 fn cmd() -> impl Parser<Command> {
-    construct!([
-        ping_cmd(),
-        latency_cmd(),
-        bandwidth_cmd(),
-        server_cmd(),
-        trace_cmd(),
-        engine_cmd(),
-        packet_cmd(),
-        document_cmd(),
-        web_cmd(),
-    ])
+    #[cfg(feature = "web")]
+    {
+        construct!([
+            ping_cmd(),
+            latency_cmd(),
+            bandwidth_cmd(),
+            server_cmd(),
+            trace_cmd(),
+            engine_cmd(),
+            packet_cmd(),
+            document_cmd(),
+            web_cmd(),
+        ])
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        construct!([
+            ping_cmd(),
+            latency_cmd(),
+            bandwidth_cmd(),
+            server_cmd(),
+            trace_cmd(),
+            engine_cmd(),
+            packet_cmd(),
+            document_cmd(),
+        ])
+    }
 }
 
 /// Parse size string like "64", "8k", "1m" to bytes.
@@ -999,6 +1020,7 @@ fn run_server(a: ServerArgs) -> anyhow::Result<()> {
 }
 
 /// web 子命令分发（内嵌 Web 编辑器服务器；监听行由 serve_web 打印）。
+#[cfg(feature = "web")]
 fn run_web(a: WebArgs) -> anyhow::Result<()> {
     apply_lang(&a.lang);
     let addr = match &a.addr {
@@ -1483,11 +1505,37 @@ fn handle_help_pkg(section: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Web 执行桥子进程生命线（`PRPING_WEB_RUN=1`，由 `web/run.rs` spawn 时注入）：
+/// 监视 stdin——父进程（web 服务器）死亡时管道写端被内核关闭，读到 EOF/错误立即
+/// 退出，防止服务端被 SIGKILL/崩溃后子进程被 init 收养成为孤儿（尤其 `--wait`
+/// 静默监听会一直占着端口）。数据字节忽略（引擎子命令无交互输入；预留将来把
+/// 「优雅停机」也走 stdin 的扩展位）。
+fn install_stdin_lifeline() {
+    if std::env::var_os("PRPING_WEB_RUN").is_none_or(|v| v != "1") {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("stdin-lifeline".into())
+        .spawn(|| {
+            use std::io::Read;
+            let stdin = std::io::stdin();
+            let mut lock = stdin.lock();
+            let mut buf = [0u8; 256];
+            loop {
+                match lock.read(&mut buf) {
+                    Ok(0) | Err(_) => std::process::exit(0),
+                    Ok(_) => {}
+                }
+            }
+        });
+}
+
 fn main() -> anyhow::Result<()> {
     // 多线程 executor：smol 全局 executor 默认单线程，--parallel 并发无法真正并行
     configure_executor_threads();
     detect_locale();
     install_interrupt_handler()?;
+    install_stdin_lifeline();
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1560,6 +1608,7 @@ fn main() -> anyhow::Result<()> {
         Command::Engine(a) => run_engine(a),
         Command::Packet(a) => run_packet(a),
         Command::Document(a) => run_document(a),
+        #[cfg(feature = "web")]
         Command::Web(a) => run_web(a),
     }
 }
@@ -1579,17 +1628,10 @@ fn render_warning(w: PrpingWarning) -> String {
     }
 }
 
-/// 库目录列表：默认当前目录 `lib/`（存在时）+ `--lib` 追加的路径。
+/// 库目录列表：`--lib` 追加的路径。默认 `lib/` 目录（二进制同目录 + 当前目录，
+/// 存在才收录）由 `packet_dsl::default_libs` 运行时发现并自动合并，这里不重复收录。
 fn resolve_libs(extra: &[String]) -> Vec<std::path::PathBuf> {
-    let mut libs = Vec::new();
-    let default = std::path::Path::new("lib");
-    if default.is_dir() {
-        libs.push(default.to_path_buf());
-    }
-    for l in extra {
-        libs.push(std::path::PathBuf::from(l));
-    }
-    libs
+    extra.iter().map(std::path::PathBuf::from).collect()
 }
 
 /// 解析 `packet` 子命令目标（DNS 解析，复用 lib 统一入口）。

@@ -1,6 +1,6 @@
 # 设计文档：`prping web` Web 编辑器
 
-> 状态：已实现（MVP：骨架 + LSP 桥 + CodeMirror 闭环 + 实时预览 + 库浏览；资源分发默认 `UI/` 目录 + 可选 `web-embed` 内嵌；左栏文件管理——工作区 examples 可编辑、eng_lib 只读）
+> 状态：已实现（MVP：骨架 + LSP 桥 + CodeMirror 闭环 + 实时预览 + 库浏览；资源分发默认 `UI/` 目录 + 可选 `web-embed` 内嵌；左栏文件管理——工作区 examples 可编辑、eng_lib 只读；执行——Run 页签/顶栏 ▶ spawn 自身 `packet` 子命令，输出流式回传）
 > 范围：`prping web [--addr ADDR] [--port N] [--open] [--lib PATH]`
 > 关联模块：`crates/prping-core/src/web/`、`frontend/`、`crates/prping-core/build.rs`
 
@@ -14,6 +14,8 @@
 - **文本编辑**：CodeMirror 6 + 引擎现有 LSP（诊断 / 补全 / 悬停 / 文档符号）；
 - **实时反馈**：编辑即分析——层栈字段、字节数、hexdump、层序警告实时刷新；
 - **协议学习**：eng_lib 协议库（headers.pkt 等 21 个文件）只读浏览；
+- **执行**：Run 页签 / 顶栏 ▶ 运行工作区 `.pkt/.pktl`（target/count/wait/listen/fuzz/raw/
+  iface/params）——服务端 spawn 自身 `packet` 子命令（§4.9），输出与退出码流式回显；
 - **文件管理**：左栏文件树——默认打开**启动目录**的 `examples/` 文件夹（发现方法与
   `UI/`、`lib` 一致：二进制目录优先、其次启动目录），可编辑/保存（Ctrl+S）/新建/删除；
   也可从页面打开任意本地文件夹作工作区；eng_lib 库文件始终只读；
@@ -35,6 +37,8 @@
  ├─ 层栈 / HEX / 诊断面板 ── analyze 信封（内存文本 → engine --json 同构文档）
  ├─ 左栏文件管理 ── tree / read(root=ws) / save / delete / workspace / browse 信封（可写工作区；
  │                   📂 = web 文件夹选择对话框，原生系统选择框为同机次选）
+ ├─ Run 面板 / 顶栏 ▶ ── run / run_stop 信封（服务端 spawn 自身 CLI 的 packet 子命令，
+ │                       输出/退出经 run_out / run_exit 流式回传）
  └─ eng_lib 库浏览 ── list / read 信封（服务端只读）
            │  HTTP（静态资源 + /config.json）＋ WebSocket（/ws）同端口
  ──────────┴──────────────────────────────────────────────
@@ -42,6 +46,7 @@
  ├─ http.rs      极简 HTTP/1.1 GET/HEAD 响应（Content-Length、keep-alive）
  ├─ ws.rs        WS 会话：信封分派 + Content-Length 分帧解包 + LSP 桥 + 会话工作区状态
  ├─ workspace.rs 可写工作区：默认 examples 发现（同 UI/ 方法）+ 路径校验/读写删/目录树
+ ├─ run.rs       执行桥：run 信封 → spawn 自身二进制 packet 子命令（输出/退出流式回传）
  ├─ pipe.rs      异步↔阻塞字节桥（smol::channel 实现 io::Read/Write）
  └─ assets.rs    静态资源双模式：默认读 UI/ 目录；web-embed feature 时 rust-embed
                  （debug 直读 dist / release 编译期内嵌）
@@ -49,6 +54,7 @@
         ──── 进程内（无需 IPC）────
         ├─ engine LSP（engine/eng/lsp.rs::run_lsp_on，阻塞线程）
         ├─ analyze_text_json（engine/eng/mod.rs，进程内直接调用）
+        ├─ packet 子进程（web/run.rs：current_exe + packet 子命令，输出逐行回传）
         └─ eng_lib 只读文件访问（effective_libs 目录扫描）
 ```
 
@@ -114,9 +120,11 @@ crates/prping-core/src/web/
                 lookup / index_missing / source_label / missing_hint
 ```
 
-公开 API（lib.rs）：`serve_web(WebConfig) -> anyhow::Result<()>`（async，CLI 侧
-`smol::block_on` 驱动）、`WebConfig { addr, port, libs, open_browser }`、
-`analyze_text_json(uri, text, params, libs)`。
+公开 API（lib.rs，`#[cfg(feature = "web")]` 门控）：`serve_web(WebConfig) -> anyhow::Result<()>`
+（async，CLI 侧 `smol::block_on` 驱动）、`WebConfig { addr, port, libs, open_browser }`、
+`analyze_text_json(uri, text, params, libs)`。`web` feature **默认不启用**——纯 `cargo build`
+不编译 web 模块、CLI 无 `web` 子命令（产物体积更小）；justfile 的 build/check/test
+配方统一以 `--features prping/web` 启用（`web-embed` 隐含 `web`）。
 
 ### 4.2 连接生命周期
 
@@ -187,14 +195,26 @@ LSP `ChanReader` 读到 EOF → `run_lsp_on` 返回 → `out_tx`（ChanWriter）
 { "type": "mkdir",  "id": 6, "name": "sub/dir" }  // 新建目录（父链自动创建）
 { "type": "workspace", "id": 7, "path": "…" }     // 打开/重置/查询工作区根（path 省略=查询）
 { "type": "browse", "id": 8, "path": "/dir" }     // 列子目录（文件夹选择对话框数据源；缺省=主目录）
+{ "type": "run", "id": 9, "name": "a/b.pktl",     // 运行工作区 .pkt/.pktl：spawn 自身二进制
+  "target": "h:p", "params": {"k":"v"},           // packet 子命令；wait=数字秒 或 true（裸
+  "count": N, "wait": SECS|true, "raw": bool,     // --wait 持续监听）；未给字段按 CLI 缺省
+  "iface": "eth0", "out": "run.pcap", "globals": {"k":"v"},
+  "json": bool }                                  // --json：JSONL 结构化输出（前端按行渲染
+                                                  // 包/步骤/汇总；与 listen 冲突——前端禁用）
+{ "type": "run_stop", "id": 10, "run": "run-0" }  // 停止运行：带 run id 精确停单个
+                                                  // （任务管理）；缺省停本连接全部
 ```
 
 服务端 → 客户端：
 
 ```jsonc
 { "type": "lsp", "message": { …publishDiagnostics / 请求应答… } }
-{ "type": "result", "id": 1, "ok": true,  "data": … }
+{ "type": "result", "id": 1, "ok": true,  "data": … }   // run 的 data = { "run": "run-N" } 启动 ack
+                                                  // run_stop 的 data = { "stopped": N } 停止数
 { "type": "result", "id": 1, "ok": false, "error": "…" }
+{ "type": "run_out", "run": "run-0", "stream": "out"|"err", "text": "…" }  // 运行输出（逐行流式）
+{ "type": "run_exit", "run": "run-0", "code": 0|null,    // 运行结束；code null = 被 kill
+                      "stopped": bool, "truncated": bool }
 { "type": "error",  "message": "invalid envelope" }
 ```
 
@@ -210,6 +230,11 @@ LSP `ChanReader` 读到 EOF → `run_lsp_on` 返回 → `out_tx`（ChanWriter）
 - **会话工作区状态**：每条 WS 连接独立持有工作区根（`Mutex<Option<PathBuf>>`，初值 =
   服务端启动时发现的 examples）——`workspace` 信封切换只影响本连接，浏览器多标签
   互不干扰；重连后服务端侧重置回默认。
+- **run 生命周期事件不占请求 id**：`run` 信封的 `id` 仅用于启动 ack（成功 = 活跃，
+  失败 = `{ok:false}`）；后续输出/退出按 `run` id 字符串（`run-N`，每连接自增）
+  关联，与请求-应答配对机制解耦。**同连接可并行多个运行**（多标签任务管理——
+  前端每个 run 一个任务卡，chip 切换控制台 / ✕ 停止移除），全服并发由
+  MAX_CONCURRENT_RUNS（8）封顶；`run_stop` 带 `run` id 停单个、缺省停本连接全部。
 
 ### 4.6 analyze：内存文本 → `engine --json` 同构文档
 
@@ -226,7 +251,7 @@ bytes / hex / warnings / raw_only`，前端三面板直接消费。
 
 ### 4.7 库浏览（只读）
 
-- `list`：`effective_libs`（烘焙 eng_lib + `--lib` 附加）逐目录扫描 `*.pkt|*.pktl`，
+- `list`：`effective_libs`（运行时 lib/ 发现 + `--lib` 附加）逐目录扫描 `*.pkt|*.pktl`，
   跨目录按文件名去重（先到先得，与解析器库搜索顺序一致），目录列表一并返回供前端展示；
 - `read`：**仅接受纯文件名**（`Path::file_name() == Path` 校验，拒绝分隔符与 `..`），
   按库目录顺序查找读取——库文件无写接口。
@@ -260,6 +285,38 @@ bytes / hex / warnings / raw_only`，前端三面板直接消费。
   工作区根），后者受浏览器安全模型限制拿不到绝对路径（fakepath），语义只能做导入，
   与「打开文件夹」混淆——打开文件夹收敛为 web 对话框一条路。
 
+### 4.9 执行桥（`web/run.rs`）
+
+页面可运行当前工作区的 `.pkt/.pktl`（「Run」页签 / 顶栏 ▶）：`run` 信封 → 服务端
+**spawn 自身二进制**（`current_exe()`）跑 `prping packet …` 子命令，stdout/stderr
+逐行打包成 `run_out` 信封回推，退出以 `run_exit` 收尾（`code`/`stopped`/`truncated`）。
+
+- **为什么是子进程桥而非进程内调用**（ADR #8）：`send_packets` 等入口直接写进程
+  stdout，注入输出捕获需全链路改造；子进程零改动复用 CLI 全部语义（构建发送/配方
+  执行/raw/监听、`validate_*` 校验与本地化报错——非法组合的错误文案直接落在执行
+  控制台），且天然获得崩溃隔离与 kill 取消；
+- **参数映射**：信封字段 → argv（`--lib` 透传生效库目录、`--params k=v` 逐对传递、
+  `--count/--wait/--fuzz/--raw/--iface/--out/--json`）；`wait: true` = 裸 `--wait`
+  （持续监听）；`json: true` = `--json`（JSONL 结构化输出——前端按行解析渲染包
+  ✓/✗、步骤、汇总，非 JSON 行如 raw 升级提示原样回退；与 listen 冲突由前端禁用、
+  CLI 校验兜底）。`--lib` 跳过子进程默认发现（exe 目录/`cwd lib/`，canonicalize
+  等价）的目录避免重复；相对路径按服务端 cwd 绝对化（子进程 cwd 已换成工作区根）；
+- **安全边界**：文件限工作区内 `.pkt/.pktl`（`resolve_in_root(require_pkt)` +
+  canonicalize 根内断言）；子进程 `cwd = 工作区根`（`--out` 相对路径落根内，
+  值经 `validate_rel` 词法校验防逃逸）；同连接可并行多个子进程（多标签任务管理），
+  全服并发 ≤8（`web.run_too_many`）；
+- **资源上限**：转发行数（20k）/单行长度（8KB）封顶，超限后继续排水（防子进程管道
+  写阻塞）但不再转发，`run_exit.truncated` 标记；全服并发运行上限 8
+  （`web.run_too_many`），与每连接单运行槽双重封顶；
+- **生命周期**：`run_stop` → kill 活跃子进程（waiter 轮询 `try_wait` 收尸并回报
+  `stopped`）；WS 断开 → 读任务与会话收尾双路径显式 `run::stop`（run 的读流任务
+  持有回推通道克隆，通道关闭探测不可依赖）——不留孤儿进程。**父进程死亡保险**：
+  子进程 stdin 管道化 + 注入 `PRPING_WEB_RUN=1`（CLI 侧 `install_stdin_lifeline`
+  监视线程）——服务端被 SIGKILL/崩溃时内核关闭写端 → 子进程读到 EOF 自行退出
+  （跨平台、无 unsafe；Linux PDEATHSIG 会因 blocking 池线程退出误杀子进程，不采用）。
+  实现注意：move 闭包只捕获 body 引用到的值——生命线写端必须显式移入 waiter 闭包体，
+  否则 spawn_waiter 返回即关闭（曾致子进程秒退）。
+
 ---
 
 ## 5. 前端设计
@@ -271,20 +328,26 @@ frontend/
 ├── index.html / vite.config.ts / tsconfig.json / package.json
 └── src/
     ├── index.tsx      入口 render
-    ├── App.tsx        布局（顶栏/左栏文件管理/编辑器/右面板）+ 数据流编排 + 打开/保存
+    ├── App.tsx        布局（顶栏——含返回/前进导航钮/左栏文件管理/编辑器/右面板）
+    │                 + 数据流编排 + 打开/保存 + 跳转目标映射（URI → 工作区/库文件）
+    │                 + 导航历史栈（落点带行、离开回填，§5.4）
+    │                 + 执行编排（顶栏 ▶ / Run 页签：run 信封 + run_out/run_exit 流聚合）
     ├── files.tsx      左栏文件管理：工作区树（缩进/悬停改名删除钮）+ eng_lib 只读列表 + 新建/刷新
 │                     + 右键菜单（文件：打开/改名/删除；目录：改名/删除（递归）；
 │                     空白区：新建文件/新建文件夹/刷新，无工作区 = 打开文件夹/刷新）
 │                     + FolderDialog（web 文件夹选择对话框：browse 导航/路径直输/确定取消，
 │                     「system dialog…」调服务端原生选择框）
     ├── ws.ts          PrpingClient：信封传输 + request id 关联 + 指数退避重连 + 工作区信封方法
-    ├── lsp.ts         LspClient：initialize/didOpen/didChange/补全/悬停 + 诊断回调
+    │                 + run/runStop/run_out/run_exit（执行流式事件回调）
+    ├── lsp.ts         LspClient：initialize/didOpen/didChange/补全/悬停/definition + 诊断回调
     ├── cm.ts          CodeMirror 组装：高亮 + lint + 补全 + 悬停 + 深色主题 + 可编辑开关（Compartment）
+    │                 + 跳转链接（可跳目标标记/单击·Ctrl 单击检测/linkMode 切换/revealPos）
     ├── markdown.ts    极简 Markdown → HTML（hover / 补全文档渲染；先转义后套标记）
     ├── pktlang.ts     StreamLanguage 分词（# 注释 / #[ 注解 / 关键字 / 0x 十六进制 / |> / 字段名）
-    ├── panels.tsx     诊断 / 层栈 / HEX / 大纲 四面板（Markdown 文档侧栏不渲染——
+    ├── panels.tsx     诊断 / 层栈 / HEX / 大纲 / Run 五面板（Markdown 文档侧栏不渲染——
                        LSP/analyze 管线不适用，改为「内容 + 标题大纲栏」双栏；
-                       analyze 应答对 md 一律丢弃，`refreshAnalyze` 对 md 不调度）
+                       analyze 应答对 md 一律丢弃，`refreshAnalyze` 对 md 不调度；
+                       Run 面板：packet 选项 + 执行控制台，.pkt/.pktl 两种页签组都有）
     ├── sample.ts      空态兜底示例文档（无工作区/无可开文件时出现）
     └── index.css      深色样式（三栏：文件树 220px + 编辑器 + 面板）
 ```
@@ -316,7 +379,14 @@ frontend/
 - 删除打开中的文件：缓冲保留（保存即重建）；删除目录 = 递归（确认文案说明后果），
   目录内文件的 lastFile 记录一并清除；
 - 开自定义目录（📂）：web 文件夹选择对话框（browse 导航 + 路径直输，详见 §4.8），
-  确定后刷新目录树；「system dialog…」走服务端原生选择框（不可用时错误就地展示）。
+  确定后刷新目录树；「system dialog…」走服务端原生选择框（不可用时错误就地展示）；
+- 执行（Run）：顶栏 ▶ 或 Run 页签 → dirty 先保存（执行所见 = 磁盘内容）→ `run` 信封
+  → 启动 ack 后聚合 `run_out` 行（上限 4000 行，超出丢头部）到控制台，`run_exit`
+  落终态（exit code / stopped / truncated）；`run_stop` 停止活跃运行；选项快照
+  （target/count/wait/listen/fuzz/raw/iface/json）经 IndexedDB 持久化，参数输入与
+  Layers 页签共用同一份 `runValues`。**json 默认开**：控制台按 JSONL 解析渲染
+  （✓/✗ 包行 + 层栈/字节/目标/错误、步骤行、汇总行，悬停看原始 JSON），非 JSON
+  行（stderr 提示）原样回退；listen 勾选时 json 自动失效（CLI 禁 `--json` × 持续监听）。
 
 **前端持久化（IndexedDB，浏览器端数据库）**——项目相关状态跨刷新/重连保留，
 生成的产物不落库：
@@ -339,8 +409,19 @@ frontend/
 | `textDocument/completion` | `autocompletion.override` 异步源；服务端按位置上下文（层位/实参名位/值位/语句位/import/export/sniffer/attr/配方/字符串注释）返回该位语法合法且 `sortText` 分级的候选，前端保序渲染（数组序轻衰减 boost）；`name()` 光标落括号内、`params("")` 光标落引号内并顺势弹下一级；kind 映射 function/keyword/property/namespace；documentation（markdown）经 `renderMarkdown` 懒渲染为 info 气泡（选中项才转 HTML） |
 | `textDocument/hover` | `hoverTooltip`（hoverTime 400ms），markdown `contents.value` 经 `markdown.ts` 渲染为 HTML（标题/粗体/行内代码/列表/围栏代码块；先整体转义，注入安全）。**查询前同步全文必须去重**（`LspClient.lastSent`）：补全/悬停源内的 `lsp.change` 若在内容未变时仍发 didChange，服务端必回 publishDiagnostics → `applyDiagnostics` 视图更新 → CM hover 的 `update()` 重启 hover（20ms），异步源 pending 被顶掉、应答永远过期——tooltip 永不出现（headless Chrome + CDP 帧捕获定位） |
 | `textDocument/documentSymbol` | Outline 页签（.pkt：component def / func / export / 默认导出，点击 `revealLine` 跳行）；Markdown 文档侧栏为标题大纲栏（与渲染器同规则解析 `#`，围栏内不算；渲染模式滚动定位、编辑模式行跳转） |
+| `textDocument/definition` | **点击跳转 + 返回/前进**（§5.4）：服务端解析跨文件定义位置（packet-dsl `Module::definition_of` / `import_module_site`），返回目标文件 `file://` URI + 名字 span；前端解码 URI 并映射回可打开目标（工作区相对路径 / 库文件名——前缀匹配 + 路径后缀兜底），`revealPos` 选中定义名并入导航栈 |
 
 补全/悬停均为「编辑器位置 → LSP 0 基行列」的轻适配；超时 3s 兜底返回 null 不卡 UI。
+
+### 5.4 跳转与导航历史（go-to-definition / back-forward）
+
+交互（`cm.ts` 链接标记 + `App.tsx` 导航栈）：
+
+- **跳转候选**标记——**点亮集合 = 确定可跳集合**（字符串/注释行除外）：`.pkt` 里 ①名字在作用域集（本地 defs/funcs/exports，来自 LSP documentSymbol；import 引入名含 as 别名与模块名，从文本解析）；②调用名且**非内置原语**（语义分析保证非内置调用必有定义；内置 concat/global/params… 无定义可跳，`config.json` 的 `builtins` 名单一次性下发）。字段名（`x=`）/参数名/裸关键字不在集里，不亮。`.pktl` 只有步骤文件 token；Markdown 无候选。候选平时无样式，**按住 Ctrl/Cmd 统一点亮**。状态类 `cm-mod-goto` 挂 **body**（CM6 会在焦点变化时整写 `.cm-editor` 的 class，挂编辑器上会被抹掉），由 `modGotoTracking` 插件维护：**窗口级** keydown/keyup 捕获（焦点在任何元素都收得到——只听编辑器会漏「焦点在外按键」）+ 编辑器 mousemove（指针携带按键状态移入）+ 窗口失焦清理；标记随模式/作用域数据/文档/视口变化重建。Playwright 回归覆盖：聚焦按键、焦点在外按键、悬停移入、静止悬停后按键、焦点在外点击跳转、点亮集合精确性（内置/字段/关键字不亮）。
+- **跳转触发**：一律 **Ctrl/Cmd+单击**（Alt 让给多光标/块选，见下）；无修饰键单击保持光标定位，绝不跳转（import 模块名/.pktl 文件名一视同仁）。解析不到定义（原语/未知名）提示 `no definition found`。
+- **多光标/块选（Alt）**：**Alt+单击**在该处加一个光标、**Alt+拖拽**做矩形（块）选区，按住 Alt 指针变十字作提示——全部为 CodeMirror 原生机制（`clickAddsSelectionRange` 覆盖默认修饰键 + `rectangularSelection` + `crosshairCursor`，需 `allowMultipleSelections`，已开启）。修饰键分区：Alt = 多光标/块选，Ctrl/Cmd = 跳转。
+- **定义解析**（服务端 `definition`）：本文件 defs/funcs/protos → 作用域（import 别名/转出口/库 prelude 隐式可见，如 `ipv4()` 直接跳 `eng_lib/headers.pkt`）→ import 行模块名（跳目标文件头/默认导出）→ 库内未导出函数（`lib_module_paths` 按来源模块映射）。跨文件目标返回规范路径的 `file://` URI（路径百分号编码，Windows 反斜杠折算 `/`）。
+- **导航历史**：顶栏 ←/→ 按钮（Alt+← / Alt+→，`preventDefault` 拦下浏览器历史导航）。落点 = 文件 + 行；离开条目时回填光标行（跨文件在 `setDoc` 前抓快照），「返回」因此回到离开时的位置；Outline 点击同入栈；重命名/删除同步改写/剔除条目。栈上限 200，同文件同行去重；返回/前进自身的打开以 `navigating` 标志跳过入栈。历史仅在会话内存（IndexedDB 只存工作区根/上次文件/草稿，刷新后从上次文件重新起步）。
 
 ---
 
@@ -353,10 +434,12 @@ frontend/
 | 文件读 | 库浏览只读 + 纯文件名白名单式校验（拒绝分隔符/`..`） |
 | 文件写（工作区） | 仅限工作区根内：路径逐段校验（`..`/反斜杠/盘符/隐藏段/Windows 保留名拒绝）+ canonicalize 根内断言（防符号链接逃逸）+ 仅 `.pkt/.pktl` + 4MB 上限；缺失父目录自动创建（仅校验后的相对路径）；工作区根可为任意本地目录（`workspace` 信封 / 对话框选择）——单用户本地工具的信任模型，随 token 鉴权（§10）收紧 |
 | 资源服务 | 内嵌：rust-embed 键精确匹配；UI 目录：逐段校验（空段/点段/反斜杠/冒号拒绝）+ 仅普通文件可读 |
+| 执行（run） | 仅工作区内 `.pkt/.pktl`（`resolve_in_root` + canonicalize 根内断言）；子进程 `cwd = 工作区根`（`--out` 经 `validate_rel` 防逃逸）；argv 由信封字段构造、不经过 shell；每连接单运行槽；输出行数/行长度封顶；断开/停止即 kill（无孤儿） |
 | 协议滥用 | 请求头 ≤64KB、单帧 ≤16MB、畸形帧丢弃；信封 type 白名单 |
 | 同源滥用 | 本机其它页面可连 `/ws`（无 token）——MVP 接受；规划：URL 随机 token（§10） |
 
-> 发送/监听能力接入后（§10），raw 发包将可由页面触发，届时 token 校验升级为必做项。
+> 发送/监听能力已接入（§4.9，raw 发包可由页面触发）——URL 随机 token 校验（§10）
+> 升级为**必做项**，见路线图「鉴权」行。
 
 ---
 
@@ -440,6 +523,7 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 | `pipe.rs` | 字节往返 + 跨块 EOF、零长读、对端断开 BrokenPipe |
 | `http.rs` | 请求头解析（query 剥离/HTTP/1.0/Connection: close）、WS 升级判定、畸形拒绝、CRLFCRLF 定位 |
 | `ws.rs` | FrameDecoder（整帧/单字节碎帧/畸形头不卡死/超限丢弃）、params 形状、`read` 路径穿越拒绝 |
+| `run.rs` | argv 构造（缺省/全量/裸 --wait/--lib 去重与子进程默认发现跳过）、行块读取（碎块/超长截断/EOF 残留）、信封校验（工作区内 .pkt 限定/穿越拒绝/count·wait 数值/--out 逃逸/params 含逗号拒绝） |
 | `workspace.rs` | 路径校验（穿越/特殊段/Windows 保留名；扩展名开/关两模式）、符号链接逃逸拒绝、save（父目录自动创建/覆盖写/临时文件清理）/read/delete（目录递归删除）/rename（改名+跨目录移动+目标存在拒绝）/mkdir（嵌套+已存在拒绝）往返、二进制文件读拒绝、目录树排序/全部普通文件/隐藏跳过/深度截断、browse（排序/隐藏跳过/父链/缺失路径报错）、open_folder 存在性校验、选择器输出三态解析（unix） |
 | `eng/mod.rs` | `analyze_text_json` 与 CLI `--json` 同构（随 engine 既有测试回归） |
 
@@ -479,15 +563,29 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 4. `--features web-embed` 构建：无任何 UI 目录时 `/` 与 `/assets/*` 仍 200（内嵌生效），
    横幅 `ui: 内嵌（web-embed feature）`。
 
+执行端到端（Node `WebSocket` 客户端对真实服务端，全部通过）：
+
+1. `run` 配方（`transport_udp`，target 127.0.0.1:9、`--wait 1`）→ ack `{run}` →
+   `run_out` 逐行（构建层栈/发送/hexdump/无应答提示）→ `run_exit` code 0；
+2. 持续监听（`wait: true`，sniffer `.pkt` 高位端口）→ 监听横幅流出；期间再次
+   `run` → `ok:false`（`web.run_busy`）；
+3. `run_stop` → ack `{stopped:true}` → `run_exit` `{code:null, stopped:true}`；
+   槽位释放后再 `run` 正常；
+4. `run name:"../etc/passwd"` → 拒绝（`web.ws_bad_path`）；`run name:"a.txt"` →
+   拒绝（扩展名）；
+5. 断开连接（无 `run_stop` 直接 close）→ 服务端收杀子进程，`ps` 无孤儿。
+
 ---
 
 ## 10. 已知限制与路线图
 
 | 项 | 现状 | 计划 |
 |---|---|---|
-| 发送/监听 | 无 | 「Run」按钮 → 服务端复用 `packet` 发送路径（SendMode/PkgOptions 现成），进度/结果走新信封类型回传 |
+| 发送/监听 | 已实现：Run 页签 / 顶栏 ▶ → `run`/`run_stop`/`run_out`/`run_exit` 信封（§4.9 子进程桥：spawn 自身二进制 `packet`，零改动复用 CLI 全语义；工作区限定 + 单运行槽 + 输出封顶 + 断开收杀） | raw 发包权限提示页（无 cap_net_raw 时的引导）；运行历史/重放 |
 | 文件保存 | 已实现：左栏文件管理（工作区 = 默认 examples/ 或自定义目录）tree/save/read/delete（目录递归）/rename/mkdir 信封 + 路径逐段校验 + 根内断言 + Ctrl+S 保存/新建/删除/改名/移动 + 目录树折叠（默认全收起，展开集跟踪）+ 右键菜单（打开/改名/删除/新建/刷新） | URL 随机 token 鉴权（与下方「鉴权」行合并推进，发送能力上线时必做） |
-| 鉴权 | 无（仅回环） | URL 随机 token（`prping web` 打印带 token 的 URL），发信封校验——发送能力上线时必做 |
+| 跳转导航 | 已实现：点击跳转 + 返回/前进（§5.4）——`.pkt` Ctrl/Cmd/Alt+单击标识符、import 模块名与 `.pktl` 步骤文件名单击；定义解析跨文件（import/转出口/库 prelude → 目标 .pkt 源文件，未导出库函数按模块映射）；顶栏 ←/→ + Alt+方向键导航历史（会话内存栈，落点带行、离开回填） | 跳转处悬停 tooltip 显示定义预览（需服务端按位置缓存定义文本）；「查找引用」 |
+| 库文件读取 | `read` 信封限**单段文件名**（`read_lib_file` 简单名白名单）——eng_lib 平铺目录下无感；跳转到子目录库文件时前端回退按文件名匹配顶层 | 若引入嵌套库目录：`read` 支持相对子路径（校验随现有键名规则） |
+| 鉴权 | 无（仅回环）。**发送能力（§4.9）已上线——本项升级为必做** | URL 随机 token（`prping web` 打印带 token 的 URL），发信封校验 |
 | TLS/远程 | 无 | 非目标；远程用 SSH 隧道或反向代理 |
 | 手册章节 | 未加入 `document` | `manual-zh/en` 增补 web 章节（双语编号一致性测试约束） |
 | check-all | Windows 交叉目标 2 个**预先存在**错误（父提交 69310e25 已有）：`serve/capture.rs` 的 `strip_null` import/定义 cfg 错配、`ping/trace/dns.rs` getnameinfo 参数 |`matches_bare` cfg 缺失（`bare_ip_keep` cfg 对齐其唯一调用方 `pcap_loop`）、linux+pcap 的 `Layer`/`io` cfg 错配（`reply_is_v6`/`open_raw_icmp6` cfg 收紧）、Linux 主机 4 条 engine `raw/listen_raw` 死代码警告及全部 clippy 残留已顺手修复——现为默认/pcap/web-embed 全组合 clippy 零警告；剩余 2 项 Windows 交叉错误独立修复，不阻塞本特性 |
@@ -525,3 +623,13 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
    自动创建但仅限校验后的相对路径），服务端无「任意路径写」原语；自定义目录打开依赖
    回环单用户的本地信任模型，与 §6 同源滥用条目一致，token 上线后再整体收紧。库文件
    只读由「无写信封」结构保证，不做运行时开关。
+8. **执行用子进程桥而非进程内调用（2026-09）**——`run` 信封 spawn 自身二进制跑
+   `packet` 子命令：进程内路线（`SendMode/PkgOptions` 直调）需给 `send_packets`/
+   `send_recipe` 全链路注入输出 writer、复制 `validate_*` 校验、处理 raw 特权与
+   取消；子进程路线零改动复用 CLI 全语义（含本地化报错直接落在控制台），天然获得
+   崩溃隔离与 kill 取消。代价是进程/管道开销（发包场景可忽略）。安全边界收在
+   spawn 之前：工作区路径解析、`--out` 词法校验、`cwd = 工作区根`、argv 直构造
+   不过 shell、单运行槽、断开收杀。**重评触发条件**（任一出现再考虑进程内）：
+   ① 高频自动运行（>10 runs/s，spawn 开销显著）；② 需要进程内富类型结果做深度
+   交互（per-layer hex 等超出现有 JSONL 字段）；③ 需要进程内流式进度回调且 JSONL
+   逐行不再够用。
