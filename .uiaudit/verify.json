@@ -1,0 +1,17 @@
+{
+ "ws_cross_origin_rejected": true,
+ "ws_reject_line": "HTTP/1.1 403 Forbidden",
+ "ws_no_token_rejected": true,
+ "ws_notoken_line": "HTTP/1.1 403 Forbidden",
+ "config_has_token": true,
+ "ws_connected_ui": true,
+ "pageerrors_after_load": [],
+ "run_console_lines": 7,
+ "stop_all_exists": false,
+ "run_chip_text": "✓\n#0\ndns_flow.pktl\n2s\nexit 0\n✕",
+ "side_toggle_exists": true,
+ "side_hidden_class": true,
+ "overflow_800": 0,
+ "editor_opens": true,
+ "pageerrors_final": []
+}

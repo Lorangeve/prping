@@ -14,11 +14,19 @@
   结构化输出）选项，`--out` 落工作区根内（`validate_rel` 防逃逸）；**json 默认开**——
   控制台按 JSONL 解析渲染（✓/✗ 包行+层栈/字节/目标/错误、步骤行、汇总行，悬停看
   原始 JSON），非 JSON 行（stderr 提示）原样回退，listen 与 json 互斥（CLI 校验）；
-  **多标签并行运行 + 任务管理**：每次 Run 新建任务卡（● 运行中 / ✓✗■ 终态），点击
-  切换控制台、✕ 停止并移除；`run_stop` 带 `run` id 停单个、缺省停本连接全部；全服
+  **多标签并行运行 + 任务管理**：每次 Run 新建任务（控制台跟随最新任务），
+  任务列表有任务即常驻（● 运行中 / ✓✗■ 终态；点行切控制台、■ 停止、✕ 移除）；
+  `run_stop` 带 `run` id 停单个、缺省停本连接全部；全服
   并发上限 8；run_stop、连接断开与服务端进程死亡（stdin 生命线：子进程监视 stdin
   EOF 自行退出）三条路径均不留孤儿；未保存修改先落盘再执行；选项快照与运行参数
   输入（与 Layers 页签共用 `runValues`）经 IndexedDB 持久化。
+- **WebUI 文档标签页**（多文件并行编辑）：每打开一个文件一个编辑器 tab——切走时
+  编辑器内容落账进标签（未保存修改驻内存），切回即还原（不重读磁盘）；已开文件
+  的再次打开 = 激活既有标签；✕ / Alt+W 关闭，脏文件先写 IndexedDB 草稿防丢、
+  重开走恢复提示；关闭当前标签激活相邻（右优先），全部关闭回示例文档空态；
+  **右栏数据随标签隔离**：运行任务卡按发起文件归属（Run 面板只显示当前文件的
+  任务，文档标签 ● 指示后台运行），运行参数输入每标签独立，关闭文件标签即停止
+  其运行中任务。
 - **`web` feature 门控 `prping web` 子命令**（默认不启用）：core `web/` 模块与 CLI web
   子命令整体由 `--features web` 门控——纯 `cargo build` 不编译 web 模块、CLI 无 `web`
   子命令（产物体积更小）。justfile 的 build/check/test 配方统一以 `--features prping/web`
@@ -166,6 +174,11 @@
 
 ### 修复
 
+- **WebUI hover 悬浮框被编辑器面板拦腰裁掉**（tooltip 以 `position: absolute` 渲染在
+  `.editor-pane`（`overflow: hidden`）内部，面板下方空间不足时下半截被边界截断，
+  小窗口必现）→ tooltip 改 `position: "fixed"`（相对视口定位逃离裁切容器，放不下时
+  CM 自动上下翻转；CM6 新版默认值正是为此），`.hover-doc` 高度上限改
+  `min(400px, 100vh - 90px)` 随小视口收缩（内容内部滚动）
 - **`bandwidth` 不带 `-n` 时发送 0 包**（`count=0` 在带宽循环里语义是「立即停止」，与 ping 的「0=无限」/latency 的「0→1」不一致；`--help` 示例本身就不带 `-n`）→ 缺省 `-n 1000`（对齐 psping 的 `-n` 默认），显式 `-n 0` 报错
 - **`ping HOST:PORT -l N` 静默派发到 latency（echo 协议）**（旧功能残留：`-l` + 端口组合被 lib `run()` 的模式嗅探误判；目标不是 prping server 时全部超时且输出上下文仍是 ping）→ CLI 层明确报错（`-l` 仅对无端口 ICMP ping 有效）
 - **MTU 探测：DF 位下载荷超过本机接口 MTU 时 `send_to` 报 EMSGSIZE 直接中止整个探测**（Linux `IP_PMTUDISC_DO`/BSD `IP_DONTFRAG` 下发送超 MTU 立即返回 EMSGSIZE，「路径 MTU < 本机 MTU」正是探测目标场景）→ 视为 FragNeeded 继续二分（`mtu=本地 MTU`，Linux 经 `IP_MTU` getsockopt 查询，其余平台记 None 不污染聚合；`ProbeOutcome::FragNeeded` 改携带 `Option<usize>`）

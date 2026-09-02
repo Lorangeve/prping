@@ -43,15 +43,19 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use async_tungstenite::WebSocketStream;
+use async_tungstenite::tungstenite::Bytes;
 use async_tungstenite::tungstenite::handshake::derive_accept_key;
 use async_tungstenite::tungstenite::protocol::{Message, Role};
 use futures_util::StreamExt;
 use rust_i18n::t;
 use serde_json::{Map, Value, json};
-use smol::channel::{Sender, unbounded};
+use smol::channel::{Sender, bounded, unbounded};
 use smol::io::AsyncWriteExt;
 use smol::net::TcpStream;
 
+use super::code;
+use super::code_of;
+use super::http::RequestHead;
 use super::pipe::{ChanReader, ChanWriter};
 use super::run;
 use super::workspace;
@@ -77,6 +81,37 @@ pub(crate) async fn accept(
     Ok(WebSocketStream::from_raw_socket(stream, Role::Server, None).await)
 }
 
+/// WS 升级三道校验：Host 回环（防 DNS rebinding 套取 token）→ Origin 同源
+/// （浏览器跨源页面不得连 WS；空 Origin = 非浏览器客户端/本机文件，放行）→
+/// token 查询参数（进程一次性 token，经 /config.json 下发；前端拼 ?token=）。
+/// 逃生口：`PRPING_WEB_INSECURE=1` 仅跳过 token 校验（本地脚本/测试用）。
+pub(crate) fn authorize(head: &RequestHead, token: &str) -> Result<(), String> {
+    if !head.host_is_loopback() {
+        return Err("host is not loopback".into());
+    }
+    if let Some(origin) = head.header("origin") {
+        // Origin: scheme://host[:port]/path → 取 authority 与 Host 头比对
+        let authority = origin
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(origin);
+        let authority = authority.split('/').next().unwrap_or(authority);
+        let same = head
+            .header("host")
+            .is_some_and(|host| authority.eq_ignore_ascii_case(host));
+        if !same {
+            return Err("cross-origin websocket".into());
+        }
+    }
+    if std::env::var("PRPING_WEB_INSECURE").as_deref() != Ok("1") {
+        match head.query_param("token") {
+            Some(got) if got == token => {}
+            _ => return Err("missing or invalid token".into()),
+        }
+    }
+    Ok(())
+}
+
 /// 会话主体：读任务（WS→分派）+ 转发任务（LSP 帧→信封）+ 回推循环（信封→WS）。
 /// `libs` 为 `--lib` 附加目录（与 engine/packet 同语义；默认 lib/ 目录在分析/列库函数
 /// 内部合并）；`default_ws` 为本连接的初始工作区根（examples 发现结果，可被
@@ -89,7 +124,9 @@ pub(crate) async fn session(
     let (mut sink, mut source) = ws.split();
     let (in_tx, in_rx) = unbounded::<Vec<u8>>();
     let (out_tx, out_rx) = unbounded::<Vec<u8>>();
-    let (reply_tx, reply_rx) = unbounded::<Value>();
+    // 回推通道 bounded：慢客户端（后台标签页/卡死）时背压传导——LSP 写端与
+    // run 输出排水线程阻塞而非内存无限积压（run_out 行级丢弃由 run.rs 行预算负责）
+    let (reply_tx, reply_rx) = bounded::<Value>(512);
     let sess = Arc::new(Session {
         libs: libs.clone(),
         root: Mutex::new(default_ws),
@@ -103,9 +140,20 @@ pub(crate) async fn session(
         smol::spawn(smol::unblock(move || {
             let reader = ChanReader::new(in_rx);
             let writer = ChanWriter::new(out_tx);
-            if let Err(e) = crate::run_lsp_on(reader, writer, &lsp_libs) {
-                let mut w = crate::output::stderr();
-                let _ = crate::output::writeln_orange(&mut w, format!("lsp session: {e}"));
+            // catch_unwind：LSP 处理器内部 panic 时优雅收尾（发送端 drop →
+            // 转发任务 EOF → WS 关闭 → 前端重连），不让未捕获 panic 上抛
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::run_lsp_on(reader, writer, &lsp_libs)
+            }));
+            let mut w = crate::output::stderr();
+            match result {
+                Ok(Err(e)) => {
+                    let _ = crate::output::writeln_orange(&mut w, format!("lsp session: {e}"));
+                }
+                Err(_) => {
+                    let _ = crate::output::writeln_orange(&mut w, "lsp session: internal panic");
+                }
+                Ok(Ok(_)) => {}
             }
         }))
     };
@@ -148,9 +196,28 @@ pub(crate) async fn session(
     // 回推通道随之关闭，主循环自然收尾
     drop(reply_tx);
 
-    // 信封 → WS；两端发送任务都结束后通道关闭，会话收尾
-    while let Ok(reply) = reply_rx.recv().await {
-        if sink.send(Message::text(reply.to_string())).await.is_err() {
+    // 信封 → WS；两端发送任务都结束后通道关闭，会话收尾。
+    // 空闲期每 30s 发一个 WS ping：防代理/NAT 半开连接挂着 listen 型 run。
+    let mut ping = std::pin::pin!(smol::Timer::interval(std::time::Duration::from_secs(30)));
+    enum Step {
+        Reply(Value),
+        Ping,
+    }
+    loop {
+        let step = smol::future::or(
+            async { reply_rx.recv().await.ok().map(Step::Reply) },
+            async {
+                let _ = ping.as_mut().await;
+                Some(Step::Ping)
+            },
+        )
+        .await;
+        let msg = match step {
+            Some(Step::Reply(reply)) => Message::text(reply.to_string()),
+            Some(Step::Ping) => Message::Ping(Bytes::new()),
+            None => break, // 回推通道关闭（两端任务已结束）
+        };
+        if sink.send(msg).await.is_err() {
             break;
         }
     }
@@ -159,6 +226,11 @@ pub(crate) async fn session(
     reader.cancel().await;
     fwd.cancel().await;
     lsp.cancel().await;
+}
+
+/// 统一错误信封：error 人类文案 + 机器可读 code（前端按码分支，不必比对文案）。
+fn err_reply(id: Option<Value>, code: &str, error: impl std::fmt::Display) -> Value {
+    json!({ "type": "result", "id": id, "ok": false, "code": code, "error": error.to_string() })
 }
 
 /// 单连接会话状态：库目录（服务级共享）+ 工作区根（每连接独立，workspace 信封可切换）
@@ -187,7 +259,7 @@ async fn dispatch(
 ) {
     let Ok(env) = serde_json::from_str::<Value>(text) else {
         let _ = reply_tx
-            .send(json!({ "type": "error", "message": "invalid envelope" }))
+            .send(json!({ "type": "error", "code": code::INVALID_ENVELOPE, "message": "invalid envelope" }))
             .await;
         return;
     };
@@ -230,9 +302,7 @@ async fn dispatch(
                         Ok(r) => {
                             json!({ "type": "result", "id": id, "ok": true, "data": recipe_overview(&r) })
                         }
-                        Err(e) => {
-                            json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
-                        }
+                        Err(e) => err_reply(id, code_of(&e), e),
                     }
                 } else {
                     smol::unblock(move || {
@@ -284,8 +354,7 @@ async fn dispatch(
                                 {
                                     Ok(text) => json!({ "type": "result", "id": id, "ok": true,
                                     "data": { "text": text, "writable": true } }),
-                                    Err(e) => json!({ "type": "result", "id": id,
-                                    "ok": false, "error": e.to_string() }),
+                                    Err(e) => err_reply(id, code_of(&e), e),
                                 };
                             let _ = tx.send(reply).await;
                         })
@@ -293,8 +362,7 @@ async fn dispatch(
                     }
                     None => {
                         let _ = reply_tx
-                            .send(json!({ "type": "result", "id": id, "ok": false,
-                                "error": t!("web.ws_not_found").to_string() }))
+                            .send(err_reply(id, code::NOT_FOUND, t!("web.ws_not_found")))
                             .await;
                     }
                 }
@@ -305,9 +373,7 @@ async fn dispatch(
                     json!({ "type": "result", "id": id, "ok": true,
                         "data": { "text": text, "writable": false } })
                 }
-                Err(e) => {
-                    json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
-                }
+                Err(e) => err_reply(id, code_of(&e), e),
             };
             let _ = reply_tx.send(reply).await;
         }
@@ -361,8 +427,7 @@ async fn dispatch(
                         };
                         match res {
                             Ok(()) => json!({ "type": "result", "id": id, "ok": true, "data": {} }),
-                            Err(e) => json!({ "type": "result", "id": id,
-                                "ok": false, "error": e.to_string() }),
+                            Err(e) => err_reply(id, code_of(&e), e),
                         }
                     }
                     None => json!({ "type": "result", "id": id, "ok": false,
@@ -392,8 +457,7 @@ async fn dispatch(
                             smol::unblock(move || workspace::rename_entry(&root, &from, &to)).await;
                         match res {
                             Ok(()) => json!({ "type": "result", "id": id, "ok": true, "data": {} }),
-                            Err(e) => json!({ "type": "result", "id": id,
-                                "ok": false, "error": e.to_string() }),
+                            Err(e) => err_reply(id, code_of(&e), e),
                         }
                     }
                     None => json!({ "type": "result", "id": id, "ok": false,
@@ -417,8 +481,7 @@ async fn dispatch(
                         match smol::unblock(move || workspace::mkdirs(&root, &name)).await {
                             Ok(dir) => json!({ "type": "result", "id": id, "ok": true,
                             "data": { "path": dir.display().to_string() } }),
-                            Err(e) => json!({ "type": "result", "id": id,
-                            "ok": false, "error": e.to_string() }),
+                            Err(e) => err_reply(id, code_of(&e), e),
                         }
                     }
                     None => json!({ "type": "result", "id": id, "ok": false,
@@ -440,9 +503,7 @@ async fn dispatch(
                             json!({ "type": "result", "id": id, "ok": true,
                                 "data": { "root": canon.display().to_string() } })
                         }
-                        Err(e) => {
-                            json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
-                        }
+                        Err(e) => err_reply(id, code_of(&e), e),
                     };
                     let _ = reply_tx.send(reply).await;
                 }
@@ -479,9 +540,7 @@ async fn dispatch(
                             "parent": parent.map(|p| p.display().to_string()),
                             "dirs": dirs,
                         } }),
-                    Err(e) => {
-                        json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
-                    }
+                    Err(e) => err_reply(id, code_of(&e), e),
                 };
                 let _ = tx.send(reply).await;
             })
@@ -512,9 +571,7 @@ async fn dispatch(
                     Ok(run_id) => {
                         json!({ "type": "result", "id": id, "ok": true, "data": { "run": run_id } })
                     }
-                    Err(e) => {
-                        json!({ "type": "result", "id": id, "ok": false, "error": e.to_string() })
-                    }
+                    Err(e) => err_reply(id, code_of(&e), e),
                 };
                 let _ = ack_tx.send(reply).await;
             })
@@ -754,6 +811,80 @@ impl FrameDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::http;
+
+    /// authorize 测试共用一把锁：PRPING_WEB_INSECURE 是进程级环境变量，
+    /// 并行测试下会互相踩（cargo test 默认多线程）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 构造升级请求头（http::parse 是纯函数，直接喂原始头部字节）。
+    fn ws_head(target: &str, host: &str, origin: Option<&str>) -> RequestHead {
+        let origin_line = origin
+            .map(|o| format!("Origin: {o}\r\n"))
+            .unwrap_or_default();
+        let raw = format!(
+            "GET {target} HTTP/1.1\r\nHost: {host}\r\n{origin_line}\
+             Upgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        http::parse(raw.as_bytes()).expect("head parses")
+    }
+
+    #[test]
+    fn authorize_accepts_same_origin_with_token() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let h = ws_head(
+            "/ws?token=abc123",
+            "127.0.0.1:8788",
+            Some("http://127.0.0.1:8788"),
+        );
+        assert!(authorize(&h, "abc123").is_ok());
+        // 空 Origin（非浏览器客户端/本机文件）放行
+        let h = ws_head("/ws?token=abc123", "localhost:8788", None);
+        assert!(authorize(&h, "abc123").is_ok());
+    }
+
+    #[test]
+    fn authorize_rejects_cross_origin_and_bad_token_and_host() {
+        let _env = ENV_LOCK.lock().unwrap();
+        // 跨源 Origin：恶意页面无法连 WS
+        let h = ws_head(
+            "/ws?token=abc123",
+            "127.0.0.1:8788",
+            Some("http://evil.example"),
+        );
+        assert_eq!(
+            authorize(&h, "abc123"),
+            Err("cross-origin websocket".into())
+        );
+        // token 缺失 / 不匹配
+        let h = ws_head("/ws", "127.0.0.1:8788", None);
+        assert_eq!(
+            authorize(&h, "abc123"),
+            Err("missing or invalid token".into())
+        );
+        let h = ws_head("/ws?token=wrong", "127.0.0.1:8788", None);
+        assert_eq!(
+            authorize(&h, "abc123"),
+            Err("missing or invalid token".into())
+        );
+        // Host 非回环（DNS rebinding 域名）
+        let h = ws_head("/ws?token=abc123", "attacker.example:8788", None);
+        assert_eq!(authorize(&h, "abc123"), Err("host is not loopback".into()));
+    }
+
+    #[test]
+    fn authorize_insecure_escape_hatches_token_only() {
+        let _env = ENV_LOCK.lock().unwrap();
+        // 逃生口只跳过 token：Origin/Host 校验仍在
+        // SAFETY：2024 edition env API 为 unsafe；ENV_LOCK 已串行化，无并发读取方
+        unsafe { std::env::set_var("PRPING_WEB_INSECURE", "1") };
+        let h = ws_head("/ws", "127.0.0.1:8788", None);
+        assert!(authorize(&h, "abc123").is_ok());
+        let h = ws_head("/ws", "127.0.0.1:8788", Some("http://evil.example"));
+        assert!(authorize(&h, "abc123").is_err());
+        unsafe { std::env::remove_var("PRPING_WEB_INSECURE") };
+    }
 
     fn frame(msg: &Value) -> Vec<u8> {
         let body = msg.to_string();

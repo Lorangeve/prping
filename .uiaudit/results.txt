@@ -1,0 +1,36 @@
+### 1 AUTOCOMPLETE — FAIL
+TimeoutError: Locator.wait_for: Timeout 4000ms exceeded.
+Call log:
+  - waiting for locator(".cm-tooltip-autocomplete") to be visible
+
+
+### 2 HOVER DOCS — FAIL
+AssertionError: tcp( token not found
+
+### 3a Ctrl+S unmodified — PASS
+Ctrl+S on unmodified http_get.pkt: no dirty marker after, no error message. (Save is idempotent — sends content equal to disk.)
+
+### 3b Alt+W — PASS
+Alt+W closed the ACTIVE tab 'bad_network/syn.pkt'; focus moved to 'bad_network/http_get.pkt'. Tab closed: True
+
+### 3c Ctrl+Click jump — PARTIAL
+Ctrl+Click on http_req ref: Back(Alt+<-) disabled False -> False (nav history entry = jump happened); modifier-highlight classes found: none detected (check screenshot); msg: 'no definition found for “http_req”'
+
+### 4 EDIT+DIRTY+DRAFT — PASS
+dirty-dot on edit: True; after page reload 'restore draft' button offered: True; restore put draft text back: True; discard(via ↺ reload-from-disk) removed it: True; dirty after discard: False
+
+### 5 NEW FILE + DELETE — PARTIAL
+new-file button opened window.prompt (answered '_uiaudit_tmp.pkt'), row in tree: False; typed 'icmp()'; tree ✕ (confirm dialog) removed it: True. Dialogs seen so far: [('prompt', 'New file (relative path, .pkt/.pktl):')]
+
+### 6 DIAGNOSTICS + MD — PASS
+bad_network.pktl Diagnostics badge='none', panel: 'No diagnostics — document parses clean.'; sniffer_chat/client.pktl badge='none'; README.md opens with render/edit toggle: True, rendered content: True
+
+### 7 FOLDER DIALOG — PARTIAL
+📂 dialog 'Open folder' with 0 rows; navigating to pcaps/ + Open switched workspace (pcap rows visible: True); opening binary pcap: msg='二进制或非 UTF-8 文件——无法显示'; restored examples root via path input + Open: False
+
+### 8 RUN PANEL — FAIL
+TimeoutError: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator(".tree-file[title=\"icmp_ping/icmp_ping_step.pkt\"]").first
+
+

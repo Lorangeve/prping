@@ -112,19 +112,117 @@ export function FileSidebar(props: {
     setExpanded(allCollapsed() ? new Set(allDirs()) : new Set<string>());
   }
 
+  // ── 树键盘导航（a11y）：可见行 = DOM 顺序（折叠行不渲染）──────────
+  /** 在当前树的可见 treeitem 行间上/下移动焦点，返回是否移动成功。 */
+  function focusSiblingRow(row: HTMLElement, delta: number): boolean {
+    const container = row.parentElement;
+    if (!container) return false;
+    const rows = Array.from(container.querySelectorAll<HTMLElement>("[role='treeitem']"));
+    const next = rows[rows.indexOf(row) + delta];
+    if (!next) return false;
+    next.focus();
+    return true;
+  }
+
+  /** 工作区树行键盘：Up/Down 移动、Left/Right 折叠/展开、Enter 打开/切换。 */
+  function wsRowKeydown(ev: KeyboardEvent, e: TreeEntry, isDir: boolean) {
+    const row = ev.currentTarget as HTMLElement;
+    switch (ev.key) {
+      case "ArrowDown":
+        ev.preventDefault();
+        focusSiblingRow(row, 1);
+        break;
+      case "ArrowUp":
+        ev.preventDefault();
+        focusSiblingRow(row, -1);
+        break;
+      case "ArrowRight":
+        if (!isDir) break; // 文件行无子级
+        ev.preventDefault();
+        if (expanded().has(e.path)) focusSiblingRow(row, 1); // 已展开 → 进入首个子项
+        else toggleDir(e.path); // 折叠 → 展开（焦点留在目录行）
+        break;
+      case "ArrowLeft": {
+        if (isDir && expanded().has(e.path)) {
+          ev.preventDefault();
+          toggleDir(e.path); // 展开 → 折叠
+          break;
+        }
+        // 文件行 / 已折叠目录 → 收拢并聚焦父目录（本行可见 ⇒ 其祖先必全展开，父行必在 DOM）
+        const parts = e.path.split("/");
+        parts.pop();
+        const parentPath = parts.join("/");
+        if (!parentPath) break;
+        const parentRow = (row.parentElement as HTMLElement | null)?.querySelector<HTMLElement>(
+          `[data-path='${CSS.escape(parentPath)}']`,
+        );
+        if (parentRow) {
+          ev.preventDefault();
+          setExpanded((prev) => {
+            const n = new Set(prev);
+            n.delete(parentPath);
+            return n;
+          });
+          parentRow.focus();
+        }
+        break;
+      }
+      case "Enter":
+        ev.preventDefault();
+        if (isDir) toggleDir(e.path);
+        else props.onOpenWs(e.path);
+        break;
+    }
+  }
+
+  /** eng_lib 行键盘：Up/Down 移动焦点、Enter 打开（只读平铺树无折叠语义）。 */
+  function libRowKeydown(ev: KeyboardEvent, name: string) {
+    const row = ev.currentTarget as HTMLElement;
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      focusSiblingRow(row, 1);
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      focusSiblingRow(row, -1);
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      props.onOpenLib(name);
+    }
+  }
+
   // ── 右键菜单（行内悬停按钮之外的第二入口；空白区 = 新建/刷新）──────
-  type MenuState = { x: number; y: number; entry: TreeEntry | null };
+  // trigger = 右键触发行：Escape 关闭后归还焦点，键盘用户不丢位置（a11y 契约）
+  type MenuState = { x: number; y: number; entry: TreeEntry | null; trigger: HTMLElement };
   const [menu, setMenu] = createSignal<MenuState | null>(null);
+  let menuRef: HTMLDivElement | undefined;
 
   function openEntryMenu(ev: MouseEvent, e: TreeEntry) {
     ev.preventDefault();
     ev.stopPropagation(); // 不落到空白区菜单
-    setMenu({ x: ev.clientX, y: ev.clientY, entry: e });
+    setMenu({ x: ev.clientX, y: ev.clientY, entry: e, trigger: ev.currentTarget as HTMLElement });
   }
 
   function openBlankMenu(ev: MouseEvent) {
     ev.preventDefault();
-    setMenu({ x: ev.clientX, y: ev.clientY, entry: null });
+    setMenu({ x: ev.clientX, y: ev.clientY, entry: null, trigger: ev.currentTarget as HTMLElement });
+  }
+
+  /** 菜单项间焦点移动：ArrowDown/ArrowUp 循环遍历 .ctx-item（任务 9）。 */
+  function menuKeydown(ev: KeyboardEvent) {
+    if (ev.key !== "ArrowDown" && ev.key !== "ArrowUp") return;
+    ev.preventDefault();
+    const items = Array.from(menuRef?.querySelectorAll<HTMLElement>(".ctx-item") ?? []);
+    if (items.length === 0) return;
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    const n =
+      i === -1
+        ? ev.key === "ArrowDown"
+          ? 0
+          : items.length - 1
+        : ev.key === "ArrowDown"
+          ? (i + 1) % items.length
+          : (i - 1 + items.length) % items.length;
+    items[n].focus();
   }
 
   function closeMenu() {
@@ -145,13 +243,20 @@ export function FileSidebar(props: {
   // 菜单打开期间挂全局关闭监听（点外部/Escape/滚动/失焦/改窗口）
   createEffect(() => {
     if (!menu()) return;
+    // 打开即聚焦首个菜单项：键盘/读屏用户可直接 ArrowUp/Down 遍历（menu 模式）
+    queueMicrotask(() => menuRef?.querySelector<HTMLElement>(".ctx-item")?.focus());
     const onDown = (ev: PointerEvent) => {
       const t = ev.target;
       if (t instanceof Element && t.closest(".ctx-menu")) return; // 菜单内点击交给 onClick
       setMenu(null);
     };
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") setMenu(null);
+      if (ev.key === "Escape") {
+        // 归还焦点到触发行再关闭——Escape 不得把键盘用户丢在 body 上
+        const t = menu()?.trigger;
+        setMenu(null);
+        t?.focus();
+      }
     };
     const close = () => setMenu(null);
     document.addEventListener("pointerdown", onDown, true);
@@ -233,7 +338,7 @@ export function FileSidebar(props: {
           when={props.wsRoot}
           fallback={<div class="empty-hint">No workspace — open a folder.</div>}
         >
-          <div class="tree" onContextMenu={openBlankMenu}>
+          <div class="tree" role="tree" aria-label="workspace files" tabindex={-1} onContextMenu={openBlankMenu}>
             <For each={visibleEntries()}>
               {(e) => (
                 <Show
@@ -241,9 +346,14 @@ export function FileSidebar(props: {
                   fallback={
                     <div
                       class="tree-dir"
+                      role="treeitem"
+                      aria-expanded={expanded().has(e.path) ? "true" : "false"}
+                      tabindex={0}
+                      data-path={e.path}
                       style={{ "padding-left": `${8 + depth(e.path) * 12}px` }}
                       onClick={() => toggleDir(e.path)}
                       onContextMenu={(ev) => openEntryMenu(ev, e)}
+                      onKeyDown={(ev) => wsRowKeydown(ev, e, true)}
                       title={
                         (expanded().has(e.path) ? "collapse " : "expand ") + basename(e.path)
                       }
@@ -255,8 +365,10 @@ export function FileSidebar(props: {
                       <span class="tree-name">{basename(e.path)}</span>
                       <span class="tree-ops">
                         <button
+                          type="button"
                           class="tree-del"
                           title={`rename/move ${e.path}`}
+                          aria-label={`rename/move ${e.path}`}
                           onClick={(ev) => {
                             ev.stopPropagation();
                             props.onRename(e.path);
@@ -265,8 +377,10 @@ export function FileSidebar(props: {
                           <Icon d={I.pencil} size={12} />
                         </button>
                         <button
+                          type="button"
                           class="tree-del"
                           title={`delete folder ${e.path} (recursive)`}
+                          aria-label={`delete folder ${e.path} (recursive)`}
                           onClick={(ev) => {
                             ev.stopPropagation();
                             props.onDelete(e.path, true);
@@ -280,6 +394,14 @@ export function FileSidebar(props: {
                 >
                   <div
                     class="tree-file"
+                    role="treeitem"
+                    aria-selected={
+                      props.current?.root === "ws" && props.current?.path === e.path
+                        ? "true"
+                        : "false"
+                    }
+                    tabindex={0}
+                    data-path={e.path}
                     classList={{
                       active: props.current?.root === "ws" && props.current?.path === e.path,
                       "tree-other": !e.pkt,
@@ -287,13 +409,16 @@ export function FileSidebar(props: {
                     style={{ "padding-left": `${8 + depth(e.path) * 12}px` }}
                     onClick={() => props.onOpenWs(e.path)}
                     onContextMenu={(ev) => openEntryMenu(ev, e)}
+                    onKeyDown={(ev) => wsRowKeydown(ev, e, false)}
                     title={e.path}
                   >
                     <span class="tree-name">{basename(e.path)}</span>
                     <span class="tree-ops">
                       <button
+                        type="button"
                         class="tree-del"
                         title={`rename/move ${e.path}`}
+                        aria-label={`rename/move ${e.path}`}
                         onClick={(ev) => {
                           ev.stopPropagation();
                           props.onRename(e.path);
@@ -302,8 +427,10 @@ export function FileSidebar(props: {
                         <Icon d={I.pencil} size={12} />
                       </button>
                       <button
+                        type="button"
                         class="tree-del"
                         title={`delete ${e.path}`}
+                        aria-label={`delete ${e.path}`}
                         onClick={(ev) => {
                           ev.stopPropagation();
                           props.onDelete(e.path, false);
@@ -325,11 +452,19 @@ export function FileSidebar(props: {
             eng_lib<span class="ro-badge">read-only</span>
           </span>
         </div>
-        <div class="tree">
+        <div class="tree" role="tree" aria-label="eng_lib (read-only)">
           <For each={props.libs}>
             {(name) => (
               <div
                 class="tree-file lib-file"
+                role="treeitem"
+                aria-selected={
+                  props.current?.root === "lib" && props.current?.path === name
+                    ? "true"
+                    : "false"
+                }
+                tabindex={0}
+                onKeyDown={(ev) => libRowKeydown(ev, name)}
                 classList={{
                   active: props.current?.root === "lib" && props.current?.path === name,
                 }}
@@ -341,14 +476,21 @@ export function FileSidebar(props: {
             )}
           </For>
         </div>
-        <footer class="libs-dirs" title="effective library directories">
+        {/* title 给完整路径列表（逐行），截断后悬停仍可读全部库目录 */}
+        <footer class="libs-dirs" title={props.libDirs.join("\n") || "no library directories"}>
           {props.libDirs.join(" · ")}
         </footer>
       </div>
       <Portal>
         <Show when={menuPos()}>
           {(pos) => (
-            <div class="ctx-menu" role="menu" style={{ left: pos().left, top: pos().top }}>
+            <div
+              class="ctx-menu"
+              role="menu"
+              style={{ left: pos().left, top: pos().top }}
+              ref={menuRef}
+              onKeyDown={menuKeydown}
+            >
               <Show when={menu()?.entry} fallback={<BlankMenuItems onAction={menuAction} hasWs={!!props.wsRoot} />}>
                 {(e) => (
                   <>
@@ -476,38 +618,94 @@ export function FolderDialog(props: {
     else props.onClose();
   }
 
+  // ── a11y：模态对话框焦点管理 ────────────────────────
+  let dlgRef: HTMLDivElement | undefined;
+  let inputRef: HTMLInputElement | undefined;
+
+  // 打开时焦点移入对话框（路径输入框优先）——autofocus 属性对动态插入的
+  // 节点在部分浏览器不生效，显式聚焦更可靠
+  createEffect(() => {
+    if (props.open) queueMicrotask(() => inputRef?.focus());
+  });
+
+  /** Tab/Shift+Tab 首尾环绕：模态期间焦点不逃出对话框（aria-modal 契约）。 */
+  function trapDlgFocus(ev: KeyboardEvent) {
+    const root = dlgRef;
+    if (!root) return;
+    const focusables = Array.from(root.querySelectorAll<HTMLElement>("input, button")).filter(
+      (el) => !(el as HTMLInputElement).disabled,
+    );
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (ev.shiftKey && (active === first || !(active instanceof Node) || !root.contains(active))) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && active === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
     <Show when={props.open}>
       <div class="dlg-backdrop" onClick={props.onClose}>
-        <div class="dlg" onClick={(e) => e.stopPropagation()}>
+        {/* 模态对话框：容器级 Escape（不再只认输入框内的）+ Tab 焦点圈 */}
+        <div
+          class="dlg"
+          role="dialog"
+          aria-modal="true"
+          aria-label="open folder"
+          ref={dlgRef}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              props.onClose();
+            } else if (e.key === "Tab") {
+              trapDlgFocus(e);
+            }
+          }}
+        >
           <div class="dlg-title">Open folder</div>
           <div class="dlg-path">
             <input
               class="dlg-input"
               value={input()}
               placeholder="/absolute/path (Enter to jump)"
-              autofocus
+              aria-label="folder path"
+              ref={inputRef}
               onInput={(e) => setInput(e.currentTarget.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") void go(input().trim());
-                if (e.key === "Escape") props.onClose();
               }}
             />
             <button class="icon-btn" title="jump to path" onClick={() => void go(input().trim())}>
               →
             </button>
           </div>
-          <div class="dlg-list">
+          <div class="dlg-list" role="listbox" aria-label="directories">
             <Show when={parent()}>
               {(p) => (
-                <div class="dlg-row dlg-up" onClick={() => void go(p())}>
+                <div
+                  class="dlg-row dlg-up"
+                  role="option"
+                  aria-selected="false"
+                  onClick={() => void go(p())}
+                >
                   ../
                 </div>
               )}
             </Show>
             <For each={dirs()}>
               {(d) => (
-                <div class="dlg-row" onClick={() => void go(join(cur(), d))}>
+                <div
+                  class="dlg-row"
+                  role="option"
+                  aria-selected="false"
+                  onClick={() => void go(join(cur(), d))}
+                >
                   {d}/
                 </div>
               )}

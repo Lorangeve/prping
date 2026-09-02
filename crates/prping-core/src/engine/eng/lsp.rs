@@ -758,76 +758,12 @@ impl LspServer {
             return json!({ "contents": { "kind": "markdown", "value":
                 "### `func name(p1, p2=默认) { pipeline }`\n\n具名参数化函数：参数全部可选——无默认值的参数未传时为「未设」（在层参数位置省略 → 自动值），有默认值则用默认。函数体无 `use` 时以空包种子逐层包裹（层片段语义）。\n\n例：\n\n```\nfunc net4(dst, src=\"random\", ttl=64) {\n    ipv4(src=src, dst=dst, ttl=ttl) |> eth()\n}\n```" } });
         }
-        // 用户函数悬停（若文档可解析）
+        // 本地符号悬停（func / proto / def 三分支在 symbol_hover，跨模块复用）
         if let Some(text) = self.text_of(uri)
             && let Ok(module) = try_parse(text, uri, &self.libs)
-            && let Some(f) = module.funcs.iter().find(|f| f.name == word)
+            && let Some(v) = self.symbol_hover(&module, text, &word, None)
         {
-            let sigs: Vec<String> = f
-                .params
-                .iter()
-                .map(|p| param_sig(&p.name, p.default.as_ref()))
-                .map(|s| format!("`{s}`"))
-                .collect();
-            let mut md = format!("### `func {}({})`\n\n", f.name, sigs.join(", "));
-            if let Some(doc) = &f.doc {
-                md.push_str(&doc_markdown(doc));
-            }
-            let infos: Vec<ParamInfo> = f
-                .params
-                .iter()
-                .map(|p| ParamInfo {
-                    name: p.name.clone(),
-                    default: p.default.as_ref().map(value_display),
-                    desc: f
-                        .doc
-                        .as_ref()
-                        .and_then(|d| d.params.iter().find(|(n, _)| n == &p.name))
-                        .map(|(_, t)| t.clone()),
-                })
-                .collect();
-            md.push_str(&params_markdown(&infos, "字段占位"));
-            return json!({ "contents": { "kind": "markdown", "value": md } });
-        }
-        // 本地 proto 悬停：字段即参数（与库 proto 同格式；此前该位恒为无提示）
-        if let Some(text) = self.text_of(uri)
-            && let Ok(module) = try_parse(text, uri, &self.libs)
-            && let Some(p) = module.protos.iter().find(|p| p.name == word)
-        {
-            let infos = proto_field_params(&p.field_params(), p.doc.as_ref());
-            let mut md = format!(
-                "### `#[proto] func {}({}) -> bytes`\n\n",
-                p.name,
-                infos
-                    .iter()
-                    .map(|i| format!("`{}`", i.name))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            if let Some(doc) = &p.doc {
-                md.push_str(&doc_markdown(doc));
-            }
-            if let Some(layer) = &p.layer {
-                md.push_str(&format!("IR 层类型：`{layer}`\n\n"));
-            }
-            md.push_str(&params_markdown(&infos, "proto 字段占位"));
-            return json!({ "contents": { "kind": "markdown", "value": md } });
-        }
-        // 本地元件悬停：定义行 + 片段（此前该位恒为无提示）
-        if let Some(text) = self.text_of(uri)
-            && let Ok(module) = try_parse(text, uri, &self.libs)
-            && let Some(d) = module.defs.iter().find(|d| d.name == word)
-        {
-            let lines: Vec<&str> = text.lines().collect();
-            let sl = d.span.start.line.saturating_sub(1);
-            let el = (d.span.end.line.saturating_sub(1)).min(lines.len().saturating_sub(1));
-            let mut md = format!("### `{}`\n\n元件（component）——命名流水线。\n\n```", d.name);
-            for l in lines.iter().take(el + 1).skip(sl) {
-                md.push('\n');
-                md.push_str(l);
-            }
-            md.push_str("\n```");
-            return json!({ "contents": { "kind": "markdown", "value": md } });
+            return v;
         }
         // 库导出函数（隐式可见）：与用户函数同格式，标注来源模块
         if let Some(exp) = self
@@ -861,7 +797,123 @@ impl LspServer {
             md.push_str(&params_markdown(&infos, "proto 字段占位"));
             return json!({ "contents": { "kind": "markdown", "value": md } });
         }
+        // 跨模块悬停：import 引入的函数/proto/元件在本文件无声明——按定义解析
+        // 定位目标文件，用目标模块的同名符号渲染同一套 markdown（此前恒为无提示）
+        if let Some(text) = self.text_of(uri)
+            && let Ok(module) = try_parse(text, uri, &self.libs)
+            && let Some(site) = module.definition_of(&word)
+            && let Some(path) = site.path
+            && let Ok(src) = std::fs::read_to_string(&path)
+        {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("target")
+                .to_string();
+            let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+            if let Ok(target) = packet_dsl::parse_source_at_with_libs(&stem, &dir, &src, &self.libs)
+                && let Some(v) = self.symbol_hover(
+                    &target,
+                    &src,
+                    &word,
+                    Some(&format!("模块：`{stem}`（import 引入）")),
+                )
+            {
+                return v;
+            }
+        }
         Value::Null
+    }
+
+    /// 模块内符号悬停（本地 func / proto / def 三分支；source_note 供跨模块
+    /// 来源标注）。src = 模块源文本（def 悬停取定义行片段用）。
+    fn symbol_hover(
+        &self,
+        module: &Module,
+        src: &str,
+        word: &str,
+        source_note: Option<&str>,
+    ) -> Option<Value> {
+        fn with_note(mut v: Value, note: Option<&str>) -> Value {
+            if let Some(note) = note
+                && let Some(sv) = v["contents"]["value"].as_str().map(|x| x.to_string())
+            {
+                v["contents"]["value"] = json!(format!("{sv}\n\n{note}"));
+            }
+            v
+        }
+        // 用户函数悬停
+        if let Some(f) = module.funcs.iter().find(|f| f.name == word) {
+            let sigs: Vec<String> = f
+                .params
+                .iter()
+                .map(|p| param_sig(&p.name, p.default.as_ref()))
+                .map(|sig| format!("`{sig}`"))
+                .collect();
+            let mut md = format!("### `func {}({})`\n\n", f.name, sigs.join(", "));
+            if let Some(doc) = &f.doc {
+                md.push_str(&doc_markdown(doc));
+            }
+            let infos: Vec<ParamInfo> = f
+                .params
+                .iter()
+                .map(|p| ParamInfo {
+                    name: p.name.clone(),
+                    default: p.default.as_ref().map(value_display),
+                    desc: f
+                        .doc
+                        .as_ref()
+                        .and_then(|d| d.params.iter().find(|(nm, _)| nm == &p.name))
+                        .map(|(_, t)| t.clone()),
+                })
+                .collect();
+            md.push_str(&params_markdown(&infos, "字段占位"));
+            return Some(with_note(
+                json!({ "contents": { "kind": "markdown", "value": md } }),
+                source_note,
+            ));
+        }
+        // 本地 proto 悬停：字段即参数（与库 proto 同格式）
+        if let Some(pr) = module.protos.iter().find(|pr| pr.name == word) {
+            let infos = proto_field_params(&pr.field_params(), pr.doc.as_ref());
+            let mut md = format!(
+                "### `#[proto] func {}({}) -> bytes`\n\n",
+                pr.name,
+                infos
+                    .iter()
+                    .map(|i| format!("`{}`", i.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if let Some(doc) = &pr.doc {
+                md.push_str(&doc_markdown(doc));
+            }
+            if let Some(layer) = &pr.layer {
+                md.push_str(&format!("IR 层类型：`{layer}`\n\n"));
+            }
+            md.push_str(&params_markdown(&infos, "proto 字段占位"));
+            return Some(with_note(
+                json!({ "contents": { "kind": "markdown", "value": md } }),
+                source_note,
+            ));
+        }
+        // 本地元件悬停：定义行 + 片段
+        if let Some(d) = module.defs.iter().find(|d| d.name == word) {
+            let lines: Vec<&str> = src.lines().collect();
+            let sl = d.span.start.line.saturating_sub(1);
+            let el = (d.span.end.line.saturating_sub(1)).min(lines.len().saturating_sub(1));
+            let mut md = format!("### `{}`\n\n元件（component）——命名流水线。\n\n```", d.name);
+            for l in lines.iter().take(el + 1).skip(sl) {
+                md.push('\n');
+                md.push_str(l);
+            }
+            md.push_str("\n```");
+            return Some(with_note(
+                json!({ "contents": { "kind": "markdown", "value": md } }),
+                source_note,
+            ));
+        }
+        None
     }
 
     /// `textDocument/definition`：定位光标处标识符的定义位置。
@@ -1078,6 +1130,10 @@ enum ImportCtx {
 /// 语句，项以 `-` 起头（允许换行）。
 fn export_list_context(text: &str, line_no: usize, col: usize) -> bool {
     let lines: Vec<&str> = text.lines().collect();
+    // 空文档：无行可查（text.lines() 对空串产生 0 行，直接索引会越界 panic）
+    if lines.is_empty() {
+        return false;
+    }
     let last = lines.len().saturating_sub(1);
     for i in (0..=line_no.min(last)).rev() {
         let raw = if i == line_no {
@@ -1206,6 +1262,9 @@ enum SnifferCtx {
 /// 时为字段位（值位交回全局列表，那里本就该补 ack()/reply() 等值函数）。
 fn sniffer_context(text: &str, line_no: usize, col: usize) -> Option<SnifferCtx> {
     let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
     let last = lines.len().saturating_sub(1);
     let mut in_block = false;
     for i in (0..=line_no.min(last)).rev() {
@@ -1411,6 +1470,7 @@ struct ParamInfo {
 }
 
 /// .pkt 通用位置上下文。
+#[derive(Debug)]
 enum PktCtx {
     /// 字符串字面量 / 注释内：不出候选。
     Quiet,
@@ -2470,6 +2530,9 @@ fn line_enclosing_func(head: &str) -> Option<String> {
 /// 光标行向上是否处于 sniffer: 块内（块判定从 sniffer_context 拆出复用）。
 fn in_sniffer_block(text: &str, line_no: usize) -> bool {
     let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return false;
+    }
     let last = lines.len().saturating_sub(1);
     for i in (0..=line_no.min(last)).rev() {
         let t = lines[i].trim_start();
@@ -3905,6 +3968,196 @@ mod tests {
     }
 
     #[test]
+    fn definition_on_bad_network_http_get_local_def_and_lib_call() {
+        // QA 复现（engine 级，无 web 服务器）：examples/bad_network/http_get.pkt 里
+        // Ctrl+Click 本地元件 http_req 的使用处与库调用 http( 均报 no definition
+        // found，而高亮把它们标记为可跳。走与 LSP definition 完全相同的入口：
+        // 真实 file:// URI didOpen → definition(msg)（try_parse →
+        // Module::definition_of → site_location），libs 走 default_libs() 的
+        // test-stdlib 回退（与现有 definition 测试一致）。
+        let root = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .expect("定位仓库根");
+        let pkt = root.join("examples/bad_network/http_get.pkt");
+        let text = std::fs::read_to_string(&pkt).expect("读取 http_get.pkt");
+        let uri = format!("file://{}", percent_encode_path(&pkt.to_string_lossy()));
+        let mut server = LspServer {
+            libs: Vec::new(),
+            ..LspServer::default()
+        };
+        server.docs.insert(uri.clone(), text);
+        // 第 5 行（0 基 4）`data_pkt = use(http_req)`：http_req 使用处 → 本文件
+        // 第 4 行 `http_req = ...` 的定义名（col 0）
+        let res = define_at(&server, &uri, 4, 15);
+        let loc = res
+            .as_array()
+            .and_then(|a| a.first())
+            .unwrap_or_else(|| panic!("http_req 使用处应有定义: {res}"));
+        assert_eq!(loc["uri"], uri, "http_req 定义应在本文件: {loc}");
+        assert_eq!(loc["range"]["start"]["line"], 3);
+        assert_eq!(loc["range"]["start"]["character"], 0);
+        // 第 4 行（0 基 3）`http_req = http(...)`：库调用 http → eng_lib/headers.pkt
+        let res = define_at(&server, &uri, 3, 11);
+        let loc = res
+            .as_array()
+            .and_then(|a| a.first())
+            .unwrap_or_else(|| panic!("http 调用应有定义: {res}"));
+        let target = loc["uri"].as_str().unwrap_or("");
+        assert!(
+            target.ends_with("/eng_lib/headers.pkt"),
+            "http 应跳库源文件: {target}"
+        );
+    }
+
+    /// 驱动 [`run_lsp_on`] 的完整分帧会话（initialize → didOpen → 请求序列），
+    /// 返回全部响应帧（按 id 索引）。与 web WS 信封同构：客户端只发标准
+    /// JSON-RPC，服务端 read_message 按 Content-Length 解帧。
+    fn drive_session(
+        uri: &str,
+        text: &str,
+        requests: Vec<(i64, &str, Value)>,
+    ) -> HashMap<i64, Value> {
+        let mut wire = String::new();
+        let mut send = |v: Value| {
+            let body = serde_json::to_string(&v).unwrap();
+            wire.push_str(&format!("Content-Length: {}\r\n\r\n{}", body.len(), body));
+        };
+        send(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {} }));
+        send(json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+        send(json!({
+            "jsonrpc": "2.0", "method": "textDocument/didOpen",
+            "params": { "textDocument": { "uri": uri, "languageId": "pkt", "version": 1, "text": text } }
+        }));
+        for (id, method, params) in requests {
+            send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        }
+        let mut out = Vec::new();
+        run_lsp_on(wire.as_bytes(), &mut out, &[]).expect("LSP 会话不应失败");
+        let mut frames = HashMap::new();
+        let raw = String::from_utf8(out).unwrap();
+        for part in raw.split("Content-Length:").skip(1) {
+            let Some((_, rest)) = part.split_once("\r\n\r\n") else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(rest.trim()) else {
+                continue;
+            };
+            if let Some(id) = v["id"].as_i64() {
+                frames.insert(id, v);
+            }
+        }
+        frames
+    }
+
+    #[test]
+    fn definition_end_to_end_framed_session_bad_network_http_get() {
+        // 端到端复现（与 web 会话同构的分帧 JSON-RPC）：initialize → didOpen →
+        // definition。此前只有直调 server.definition() 的测试——若分帧/会话层
+        // 丢失或错配响应，前端表现为 no definition found（3s 超时兜底 resolve null）。
+        let root = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .expect("定位仓库根");
+        let pkt = root.join("examples/bad_network/http_get.pkt");
+        let text = std::fs::read_to_string(&pkt).expect("读取 http_get.pkt");
+        let uri = format!("file://{}", percent_encode_path(&pkt.to_string_lossy()));
+        let def_params = |line: i64, ch: i64| json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": ch } });
+        let frames = drive_session(
+            &uri,
+            &text,
+            vec![
+                (2, "textDocument/definition", def_params(4, 15)), // use(http_req)
+                (3, "textDocument/definition", def_params(3, 11)), // http(
+            ],
+        );
+        let r2 = frames
+            .get(&2)
+            .unwrap_or_else(|| panic!("definition(id=2) 应有响应: {frames:?}"));
+        let loc = r2["result"]
+            .as_array()
+            .and_then(|a| a.first())
+            .unwrap_or_else(|| panic!("http_req 使用处应有定义: {r2}"));
+        assert_eq!(loc["uri"], uri, "http_req 定义应在本文件");
+        assert_eq!(loc["range"]["start"]["line"], 3);
+        let r3 = frames
+            .get(&3)
+            .unwrap_or_else(|| panic!("definition(id=3) 应有响应: {frames:?}"));
+        let loc = r3["result"]
+            .as_array()
+            .and_then(|a| a.first())
+            .unwrap_or_else(|| panic!("http 调用应有定义: {r3}"));
+        assert!(
+            loc["uri"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("/eng_lib/headers.pkt"),
+            "http 应跳库源文件: {loc}"
+        );
+    }
+
+    #[test]
+    fn pktl_step_file_token_resolves_as_known_good_control() {
+        // 已知良好对照组：.pktl 步骤文件名跳转不经 LSP definition（前端
+        // openRecipePkgToken 按配方所在目录解析相对路径后直接打开）。engine 侧
+        // 等价校验：配方解析出的每个步骤 .pkt 相对 .pktl 所在目录均存在——
+        // 与前端同一解析语义，且真实存在（QA 确认这路跳转是好的）。
+        let root = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .expect("定位仓库根");
+        let pktl = root.join("examples/bad_network/bad_network.pktl");
+        let text = std::fs::read_to_string(&pktl).expect("读取 bad_network.pktl");
+        let recipe = crate::engine::recipe::parse_text(&text, &pktl).expect("配方解析应成功");
+        assert!(!recipe.steps.is_empty(), "bad_network 配方应有步骤");
+        let dir = pktl.parent().unwrap();
+        for step in &recipe.steps {
+            let target = dir.join(&step.pkg);
+            assert!(target.is_file(), "步骤 .pkt 应存在: {}", target.display());
+        }
+    }
+
+    #[test]
+    fn hover_imported_func_renders_target_module_symbol() {
+        // 跨模块悬停：import 引入的函数用目标模块的声明渲染签名 + 文档
+        //（此前该位恒为无提示）
+        let dir = std::env::temp_dir().join(format!("prping_lsp_hover_imp_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        std::fs::write(
+            dir.join("dep.pkt"),
+            "# dep 的 bump 文档\nfunc bump(x) -> bytes {\n    be16(x)\n}\nexport:\n- bump\n",
+        )
+        .expect("写 dep.pkt");
+        let uri = format!(
+            "file://{}",
+            percent_encode_path(&dir.join("main.pkt").to_string_lossy())
+        );
+        let mut server = LspServer {
+            libs: Vec::new(),
+            ..LspServer::default()
+        };
+        server.docs.insert(
+            uri.clone(),
+            "import dep { bump }\np = raw(bytes=\"\")\nout = use(p) |> bump(x=1)\n".to_string(),
+        );
+        // 光标落在调用名 bump 上（第 2 行 col 17）
+        let res = server.hover(&json!({
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": 2, "character": 17 }
+            }
+        }));
+        let value = res["contents"]["value"].as_str().unwrap_or("");
+        assert!(
+            value.contains("func bump"),
+            "应渲染 dep 的 bump 签名: {value}"
+        );
+        assert!(
+            value.contains("dep 的 bump 文档"),
+            "应带目标模块 doc: {value}"
+        );
+        assert!(
+            value.contains("import 引入"),
+            "应标注来源模块（import 引入）: {value}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn definition_unknown_name_returns_null() {
         let mut server = LspServer {
             libs: Vec::new(),
@@ -3916,5 +4169,54 @@ mod tests {
         );
         // 注释里的原语名：hex/u8 是内置原语，无源文件可跳
         assert!(define_at(&server, "file:///scratch.pkt", 0, 3).is_null());
+    }
+
+    #[test]
+    fn empty_doc_context_helpers_no_panic() {
+        // 空文档（text.lines() = 0 行）曾让 export_list_context /
+        // sniffer_context / in_sniffer_block 直接索引 lines[0] 越界 panic，
+        // 打崩整条 LSP 会话线程（web 连接静默失效、CLI --lsp 进程崩溃）。
+        assert!(!export_list_context("", 0, 0));
+        assert!(sniffer_context("", 0, 0).is_none());
+        assert!(!in_sniffer_block("", 0));
+    }
+
+    #[test]
+    fn empty_doc_completion_no_panic() {
+        let mut server = LspServer {
+            libs: Vec::new(),
+            ..LspServer::default()
+        };
+        server
+            .docs
+            .insert("file:///e.pkt".to_string(), String::new());
+        // 空文档补全：不得 panic，返回顶层关键字候选（消息须带 params 包装）
+        let items = server.completion(&json!({
+            "params": {
+                "textDocument": { "uri": "file:///e.pkt" },
+                "position": { "line": 0, "character": 0 }
+            }
+        }));
+        assert!(
+            items.iter().any(|i| i["label"] == "func"),
+            "空文档补全应给顶层关键字: {items:?}"
+        );
+        // 空文档悬停：不得 panic
+        let _ = server.hover(&json!({
+            "params": {
+                "textDocument": { "uri": "file:///e.pkt" },
+                "position": { "line": 0, "character": 0 }
+            }
+        }));
+        // 空文档 documentSymbol / definition：不得 panic
+        let _ = server.document_symbol(&json!({
+            "params": { "textDocument": { "uri": "file:///e.pkt" } }
+        }));
+        let _ = server.definition(&json!({
+            "params": {
+                "textDocument": { "uri": "file:///e.pkt" },
+                "position": { "line": 0, "character": 0 }
+            }
+        }));
     }
 }

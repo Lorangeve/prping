@@ -31,6 +31,19 @@ body {
   font-size: 13px;
 }
 
+/* ── 键盘焦点可见性 ───────────────────────────────── */
+/* 仅键盘聚焦（Tab/脚本聚焦）时显示描边，鼠标点击不打扰视野；
+ * CodeMirror 内容层自绘光标与选区，排除之避免双重描边（编辑器焦点态
+ * 由 CM 自身 .cm-focused 主题表达） */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.cm-editor .cm-content:focus-visible {
+  outline: none;
+}
+
 .app {
   display: flex;
   flex-direction: column;
@@ -189,16 +202,37 @@ body {
 }
 
 /* ── 主区 ─────────────────────────────────────────── */
+/* 中/右栏一律 minmax(0, ·)：内容最小宽度不再参与轨道下限，消除旧
+ * 210+340+300=850px 硬下限——窄窗口不会再把整页撑出横向滚动 */
 .main {
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(210px, 250px) minmax(340px, 1fr) minmax(300px, 42%);
+  grid-template-columns: minmax(210px, 250px) minmax(0, 1fr) minmax(0, 42%);
+  /* 行高钉死在视口内：任何视图（pkt/md/…）内容再高也只触发面板内部滚动，
+     不允许把网格行撑破 .app（否则滚动条溢出到窗口边缘） */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
+  overflow: hidden;
 }
 
 /* Markdown 文档：诊断/层栈/HEX 侧栏不存在——编辑/渲染 + 大纲栏 */
 .main.main-md {
-  grid-template-columns: minmax(210px, 250px) minmax(340px, 1fr) minmax(150px, 190px);
+  grid-template-columns: minmax(210px, 250px) minmax(0, 1fr) minmax(150px, 190px);
+}
+
+/* 侧栏折叠契约（App.tsx 顶栏切换按钮负责加/去 .side-hidden 类，此处只管样式）：
+ * 两栏布局 + 左栏整体隐藏。声明放在 .main.main-md 之后，同特异性时后者胜出 */
+.main.side-hidden {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 44%);
+}
+
+.main.side-hidden .sidebar {
+  display: none;
+}
+
+/* md 模式折叠：大纲栏保持窄列而非套用 44%（400px 宽的大纲栏没有意义） */
+.main.main-md.side-hidden {
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 190px);
 }
 
 /* ── Markdown 大纲栏（标题层级树，点击滚动/跳行）────────────────── */
@@ -312,7 +346,8 @@ body {
   flex-shrink: 0;
 }
 
-/* 统一图标按钮骨架：头部（icon-btn）与行内（tree-del）同尺寸同交互 */
+/* 统一图标按钮骨架：头部（icon-btn）与行内（tree-del）同尺寸同交互；
+ * 22×22 固定框即行内 ✎/✕ 的最小命中区（图标 12px，靠按钮框扩到 22px） */
 .icon-btn,
 .tree-ops .tree-del {
   width: 22px;
@@ -404,16 +439,22 @@ body {
   text-overflow: ellipsis;
 }
 
+/* 行内操作按钮（✎/✕）：半透明 0.35 常显而非 hover 才出现——触屏与键盘
+ * 用户没有 hover，完全隐藏等于不可发现；0.35 弱存在感不干扰浏览，
+ * 行悬停或按钮聚焦（focus-within）时全显。按钮本体 22×22（共享规则），
+ * 满足最小命中区要求 */
 .tree-ops {
-  visibility: hidden;
   display: inline-flex;
   gap: 2px;
   margin-left: auto;
+  opacity: 0.35;
+  transition: opacity 0.12s ease;
 }
 
 .tree-file:hover .tree-ops,
-.tree-dir:hover .tree-ops {
-  visibility: visible;
+.tree-dir:hover .tree-ops,
+.tree-ops:focus-within {
+  opacity: 1;
 }
 
 /* ── 右键菜单（文件/目录行 + 工作区空白区）────────────────── */
@@ -490,9 +531,13 @@ body {
 }
 
 /* 页签 */
+/* 窄栏放不下全部页签时容器横向滚动（子项 nowrap 不收缩、不换行），
+ * 避免 'Diagnosti cs' 之类的词中断行，也不会溢出栅格轨道把页面撑宽 */
 .tabs {
   display: flex;
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .tab {
@@ -503,6 +548,8 @@ body {
   padding: 8px 14px;
   cursor: pointer;
   font-size: 12px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .tab.active {
@@ -1248,69 +1295,237 @@ body {
   padding-top: 3px;
 }
 
-/* 任务标签条（多运行任务管理）：chip = 一个任务，点击切换控制台 */
-.run-tabs {
+/* 任务列表（任务管理）：有任务即常驻；行 = 任务（点行切控制台，■ 停止，✕ 移除） */
+.run-task-list {
   display: flex;
-  gap: 5px;
-  flex-wrap: wrap;
-  max-height: 72px;
+  flex-direction: column;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-height: 140px;
   overflow: auto;
+  background: var(--bg);
+  flex-shrink: 0;
 }
 
-.run-chip {
-  display: inline-flex;
+.run-task-row {
+  display: flex;
   align-items: center;
-  gap: 5px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 4px 2px 8px;
+  gap: 8px;
+  padding: 4px 10px;
   font-size: 11px;
   color: var(--text-dim);
   cursor: pointer;
-  max-width: 260px;
+  border-left: 2px solid transparent;
+  flex-shrink: 0;
 }
 
-.run-chip:hover {
-  border-color: var(--accent);
+.run-task-row:hover {
+  background: var(--bg-elev);
 }
 
-.run-chip.active {
-  border-color: var(--accent);
+.run-task-row.active {
+  border-left-color: var(--accent);
   color: var(--text);
+  background: rgba(97, 175, 239, 0.06);
 }
 
-.run-chip.running .run-chip-state {
-  color: var(--warn);
-}
-
-.run-chip-state {
+.run-task-state {
+  width: 14px;
+  text-align: center;
   font-size: 10px;
 }
 
-.run-chip-name {
+.run-task-state.running {
+  color: var(--warn);
+}
+
+.run-task-state.ok {
+  color: var(--ok);
+}
+
+.run-task-state.fail {
+  color: var(--err);
+}
+
+.run-task-id {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+/* 任务行：目标文件名 + 耗时（运行中每秒跳动） */
+.run-task-file {
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
-.run-chip-close {
+.run-task-dur {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* 控制台图例行（✓/✗/exit 图例说明） */
+.run-legend {
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 10px 4px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Hex 渲染封顶提示行 */
+.hex-cap-hint {
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 4px 12px;
+  font-style: italic;
+}
+
+.run-task-status {
+  flex: 1;
+  text-align: right;
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.run-task-act {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.run-task-act:hover {
+  color: var(--err);
+  background: var(--bg-elev);
+}
+
+
+
+/* 编辑器文件标签条：放不下时横向滚动（页签 flex:0 0 auto 不压缩），
+ * 名字仍单行省略；不做常驻渐隐遮罩——无溢出时会误隐右端激活页签，
+ * 要做需要 JS 判溢出再挂类，此处先不加 */
+.doc-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 6px 0;
+  scrollbar-width: thin;
+}
+
+.doc-tab {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.doc-tab:hover {
+  color: var(--text);
+  background: var(--bg-elev);
+}
+
+.doc-tab.active {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.doc-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.doc-tab-close {
   background: transparent;
   border: none;
   color: var(--text-dim);
   cursor: pointer;
   font-size: 10px;
-  padding: 0 4px;
+  padding: 0 3px;
   line-height: 1.2;
-  border-radius: 50%;
+  border-radius: 3px;
+  visibility: hidden;
 }
 
-.run-chip-close:hover {
+.doc-tab:hover .doc-tab-close,
+.doc-tab.active .doc-tab-close {
+  visibility: visible;
+}
+
+.doc-tab-close:hover {
   color: var(--err);
+  background: var(--bg-elev);
 }
 
-.run-tasks-hint {
-  margin-left: auto;
-  font-size: 10px;
-  color: var(--text-dim);
+/* 编辑器列（文档标签条 + 编辑器）：grid 单元内改为纵向 flex。
+   display:flex 不可省——缺了它 flex:1/min-height:0 全部失效，
+   markdown 等高内容会把网格行撑破视口（滚动条溢出到窗口边缘）。 */
+.editor-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.editor-col .editor-pane {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.editor-col .md-render {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: auto;
+}
+
+.doc-tab-run {
+  color: var(--warn);
+  font-size: 9px;
+  line-height: 1;
+}
+
+/* ── 不拆词（800px 响应式收尾）──────────────────────── */
+/* 控制台行/任务行/层栈字段值/HEX/大纲值一律 keep-all：旧 break-all 会把
+ * 英文词从中间撕开（'Diagnosti cs' 式断行）；长 token 溢出交给滚动容器
+ * 横向滚动消化（.run-console、.panel-body 均 overflow:auto） */
+.run-line,
+.run-task-row,
+.fv,
+.sniff-text,
+.layer-name,
+.hexview,
+.outline-name,
+.md-outline-item {
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+/* 窄窗（≤800px）：ENG LIB 列表底部留白——库目录脚注（.libs-dirs）常显一行，
+ * 列表滚到底时末行紧贴其上，视觉上像被页脚吃掉；留出呼吸空间防误读 */
+@media (max-width: 800px) {
+  .libs-section .tree {
+    padding-bottom: 24px;
+  }
 }

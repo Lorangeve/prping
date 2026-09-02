@@ -1,6 +1,6 @@
 // 右侧面板：诊断 / 层栈 / HEX 预览（数据来自 LSP publishDiagnostics 与 analyze 信封）。
 
-import { For, Index, Show, createEffect, createMemo } from "solid-js";
+import { For, Index, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 
 export interface LspDiag {
   line: number;
@@ -69,15 +69,31 @@ export interface RunSettings {
 export interface RunLine {
   stream: string;
   text: string;
+  /** ingestion 时一次解析出的 JSONL 展示视图（null = 非 JSON 行，原样渲染）。
+   *  行对象就此定型：控制台 <For> 按对象身份复用 DOM，新行只追加不重建。 */
+  view?: RunLineView | null;
 }
-/** 一次运行的任务卡（Run 面板多标签；App 聚合 run_out/run_exit）。 */
+/** JSONL 行的渲染视图（cls/text/title 在 ingestion 一次算好）。 */
+export interface RunLineView {
+  cls: string;
+  text: string;
+  title?: string;
+}
+/** 一次运行的任务卡（Run 面板多标签；App 聚合 run_out/run_exit）。
+ *  fileKey = 发起运行的文档标签（Run 面板按它过滤——每个文件 tab 独立的任务列表）。 */
 export interface RunTask {
   id: string;
+  fileKey: string;
   /** 运行的文件（工作区相对路径） */
   file: string;
   lines: RunLine[];
   exit: RunExitState | null;
   running: boolean;
+  /** 计时段（客户端侧）：run 受理时刻 / 终态落地时刻——chip 显示耗时 */
+  startedAt: number;
+  endedAt: number | null;
+  /** run 已受理但还没有任何输出：控制台给一条 transient 'starting…' 行 */
+  starting?: boolean;
 }
 
 export interface RunExitState {
@@ -426,9 +442,14 @@ export function HexPanel(props: { doc: AnalyzeDoc | null; buildError?: string | 
   );
 }
 
+/** HEX 视图渲染封顶：超大包只画前 4096 字节（数据本身仍在，后续复制等
+ *  不受限——只裁 DOM）。 */
+const HEX_RENDER_CAP_BYTES = 4096;
+
 function HexView(props: { hex: string }) {
+  const totalBytes = createMemo(() => props.hex.replace(/\s+/g, "").length / 2);
   const rows = createMemo(() => {
-    const hex = props.hex.replace(/\s+/g, "");
+    const hex = props.hex.replace(/\s+/g, "").slice(0, HEX_RENDER_CAP_BYTES * 2);
     const out: { off: string; hexes: string[]; ascii: string }[] = [];
     for (let i = 0; i < hex.length; i += 32) {
       const slice = hex.slice(i, i + 32);
@@ -459,6 +480,11 @@ function HexView(props: { hex: string }) {
           </div>
         )}
       </For>
+      <Show when={totalBytes() > HEX_RENDER_CAP_BYTES}>
+        <div class="hex-row hex-cap-hint">
+          +{totalBytes() - HEX_RENDER_CAP_BYTES} bytes not shown
+        </div>
+      </Show>
     </div>
   );
 }
@@ -512,6 +538,70 @@ export function PanelTabs(props: {
   );
 }
 
+/** JSONL 行 → 渲染视图（ingestion 时调用一次，控制台不再逐帧整表重解析）。
+ *  非 JSON 行返回 null（原样文本）。stripRoot 给出工作区根时，step 行的包路径
+ *  若带该绝对前缀则剥掉（服务端会逐步 relativize，这里做渲染端兜底）。 */
+export function parseRunLine(text: string, stripRoot?: string | null): RunLineView | null {
+  let o: any;
+  try {
+    o = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (o.type === "packet") {
+    const ok = o.status === "sent";
+    const layers = Array.isArray(o.layers) ? o.layers.join("·") : "";
+    const t = o.target ? " → " + o.target : "";
+    const err = o.error ? "  ✗ " + o.error : "";
+    const rtt = o.rtt_ms != null ? "  " + o.rtt_ms + "ms" : "";
+    // 失败包无 bytes 字段（raw 等失败场景）——有值才显示字节数
+    const size = o.bytes != null ? o.bytes + " B " : "";
+    return {
+      cls: ok ? "run-line-ok" : "run-line-err",
+      text: (ok ? "✓ " : "✗ ") + o.idx + "/" + o.total + "  " + (o.proto ?? "") + " " +
+        size + layers + t + rtt + err,
+      title: text,
+    };
+  }
+  if (o.type === "step") {
+    let pkt = String(o.pkt ?? "");
+    if (stripRoot) {
+      const norm = stripRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+      const p = pkt.replace(/\\/g, "/");
+      if (norm && p.startsWith(`${norm}/`)) pkt = p.slice(norm.length + 1);
+    }
+    return {
+      cls: "run-line-step",
+      text: "step " + o.step + "/" + o.total + ":  " + pkt,
+      title: text,
+    };
+  }
+  if (o.type === "summary") {
+    const ok = (o.failed ?? o.steps_failed ?? 0) === 0;
+    const parts: string[] = [];
+    if (o.sent != null) parts.push("sent " + o.sent);
+    if (o.failed != null) parts.push("failed " + o.failed);
+    if (o.skipped != null) parts.push("skipped " + o.skipped);
+    if (o.packets_sent != null) parts.push("packets sent " + o.packets_sent);
+    if (o.steps != null) parts.push("steps " + o.steps);
+    if (o.steps_failed != null) parts.push("failed " + o.steps_failed);
+    return {
+      cls: ok ? "run-line-summary" : "run-line-err",
+      text: "summary: " + parts.join(" · "),
+      title: text,
+    };
+  }
+  return null; // 其它 JSONL 类型：原样文本
+}
+
+/** 耗时格式（chip 用）：62s → 1m02s。 */
+function fmtDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m${String(s % 60).padStart(2, "0")}s`;
+}
+
 /** Run 面板：packet 选项 + 执行控制台（服务端 spawn 自身 CLI，见 web/run.rs）。 */
 export function RunPanel(props: {
   /** 全部任务卡（运行中 + 已结束）；chip 即任务管理 */
@@ -529,15 +619,40 @@ export function RunPanel(props: {
   onRun: () => void;
   onStopTask: (id: string) => void;
   onCloseTask: (id: string) => void;
+  /** 停止全部运行中任务（run_stop 不带 id——服务端停本连接全部） */
+  onStopAll: () => void;
 }) {
   let consoleHost: HTMLDivElement | undefined;
   const active = () => props.tasks.find((t) => t.id === props.activeId) ?? null;
-  // 新输出到达 / 切换任务 → 跟随滚动到底
+  // 跟随滚动只在「用户本就在底部附近（≤40px）」时进行——上翻阅读历史输出时不拽走
+  let stickBottom = true;
+  let lastActiveId: string | null | undefined;
+  const onConsoleScroll = () => {
+    if (!consoleHost) return;
+    stickBottom =
+      consoleHost.scrollHeight - consoleHost.scrollTop - consoleHost.clientHeight <= 40;
+  };
   createEffect(() => {
-    props.activeId;
+    const id = props.activeId;
     active()?.lines.length;
-    if (consoleHost) consoleHost.scrollTop = consoleHost.scrollHeight;
+    if (id !== lastActiveId) {
+      lastActiveId = id;
+      stickBottom = true; // 切换任务：从头跟随
+    }
+    if (consoleHost && stickBottom) consoleHost.scrollTop = consoleHost.scrollHeight;
   });
+  // 运行中任务的耗时秒级跳动（只在有运行中任务时开 interval）
+  const [nowTick, setNowTick] = createSignal(0);
+  createEffect(() => {
+    if (!props.tasks.some((tk) => tk.running)) return;
+    const iv = setInterval(() => setNowTick((n) => n + 1), 1000);
+    onCleanup(() => clearInterval(iv));
+  });
+  const now = () => {
+    nowTick(); // 依赖 tick：运行中任务每秒重算
+    return Date.now();
+  };
+  const taskDuration = (t: RunTask) => fmtDuration((t.endedAt ?? now()) - t.startedAt);
   const set = (patch: Partial<RunSettings>) =>
     props.setSettings({ ...props.settings, ...patch });
   const exitText = () => {
@@ -554,62 +669,9 @@ export function RunPanel(props: {
     if (t.exit?.code == null) return "?";
     return t.exit.code === 0 ? "✓" : "✗";
   };
-  const baseName = (f: string) => f.split("/").pop() ?? f;
-  // JSONL 模式（settings.json && !listen）：逐行解析渲染结构化行；非 JSON 行
-  // （stderr 的 raw 升级提示等）原样回退文本
+  // JSONL 模式（settings.json && !listen）：渲染 ingestion 算好的结构化视图；
+  // 非 JSON 行（stderr 的 raw 升级提示等）原样回退文本
   const jsonMode = () => props.settings.json && !props.settings.listen;
-  const rows = createMemo(() => {
-    const lines = active()?.lines ?? [];
-    return jsonMode()
-      ? lines.map((l) => ({ raw: l, node: jsonLineNode(l) }))
-      : lines.map((l) => ({ raw: l, node: null }));
-  });
-  function jsonLineNode(l: RunLine): { cls: string; text: string; title?: string } | null {
-    let o: any;
-    try {
-      o = JSON.parse(l.text);
-    } catch {
-      return null;
-    }
-    if (o.type === "packet") {
-      const ok = o.status === "sent";
-      const layers = Array.isArray(o.layers) ? o.layers.join("·") : "";
-      const t = o.target ? " → " + o.target : "";
-      const err = o.error ? "  ✗ " + o.error : "";
-      const rtt = o.rtt_ms != null ? "  " + o.rtt_ms + "ms" : "";
-      // 失败包无 bytes 字段（raw 等失败场景）——有值才显示字节数
-      const size = o.bytes != null ? o.bytes + " B " : "";
-      return {
-        cls: ok ? "run-line-ok" : "run-line-err",
-        text: (ok ? "✓ " : "✗ ") + o.idx + "/" + o.total + "  " + (o.proto ?? "") + " " +
-          size + layers + t + rtt + err,
-        title: l.text,
-      };
-    }
-    if (o.type === "step") {
-      return {
-        cls: "run-line-step",
-        text: "step " + o.step + "/" + o.total + ":  " + o.pkt,
-        title: l.text,
-      };
-    }
-    if (o.type === "summary") {
-      const ok = (o.failed ?? o.steps_failed ?? 0) === 0;
-      const parts: string[] = [];
-      if (o.sent != null) parts.push("sent " + o.sent);
-      if (o.failed != null) parts.push("failed " + o.failed);
-      if (o.skipped != null) parts.push("skipped " + o.skipped);
-      if (o.packets_sent != null) parts.push("packets sent " + o.packets_sent);
-      if (o.steps != null) parts.push("steps " + o.steps);
-      if (o.steps_failed != null) parts.push("failed " + o.steps_failed);
-      return {
-        cls: ok ? "run-line-summary" : "run-line-err",
-        text: "summary: " + parts.join(" · "),
-        title: l.text,
-      };
-    }
-    return null; // 其它 JSONL 类型：原样文本
-  }
   return (
     <div class="panel-body run-panel">
       <div class="run-controls">
@@ -638,7 +700,19 @@ export function RunPanel(props: {
             ▶ Run
           </button>
         </Show>
+        <Show when={props.tasks.some((tk) => tk.running)}>
+          <button
+            class="run-stop-btn"
+            onClick={() => props.onStopAll()}
+            title="stop all running tasks (run_stop without id stops every task on this connection)"
+          >
+            ■ Stop all
+          </button>
+        </Show>
         <span class="run-status" classList={{ running: !!active()?.running }}>
+          <Show when={active()} fallback={null}>
+            <span>#{active()!.id.replace("run-", "")} </span>
+          </Show>
           <Show when={active()?.running} fallback={exitText()}>
             running…
           </Show>
@@ -652,38 +726,74 @@ export function RunPanel(props: {
           </Show>
         </span>
         <Show when={props.tasks.length > 0}>
-          <span class="run-tasks-hint" title="switch consoles via the task chips below">
+          <span class="run-tasks-hint">
             {props.tasks.filter((t) => t.running).length}/{props.tasks.length} tasks
           </span>
         </Show>
       </div>
-      {/* 任务标签条 = 任务管理：chip 即任务（● 运行中 / ✓✗■ 终态），点击切换控制台，✕ 停止并移除 */}
+      {/* 控制台图例（一行）：✓/✗/exit 语义 + 步骤路径基准 */}
+      <div class="run-legend">
+        ✓ sent · ✗ send/wait failed · exit N — paths are relative to workspace root
+      </div>
+      {/* 任务列表（任务管理）：有任务即常驻；点行切控制台，■ 停止，✕ 移除 */}
       <Show when={props.tasks.length > 0}>
-        <div class="run-tabs">
+        <div class="run-task-list">
           <For each={props.tasks}>
-            {(t) => (
-              <div
-                class="run-chip"
-                classList={{ active: props.activeId === t.id, running: t.running }}
-                onClick={() => props.setActive(t.id)}
-                title={t.file + "  (" + t.id + ")"}
-              >
-                <span class="run-chip-state">{taskIcon(t)}</span>
-                <span class="run-chip-name">
-                  {baseName(t.file)} · {t.id.replace("run-", "#")}
-                </span>
-                <button
-                  class="run-chip-close"
-                  title={t.running ? "stop and remove task" : "remove task"}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    props.onCloseTask(t.id);
-                  }}
+            {(t) => {
+              const failed = !t.running && !t.exit?.stopped && t.exit?.code != null && t.exit.code !== 0;
+              const ok = !t.running && t.exit?.code === 0;
+              return (
+                <div
+                  class="run-task-row"
+                  classList={{ active: props.activeId === t.id }}
+                  onClick={() => props.setActive(t.id)}
+                  title={t.file + "  (" + t.id + ")"}
                 >
-                  ✕
-                </button>
-              </div>
-            )}
+                  <span
+                    class="run-task-state"
+                    classList={{ running: t.running, ok, fail: failed }}
+                  >
+                    {taskIcon(t)}
+                  </span>
+                  <span class="run-task-id">#{t.id.replace("run-", "")}</span>
+                  <span class="run-task-file" title={t.file}>
+                    {t.file.split("/").pop()}
+                  </span>
+                  <span class="run-task-dur">{taskDuration(t)}</span>
+                  <span class="run-task-status">
+                    {t.running
+                      ? "running…"
+                      : t.exit?.stopped
+                        ? "stopped"
+                        : t.exit?.code != null
+                          ? "exit " + t.exit.code
+                          : "?"}
+                  </span>
+                  <Show when={t.running}>
+                    <button
+                      class="run-task-act"
+                      title="stop this task"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onStopTask(t.id);
+                      }}
+                    >
+                      ■ stop
+                    </button>
+                  </Show>
+                  <button
+                    class="run-task-act"
+                    title="remove from list"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onCloseTask(t.id);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            }}
           </For>
         </div>
       </Show>
@@ -793,10 +903,12 @@ export function RunPanel(props: {
           </Index>
         </div>
       </Show>
-      <div class="run-console" ref={consoleHost}>
-        <For each={rows()}>
-          {(row) => {
-            const n = row.node;
+      <div class="run-console" ref={consoleHost} onScroll={onConsoleScroll}>
+        {/* 行对象 ingestion 时定型（raw+view 稳定引用）：<For> 按身份对账，
+            新输出只追加 DOM，不再整表重建/重解析 */}
+        <For each={active()?.lines ?? []}>
+          {(l) => {
+            const n = jsonMode() ? l.view : null;
             return n ? (
               <div class={n.cls} title={n.title}>
                 {n.text}
@@ -804,15 +916,19 @@ export function RunPanel(props: {
             ) : (
               <div
                 class="run-line"
-                classList={{ err: row.raw.stream === "err" }}
+                classList={{ err: l.stream === "err" }}
                 title={jsonMode() ? "raw output line" : undefined}
               >
-                {row.raw.text}
+                {l.text}
               </div>
             );
           }}
         </For>
-        <Show when={(active()?.lines ?? []).length === 0}>
+        {/* run 受理后的过渡行：首条真实输出到达（starting 复位）即消失 */}
+        <Show when={active()?.starting}>
+          <div class="run-line run-line-step">starting…</div>
+        </Show>
+        <Show when={(active()?.lines ?? []).length === 0 && !active()?.starting}>
           <div class="empty-hint">
             <Show
               when={active()}

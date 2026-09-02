@@ -468,6 +468,8 @@ web:
   ws_bad_ext: 'only .pkt/.pktl files are supported'
   ws_too_large: 'file too large (max %{max} bytes)'
   ws_read_failed: 'failed to read workspace file: %{err}'
+  ws_read_too_large: 'file too large, refusing to read (max %{max} bytes)'
+  ws_not_file: 'not a regular file — cannot display'
   ws_save_failed: 'failed to save file: %{err}'
   ws_delete_failed: 'failed to delete file: %{err}'
   ws_open_failed: 'cannot open folder: %{err}'

@@ -14,7 +14,12 @@ const STORE = "kv";
 export type KvValue = unknown;
 
 /** 打开（或退化创建）kv 存储；统一句柄。 */
-function open(): Promise<{ get(key: string): Promise<KvValue | null>; set(key: string, v: KvValue): Promise<void>; del(key: string): Promise<void> }> {
+function open(): Promise<{
+  get(key: string): Promise<KvValue | null>;
+  set(key: string, v: KvValue): Promise<void>;
+  del(key: string): Promise<void>;
+  keys(prefix?: string): Promise<string[]>;
+}> {
   const memory = new Map<string, KvValue>();
   if (typeof indexedDB === "undefined") {
     // 隐私模式 / 旧浏览器：内存兜底
@@ -22,6 +27,8 @@ function open(): Promise<{ get(key: string): Promise<KvValue | null>; set(key: s
       get: async (k) => memory.get(k) ?? null,
       set: async (k, v) => void memory.set(k, v),
       del: async (k) => void memory.delete(k),
+      keys: async (prefix?: string) =>
+        [...memory.keys()].filter((k) => (prefix ? k.startsWith(prefix) : true)),
     });
   }
   return new Promise((resolve) => {
@@ -44,6 +51,28 @@ function open(): Promise<{ get(key: string): Promise<KvValue | null>; set(key: s
 
 function idbImpl(db: () => IDBDatabase) {
   return {
+    keys(prefix?: string): Promise<string[]> {
+      return new Promise((resolve) => {
+        try {
+          // 前缀 → [prefix, prefix+\uffff) 闭开区间（\uffff 大于一切合法键字符）
+          const range = prefix ? IDBKeyRange.bound(prefix, prefix + "\uffff", false, true) : null;
+          const r = db().transaction(STORE, "readonly").objectStore(STORE).openCursor(range);
+          const out: string[] = [];
+          r.onsuccess = () => {
+            const c = r.result;
+            if (c) {
+              out.push(String(c.key));
+              c.continue();
+            } else {
+              resolve(out);
+            }
+          };
+          r.onerror = () => resolve(out);
+        } catch {
+          resolve([]);
+        }
+      });
+    },
     get(key: string): Promise<KvValue | null> {
       return new Promise((resolve) => {
         try {
@@ -85,6 +114,8 @@ function memImpl(memory: Map<string, KvValue>) {
     get: async (k: string) => memory.get(k) ?? null,
     set: async (k: string, v: KvValue) => void memory.set(k, v),
     del: async (k: string) => void memory.delete(k),
+    keys: async (prefix?: string) =>
+      [...memory.keys()].filter((k) => (prefix ? k.startsWith(prefix) : true)),
   };
 }
 
@@ -103,6 +134,11 @@ export async function kvSet(key: string, value: KvValue): Promise<void> {
 /** 删 kv。 */
 export async function kvDel(key: string): Promise<void> {
   await (await store).del(key);
+}
+
+/** 列出前缀匹配的键（草稿 GC 用；IndexedDB 不可用退内存 Map，同样支持）。 */
+export async function kvKeys(prefix: string): Promise<string[]> {
+  return (await store).keys(prefix);
 }
 
 /** 草稿键（工作区/库文件统一编址）。 */

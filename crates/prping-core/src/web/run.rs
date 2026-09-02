@@ -30,6 +30,12 @@ use super::workspace;
 
 /// 转发行数上限（超过后仅排水不再转发；run_exit.truncated = true）。
 const MAX_RUN_LINES: usize = 20_000;
+/// 单 run 输出转发总字节预算（行数上限的兜底：少数超长行也打不爆内存）。
+const MAX_RUN_BYTES: usize = 16 * 1024 * 1024;
+/// 合帧阈值：累计 64KB 或首行待发 16ms 即合并为一个 run_out 信封（前端按 \n
+/// 拆行、向后兼容单行信封；大幅降帧率与 JSON 包装开销）。
+const FLUSH_BYTES: usize = 64 * 1024;
+const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 /// 单行转发上限（字节；超长行截断后转发，行内余量丢弃）。
 const MAX_LINE_BYTES: usize = 8 * 1024;
 /// 子进程退出轮询间隔（kill 与 try_wait 共用一把锁，轮询避开持锁阻塞等待）。
@@ -371,17 +377,28 @@ fn build_args(spec: &RunSpec) -> Vec<String> {
     if spec.json {
         args.push("--json".into());
     }
-    args.push(spec.file.display().to_string());
+    args.push(display_clean(&spec.file));
     if let Some(t) = &spec.target {
         args.push(t.clone());
     }
     args
 }
 
+/// Windows canonicalize 产物剥 `\\?\` verbatim 前缀：fs 层两种形态等价，
+/// argv 与 UI 展示用剥前缀的可读形态（其余平台原样返回）。
+fn display_clean(p: &Path) -> String {
+    let s = p.display().to_string();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => rest.to_string(),
+        None => s,
+    }
+}
+
 // ── 输出转发 / 退出等待（阻塞任务，跑在 smol::unblock 线程池）────────────
 
-/// 单流读任务：逐「行块」转发 run_out 信封；预算耗尽后继续排水不再转发
-/// （管道必须被消费，否则子进程写满缓冲即阻塞）；回推通道关闭即退出。
+/// 单流读任务：行块 → 合帧缓冲 → run_out 信封（64KB / 16ms 阈值）；行数或字节
+/// 预算耗尽后仅排水不再转发（管道必须被消费，否则子进程写满缓冲即阻塞）；
+/// 回推通道关闭即退出（bounded 通道满时阻塞此处 = 背压传导到子进程，内存恒定）。
 fn spawn_stream_reader(
     pipe: impl std::io::Read + Send + 'static,
     stream: &'static str,
@@ -393,15 +410,42 @@ fn spawn_stream_reader(
     smol::unblock(move || {
         let mut r = std::io::BufReader::new(pipe);
         let mut buf = Vec::new();
+        // 合帧缓冲：text 保留每行行尾 \n（前端 split('\n') 拆行、丢空行）
+        let mut acc = String::new();
+        let mut acc_since: Option<std::time::Instant> = None;
+        let mut bytes_forwarded = 0usize;
         while matches!(read_line_chunk(&mut r, &mut buf), Ok(true)) {
-            if budget.fetch_add(1, Ordering::Relaxed) < MAX_RUN_LINES {
+            // 行预算 + 字节预算（后者兜底：少数超长行也打不爆内存）
+            let within_lines = budget.fetch_add(1, Ordering::Relaxed) < MAX_RUN_LINES;
+            let within_bytes = bytes_forwarded + buf.len() <= MAX_RUN_BYTES;
+            if within_lines && within_bytes {
                 let text = String::from_utf8_lossy(&buf);
-                let _ = reply_tx.send_blocking(json!({
-                    "type": "run_out", "run": run_id, "stream": stream, "text": text,
-                }));
+                acc.push_str(&text);
+                if !text.ends_with('\n') {
+                    acc.push('\n');
+                }
+                bytes_forwarded += buf.len();
+                if acc_since.is_none() {
+                    acc_since = Some(std::time::Instant::now());
+                }
+                if acc.len() >= FLUSH_BYTES
+                    || acc_since.is_some_and(|t| t.elapsed() >= FLUSH_INTERVAL)
+                {
+                    let _ = reply_tx.send_blocking(json!({
+                        "type": "run_out", "run": run_id, "stream": stream, "text": acc,
+                    }));
+                    acc = String::new();
+                    acc_since = None;
+                }
             } else {
                 truncated.store(true, Ordering::Relaxed);
             }
+        }
+        // 收尾冲刷：预算内残留行一次发出（不足 16ms/64KB 也不丢）
+        if !acc.is_empty() {
+            let _ = reply_tx.send_blocking(json!({
+                "type": "run_out", "run": run_id, "stream": stream, "text": acc,
+            }));
         }
     })
     .detach();

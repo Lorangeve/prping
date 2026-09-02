@@ -39,20 +39,31 @@ export class PrpingClient {
   private retry = 0;
   private closedByUs = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** WS 鉴权 token（config.json 下发，64 hex；connect/重连统一拼到 URL 上）。 */
+  private token = "";
 
   /** LSP JSON-RPC 消息回调（服务端 → 客户端方向）。 */
   onLsp: ((message: any) => void) | null = null;
   onStatus: ((s: Status) => void) | null = null;
+  /** 服务端拒绝（type=error 信封）与非正常断线——上层做非致命提示（自动消失）。 */
+  onServerError: ((message: string) => void) | null = null;
   /** packet 运行输出（run_out 信封，流式；stream = "out" | "err"）。 */
   onRunOut: ((run: string, stream: string, text: string) => void) | null = null;
   /** packet 运行结束（run_exit 信封）。 */
   onRunExit: ((run: string, exit: RunExit) => void) | null = null;
 
+  /** 记录鉴权 token（connect 前调用；缺省/空串 = 不带 token 连接）。 */
+  setAuthToken(token: string): void {
+    this.token = token;
+  }
+
   connect(): void {
     this.closedByUs = false;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     this.setStatus("connecting");
-    const ws = new WebSocket(`${proto}//${location.host}/ws`);
+    // token 鉴权：服务端校验失败会回 error 信封或直接断开（经 onServerError 呈现）
+    const base = `${proto}//${location.host}/ws`;
+    const ws = new WebSocket(this.token ? `${base}?token=${encodeURIComponent(this.token)}` : base);
     this.ws = ws;
     ws.onopen = () => {
       this.retry = 0;
@@ -79,12 +90,15 @@ export class PrpingClient {
         const resolve = this.pending.get(env.id);
         this.pending.delete(env.id);
         resolve?.(env);
+      } else if (env.type === "error") {
+        // 服务端拒绝（坏信封/未知类型等）：无 id 关联，交上层非致命提示
+        this.onServerError?.(typeof env.message === "string" ? env.message : "server error");
       }
-      // type === "error"：无 id 关联，忽略（上层以超时兜底）
     };
     ws.onclose = () => {
       this.ws = null;
       this.setStatus("closed");
+      if (!this.closedByUs) this.onServerError?.("connection lost — reconnecting…");
       // 挂起的请求以失败收场，避免调用方永久悬挂
       for (const resolve of this.pending.values()) resolve({ ok: false, error: "disconnected" });
       this.pending.clear();
@@ -119,15 +133,24 @@ export class PrpingClient {
     this.ws.send(JSON.stringify(obj));
   }
 
-  /** 发送带 id 的信封并等待 result 应答。 */
-  request(payload: Record<string, unknown>): Promise<any> {
+  /** 发送带 id 的信封并等待 result 应答。
+   *  超时兜底：默认 15s（analyze 这类重分析 30s），到点以 {ok:false,error:'timeout'}
+   *  收场——pending 表项移除时定时器一并清掉，不会泄漏。 */
+  request(payload: Record<string, unknown>, timeoutMs = 15000): Promise<any> {
     return new Promise((resolve) => {
       if (!this.isConnected) {
         resolve({ ok: false, error: "disconnected" });
         return;
       }
       const id = ++this.seq;
-      this.pending.set(id, resolve);
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) resolve({ ok: false, error: "timeout" });
+      }, timeoutMs);
+      // 包一层：应答到达即清定时器（断线收场同样经此清理）
+      this.pending.set(id, (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      });
       this.sendRaw({ ...payload, id });
     });
   }
@@ -137,9 +160,9 @@ export class PrpingClient {
     this.sendRaw({ type: "lsp", message });
   }
 
-  /** 内存文本分析（engine --json 同构文档）。 */
+  /** 内存文本分析（engine --json 同构文档；分析比普通请求慢——30s 超时）。 */
   analyze(uri: string, text: string, params: Record<string, string> = {}): Promise<any> {
-    return this.request({ type: "analyze", uri, text, params });
+    return this.request({ type: "analyze", uri, text, params }, 30000);
   }
 
   listLibs(): Promise<any> {

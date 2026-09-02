@@ -20,17 +20,20 @@ import type { EditorView } from "@codemirror/view";
 import {
   applyDiagnostics,
   createEditor,
+  restoreEditorState,
   revealLine,
   revealPos,
+  saveEditorState,
   setDoc,
   setEditable,
   setLinkMode,
   setLinkScope,
+  type EditorSnapshot,
 } from "./cm";
 import { FileSidebar, FolderDialog, type CurrentFile, type TreeEntry } from "./files";
-import { draftKey, Keys, kvDel, kvGet, kvSet } from "./store";
+import { draftKey, Keys, kvDel, kvGet, kvKeys, kvSet } from "./store";
 import { LspClient, type LspDiagnostic } from "./lsp";
-import type { AnalyzeDoc, Panel, RunExitState, RunLine, RunSettings, RunTask } from "./panels";
+import type { AnalyzeDoc, Panel, RunLine, RunSettings, RunTask } from "./panels";
 import {
   DiagnosticsPanel,
   GlobalsPanel,
@@ -40,6 +43,7 @@ import {
   PanelTabs,
   RecipePanel,
   RunPanel,
+  parseRunLine,
   type OutlineSym,
   type RecipeDoc,
 } from "./panels";
@@ -47,8 +51,19 @@ import { SAMPLE_DOC } from "./sample";
 import { renderMarkdown } from "./markdown";
 import { PrpingClient, type Status } from "./ws";
 
+// analyze/大纲应答序号（模块级）：快速连续编辑时请求乱序到达，只认最新一次——
+// 与 files.tsx FolderDialog 的 browseSeq 同构（uri + seq 双重匹配才落账）
+let analyzeSeq = 0;
+
 export function App() {
   const [status, setStatus] = createSignal<Status>("connecting");
+  // 侧栏显隐：默认按视口宽度（>940 显示），窗口 resize 重新按宽度判定；
+  // 切换按钮在顶栏（side-head 的 actions 行在 files.tsx，此处不动那个文件）
+  const [sideVisible, setSideVisible] = createSignal(
+    typeof window === "undefined" ? true : window.innerWidth > 940,
+  );
+  const onResize = () => setSideVisible(window.innerWidth > 940);
+  const toggleSide = () => setSideVisible((v) => !v);
   const [libs, setLibs] = createSignal<string[]>([]);
   const [libDirs, setLibDirs] = createSignal<string[]>([]);
   const [diags, setDiags] = createSignal<LspDiagnostic[]>([]);
@@ -99,18 +114,58 @@ export function App() {
   // 控制台行数上限（与 MAX_RUN_LINES 转发上限独立；超限从头丢弃）
   const MAX_UI_RUN_LINES = 4000;
   // 任务卡数量上限：超出丢弃最旧（服务端并发另有全局 8 上限）
-  const MAX_UI_RUN_TASKS = 12;
-  // 当前视图的任务 / 全局运行中计数（页签 ● 徽标）
-  const activeTask = () => runTasks().find((t) => t.id === activeRunId()) ?? null;
-  const runningCount = () => runTasks().filter((t) => t.running).length;
+  const MAX_UI_RUN_TASKS = 24;
+  // 当前视图的任务：手动选中的任务若属于其它文件标签，则自动落到本文件最新任务
+  const activeTask = () => {
+    const k = activeKey();
+    const inFile = runTasks().filter((t) => t.fileKey === k);
+    const picked = inFile.find((t) => t.id === activeRunId());
+    return picked ?? inFile[inFile.length - 1] ?? null;
+  };
+  const fileHasRunning = (key: string | null) =>
+    runTasks().some((t) => t.running && t.fileKey === key);
 
   // Markdown 视图：渲染（renderMarkdown HTML）/ 编辑（源码）——仅 .md 文件用
   const [mdMode, setMdMode] = createSignal<"render" | "edit">("render");
 
-  // 文件管理：工作区树 / 当前文件 / 已保存文本（与编辑器文本比较得 dirty）
+  // 文件管理：工作区树 / 文档标签页（每打开一个文件一个 tab）/ 已保存文本
   const [wsRoot, setWsRoot] = createSignal<string | null>(null);
   const [entries, setEntries] = createSignal<TreeEntry[]>([]);
-  const [current, setCurrent] = createSignal<CurrentFile | null>(null);
+  // 文档标签：打开过的文件都保留一个 tab（内容驻内存，切回即还原）；key = root:path
+  interface DocTab {
+    file: CurrentFile;
+    /** 离开该 tab 时的编辑器内容快照（含未保存修改） */
+    text: string;
+    savedText: string;
+    /** 该文件的运行参数输入（与其它 tab 相互独立——右栏数据随 tab 隔离） */
+    runValues: Record<string, string>;
+    runParams: string;
+    /** 离开时的编辑器整档快照（undo 历史/选区/滚动）——切回整体还原，
+     *  Ctrl+Z 绝不串到别的文件（cm.saveEditorState / restoreEditorState） */
+    editor?: EditorSnapshot;
+  }
+  const [tabs, setTabs] = createSignal<DocTab[]>([]);
+  const [activeKey, setActiveKey] = createSignal<string | null>(null);
+  const tabKey = (f: { root: string; path: string }) => `${f.root}:${f.path}`;
+  /** 当前文件 = 活跃 tab 的文件（tab 未开时 null） */
+  const current = () => {
+    const k = activeKey();
+    return k ? (tabs().find((tb) => tabKey(tb.file) === k)?.file ?? null) : null;
+  };
+  /** 离开当前 tab 前把编辑器实时内容与运行参数写回标签（切走/关闭前的落账）；
+   *  编辑器整档快照一并存入（undo 历史/选区/滚动随标签走）。 */
+  function syncActiveTab() {
+    const k = activeKey();
+    if (!k) return;
+    const t = text();
+    const s = savedText() ?? "";
+    const rv = runValues();
+    const rp = runParams();
+    const ed = view ? saveEditorState(view) : undefined;
+    setTabs((ts) =>
+      ts.map((tb) => (tabKey(tb.file) === k ? { ...tb, text: t, savedText: s, runValues: rv, runParams: rp, editor: ed } : tb)),
+    );
+  }
   const [text, setText] = createSignal(SAMPLE_DOC);
   const [savedText, setSavedText] = createSignal<string | null>(SAMPLE_DOC);
   const [fileMsg, setFileMsg] = createSignal<string | null>(null);
@@ -143,20 +198,71 @@ export function App() {
   client.onLsp = (m) => lsp.handle(m);
 
   // packet 运行输出/终态（run 信封启动后按 run_id 归入对应任务卡；断线重连后
-  // 旧会话的 run 已被服务端收杀，未知 id 的输出直接忽略）
-  client.onRunOut = (run, stream, text) => {
+  // 旧会话的 run 已被服务端收杀，未知 id 的输出直接忽略）。
+  // 输出走「缓冲 + rAF 合帧」：高频 run_out 不再逐封 setRunTasks；行对象在
+  // ingestion 一次成形（多行拆分 + JSONL 预解析），控制台 <For> 按对象身份复用
+  const runLineBuf: { run: string; stream: string; text: string }[] = [];
+  let runFlushScheduled = false;
+  const flushRunLines = () => {
+    runFlushScheduled = false;
+    if (runLineBuf.length === 0) return;
+    const batch = runLineBuf.splice(0, runLineBuf.length);
     setRunTasks((ts) => {
-      const idx = ts.findIndex((t) => t.id === run);
-      if (idx < 0) return ts;
-      const t = ts[idx];
-      const next = [...t.lines, { stream, text }];
-      const lines = next.length > MAX_UI_RUN_LINES ? next.slice(next.length - MAX_UI_RUN_LINES) : next;
-      return [...ts.slice(0, idx), { ...t, lines }, ...ts.slice(idx + 1)];
+      // 按任务归并追加；任务已被移除（用户关卡）的输出直接丢弃
+      const byRun = new Map<string, RunLine[]>();
+      for (const b of batch) {
+        const arr = byRun.get(b.run) ?? [];
+        arr.push({ stream: b.stream, text: b.text, view: parseRunLine(b.text, wsRoot()) });
+        byRun.set(b.run, arr);
+      }
+      let touched = false;
+      const next = ts.map((t) => {
+        const add = byRun.get(t.id);
+        if (!add) return t;
+        touched = true;
+        byRun.delete(t.id);
+        const lines = [...t.lines, ...add];
+        return {
+          ...t,
+          starting: false, // 首条真实输出到达：'starting…' 过渡行退场
+          lines: lines.length > MAX_UI_RUN_LINES ? lines.slice(lines.length - MAX_UI_RUN_LINES) : lines,
+        };
+      });
+      return touched ? next : ts;
     });
   };
-  client.onRunExit = (run, exit) => {
-    setRunTasks((ts) => ts.map((t) => (t.id === run ? { ...t, exit, running: false } : t)));
+  client.onRunOut = (run, stream, text) => {
+    // 服务端开始合并多行：同一 payload 可能带多条 \n 分隔行（单行向后兼容）；
+    // 行内不产生空行——行边界即换行符
+    for (const ln of text.split("\n")) {
+      if (ln.length > 0) runLineBuf.push({ run, stream, text: ln });
+    }
+    if (runLineBuf.length === 0 || runFlushScheduled) return;
+    runFlushScheduled = true;
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(flushRunLines);
+    else setTimeout(flushRunLines, 16); // 无 rAF 环境兜底
   };
+  client.onRunExit = (run, exit) => {
+    setRunTasks((ts) =>
+      ts.map((t) =>
+        t.id === run
+          ? { ...t, exit, running: false, endedAt: Date.now(), starting: false }
+          : t,
+      ),
+    );
+  };
+
+  // 非致命提示（item 1）：fileMsg 区域展示，几秒后自动消失（文案未被覆盖才清）
+  let fileMsgClearTimer: ReturnType<typeof setTimeout> | null = null;
+  function notify(msg: string) {
+    setFileMsg(msg);
+    if (fileMsgClearTimer) clearTimeout(fileMsgClearTimer);
+    fileMsgClearTimer = setTimeout(() => {
+      setFileMsg((cur) => (cur === msg ? null : cur));
+    }, 5000);
+  }
+  // 服务端拒绝（error 信封）与非正常断线：非致命提示（自动消失，不挡编辑）
+  client.onServerError = (m) => notify(`server: ${m}`);
 
   // 诊断推送 → 编辑器 squiggle + 右侧面板（Markdown 打开时忽略旧文档残留推送）
   lsp.onDiagnostics = (d) => {
@@ -225,12 +331,14 @@ export function App() {
     if (isMd()) return;
     if (analyzeTimer) clearTimeout(analyzeTimer);
     analyzeTimer = setTimeout(async () => {
-      void refreshSymbols(); // 大纲与 analyze 同节奏刷新（md/pktl 内部自清）
+      // 请求序号：应答往返期间再编辑/再切换会发出更新的请求，过期应答整体丢弃
+      const seq = ++analyzeSeq;
+      void refreshSymbols(seq); // 大纲与 analyze 同节奏刷新（共享同一序号）
       // 请求时刻的文档：应答往返期间文件可能已切换，过期应答直接丢弃；
       // 配方判定也按请求时 URI（isPktl() 是应答到达时的状态，快速切换会灌错面板）
       const uri = lsp.documentUri;
       const res = await client.analyze(uri, text(), buildRunParams());
-      if (uri !== lsp.documentUri) return; // 过期应答：文件已切换
+      if (seq !== analyzeSeq || uri !== lsp.documentUri) return; // 过期应答：文件已切换或有新请求
       if (isMd()) return; // 已切到 Markdown：面板已停用，不接收 analyze 结果
       // 声明的运行参数成功/失败应答都带：结构化输入行的数据源。
       // 声明未变（打参数值时最常见的情形）不替换——新数组会触发下游重建
@@ -263,15 +371,16 @@ export function App() {
     }, 250);
   }
 
-  /** 文档符号（Outline 页签）：md/配方无符号——清空即可。应答过期丢弃。 */
-  async function refreshSymbols() {
+  /** 文档符号（Outline 页签）：md/配方无符号——清空即可。应答过期丢弃
+   *  （seq 由 refreshAnalyze 发放：大纲与 analyze 同批次、同生命周期）。 */
+  async function refreshSymbols(seq: number) {
     if (isMd() || isPktl()) {
       setSymbols([]);
       return;
     }
     const uri = lsp.documentUri;
     const res = await lsp.documentSymbol();
-    if (uri !== lsp.documentUri || isMd() || isPktl()) return;
+    if (seq !== analyzeSeq || uri !== lsp.documentUri || isMd() || isPktl()) return;
     const arr = Array.isArray(res) ? res : [];
     setSymbols(
       arr.map((s: any) => ({
@@ -321,6 +430,14 @@ export function App() {
     let list = (res.data.entries as TreeEntry[]) ?? [];
     setWsRoot((res.data.root as string | null) ?? null);
     setEntries(list);
+    // 草稿 GC（best effort）：树里已不存在的 draft:ws:* 一并清掉（文件被外部
+    // 删除/改名后，残留草稿不再随「恢复草稿」反复复活）
+    void kvKeys("draft:ws:").then((keys) => {
+      for (const k of keys) {
+        const p = k.slice("draft:ws:".length);
+        if (!list.some((e) => !e.dir && e.path === p)) void kvDel(k);
+      }
+    });
     if (!autoOpened) {
       autoOpened = true;
       // 恢复持久化的自定义工作区根（服务端会话随重连/重载重置；目录已不存在
@@ -351,29 +468,40 @@ export function App() {
     }
   }
 
+  /** 草稿防抖落库：调度时刻即抓取 {key, text} 快照——回调里用的是调度瞬间的
+   *  内容与路径，防抖期间切文件不会把新文件内容写进旧文件的草稿键（竞态修复）。
+   *  仅工作区文件（eng_lib 只读不产生差异）。 */
+  function scheduleDraft() {
+    const cur = current();
+    if (!cur || cur.root !== "ws") return;
+    if (draftTimer) clearTimeout(draftTimer);
+    const snapshot = { key: draftKey("ws", cur.path), text: text() };
+    draftTimer = setTimeout(() => void kvSet(snapshot.key, snapshot.text), 1000);
+  }
+
+  /** 把所有「内容 ≠ 已保存文本」的工作区标签刷进草稿库（后台标签也保住）。
+   *  关标签 / 切文件 / 根组件卸载三个时机调用。 */
+  function flushAllDrafts() {
+    for (const tb of tabs()) {
+      if (tb.file.root === "ws" && tb.text !== tb.savedText) {
+        void kvSet(draftKey("ws", tb.file.path), tb.text);
+      }
+    }
+  }
+
   function onEditorUpdate(t: string) {
     setText(t);
     // Markdown：无 LSP 全文同步 / 分析——只走草稿持久化
     if (isMd()) {
-      if (draftTimer) clearTimeout(draftTimer);
-      draftTimer = setTimeout(() => {
-        const cur = current();
-        if (cur?.root === "ws") void kvSet(draftKey("ws", cur.path), text());
-      }, 1000);
+      scheduleDraft();
       return;
     }
     // LSP 全文同步 + 分析共用一个防抖节奏
     if (changeTimer) clearTimeout(changeTimer);
     changeTimer = setTimeout(() => lsp.change(t), 250);
     refreshAnalyze();
-    // 草稿持久化（防抖 1s；仅工作区文件——eng_lib 只读不产生差异）
-    if (current()?.root === "ws") {
-      if (draftTimer) clearTimeout(draftTimer);
-      draftTimer = setTimeout(() => {
-        const cur = current();
-        if (cur?.root === "ws") void kvSet(draftKey("ws", cur.path), text());
-      }, 1000);
-    }
+    // 草稿持久化（防抖 1s）
+    scheduleDraft();
   }
 
   /** 自由文本运行参数 → {ip:…, seq:…}：一行一个 k=v（首个 = 分隔；空行/无 = 跳过） */
@@ -457,28 +585,37 @@ export function App() {
       setFileMsg("run: " + res.error);
       return;
     }
-    // 新任务卡入列（超上限丢最旧）；视图切到新任务
+    // 新任务卡入列（归属当前文档标签；超上限丢最旧）；视图切到新任务。
+    // startedAt/endedAt 客户端计时；starting = 受理未出输出（控制台 'starting…' 行）
     const task: RunTask = {
       id: (res.data as { run: string }).run,
+      fileKey: tabKey(cur),
       file: cur.path,
       lines: [],
       exit: null,
       running: true,
+      startedAt: Date.now(),
+      endedAt: null,
+      starting: true,
     };
     setRunTasks((ts) => {
       const next = [...ts, task];
       return next.length > MAX_UI_RUN_TASKS ? next.slice(next.length - MAX_UI_RUN_TASKS) : next;
     });
-    setActiveRunId((curId) =>
-      runTasks().some((t) => t.id === curId) ? curId : task.id,
-    );
+    // 新任务即最新执行项：控制台总是跟随它（任务列表里仍可点回旧任务）
+    setActiveRunId(task.id);
     setPanelPersist("run");
   }
 
   async function doStop() {
-    const id = activeRunId();
+    const id = activeTask()?.id;
     if (!id) return;
     await client.runStop(id); // 终态经 run_exit 回调落地
+  }
+
+  /** 停全部：run_stop 不带 id——服务端停本连接所有运行（终态逐个 run_exit 推回）。 */
+  function doStopAll() {
+    void client.runStop();
   }
 
   /** 任务管理：停止单个任务（chip ✕ / 列表操作）；终态经 run_exit 落地后由 onCloseTask 移除 */
@@ -513,15 +650,54 @@ export function App() {
     return `file://${p}`;
   }
 
-  /** 打开文件的统一落点：替换编辑器文档 + LSP 会话重放 + 立即分析。
-   *  `saved` 为磁盘文本（草稿恢复时与编辑器文本不同 → 呈现未保存状态）。 */
-  function applyOpen(file: CurrentFile, content: string, uri: string, saved?: string) {
+  /** 打开文件的统一落点：创建/激活文档标签 + 替换编辑器文档 + LSP 会话重放 +
+   *  立即分析。`saved` 为磁盘文本（草稿恢复时与编辑器文本不同 → 呈现未保存状态）；
+   *  `opts.reload` = 显式磁盘重载（↺），覆盖标签里未保存的内容。已开的标签默认
+   *  **激活既有内容**（含未保存修改），不用请求带来的磁盘版本覆盖。 */
+  function applyOpen(
+    file: CurrentFile,
+    content: string,
+    uri: string,
+    saved?: string,
+    opts?: { reload?: boolean },
+  ) {
     // 离开位置要在换文档前抓（此后光标随 setDoc 落回新文档开头）
     const depart = navDeparture();
-    setDoc(view, content);
-    setText(content);
-    setSavedText(saved ?? content);
-    setCurrent(file);
+    syncActiveTab(); // 旧 tab 内容落账
+    flushAllDrafts(); // 切档时机：所有脏标签（含刚落账的）草稿入库
+    const key = tabKey(file);
+    const idx = tabs().findIndex((tb) => tabKey(tb.file) === key);
+    const reopen = idx >= 0 && !opts?.reload;
+    // 已开标签且非重载：沿用标签内存内容（可能含未保存修改），丢弃请求的磁盘版本。
+    // 运行参数输入（runValues/runParams）同样随标签隔离：恢复旧标签的、新标签从空开始
+    const useContent = reopen ? tabs()[idx].text : content;
+    const useSaved = reopen ? tabs()[idx].savedText : (saved ?? content);
+    const useRunValues = reopen ? tabs()[idx].runValues : {};
+    const useRunParams = reopen ? tabs()[idx].runParams : "";
+    if (idx >= 0) {
+      setTabs((ts) =>
+        ts.map((tb, i) =>
+          i === idx ? { ...tb, text: useContent, savedText: useSaved, runValues: useRunValues, runParams: useRunParams } : tb,
+        ),
+      );
+    } else {
+      setTabs((ts) => [...ts, { file, text: useContent, savedText: useSaved, runValues: useRunValues, runParams: useRunParams }]);
+    }
+    setActiveKey(key);
+    setRunValues(useRunValues);
+    setRunParams(useRunParams);
+    if (reopen && tabs()[idx].editor) {
+      // 切回已开标签：整档快照还原（undo 历史/选区/滚动随该文件走，绝不串档）
+      restoreEditorState(view, tabs()[idx].editor!);
+    } else {
+      // 首次打开 / 显式重载：整档重建（history 从零开始，Ctrl+Z 不跨文件）
+      setDoc(view, useContent);
+    }
+    setText(useContent);
+    setSavedText(useSaved);
+    // 整档重建/还原后链接 scope 需与新档对齐；名字集恰好未变时下游 effect 不重跑，
+    // 这里强制补发一次（cm.setLinkScope 内部有浅比较挡重复重配）
+    setLinkScope(view, { names: linkNames(), builtins: builtins() });
     setFileMsg(null);
     setAnalyzeErr(null);
     setDeclParams([]); // 新文件的参数声明待首次 analyze 返回
@@ -553,11 +729,18 @@ export function App() {
       // 会落在无内容页签上（侧栏空白），回 Layers 立即显示层栈
       setPanel("layers");
     }
-    lsp.openDoc(uri, content);
+    lsp.openDoc(uri, useContent);
     refreshAnalyze();
   }
 
-  async function openWsFile(path: string) {
+  async function openWsFile(path: string, opts?: { reload?: boolean }) {
+    // 已开标签：直接激活（保留未保存内容），不重读磁盘（↺ 显式重载除外）
+    const key = tabKey({ root: "ws", path });
+    if (!opts?.reload && tabs().some((tb) => tabKey(tb.file) === key)) {
+      applyOpen({ root: "ws", path }, "", fileUri(wsRoot() ?? "", path));
+      void kvSet(Keys.lastFile, { root: "ws", path });
+      return;
+    }
     const res = await client.readWs(path);
     if (!res.ok) {
       setFileMsg(res.error as string);
@@ -565,24 +748,31 @@ export function App() {
     }
     const root = wsRoot();
     const disk = (res.data as { text: string }).text;
-    // 草稿恢复：浏览器库里存有未落盘文本（≠ 磁盘）则恢复并标记未保存
+    // 草稿恢复：浏览器库里存有未落盘文本（≠ 磁盘）则给出恢复入口（磁盘已加载）。
+    // 注意必须放在 applyOpen 之后——applyOpen 会清 pendingDraft/fileMsg
     const draft = await kvGet<string>(draftKey("ws", path));
-    if (draft != null && draft !== disk) {
-      setPendingDraft({ path, text: draft });
-      setFileMsg("draft from last session differs from disk — disk loaded; restore draft to switch");
-    } else {
-      setPendingDraft(null);
-    }
     applyOpen(
       { root: "ws", path },
       disk,
       root ? fileUri(root, path) : `file:///${path}`,
       disk,
+      opts,
     );
+    if (draft != null && draft !== disk) {
+      setPendingDraft({ path, text: draft });
+      setFileMsg("draft from last session differs from disk — disk loaded; restore draft to switch");
+    }
     void kvSet(Keys.lastFile, { root: "ws", path });
   }
 
   async function openLib(name: string) {
+    // 库文件只读、内容不变：已开标签直接激活
+    const key = tabKey({ root: "lib", path: name });
+    if (tabs().some((tb) => tabKey(tb.file) === key)) {
+      applyOpen({ root: "lib", path: name }, "", `file:///${name}`);
+      void kvSet(Keys.lastFile, { root: "lib", path: name });
+      return;
+    }
     const res = await client.readLib(name);
     if (!res.ok) {
       setFileMsg(res.error as string);
@@ -630,7 +820,7 @@ export function App() {
     }
   }
 
-  /** 离开位置快照（当前文件 + 光标行）。跨文件打开要在 setDoc/setCurrent 之前
+  /** 离开位置快照（当前文件 + 光标行）。跨文件打开要在 setDoc/切标签之前
    *  抓取——那时编辑器仍是旧文档，光标还在离开处。 */
   function navDeparture(): { root: "ws" | "lib" | null; path: string | null; line0: number | null } | null {
     const cur = current();
@@ -784,6 +974,11 @@ export function App() {
     const res = await lsp.definition(pos.line, pos.character);
     const loc = Array.isArray(res) ? res[0] : res;
     if (!loc?.uri) {
+      if (lsp.lastTimedOut) {
+        // 超时 ≠ 无定义：会话忙/已死时给可行动的提示（区别于真空结果）
+        setFileMsg("definition lookup timed out — LSP session busy or gone, retry");
+        return;
+      }
       const word = wordAround(pos);
       setFileMsg(word ? `no definition found for “${word}”` : "no definition found");
       return;
@@ -834,7 +1029,8 @@ export function App() {
     if (!cur || cur.root !== "ws") return;
     void kvDel(draftKey("ws", cur.path));
     setPendingDraft(null);
-    await openWsFile(cur.path); // 草稿已清 → 恢复磁盘内容
+    // 显式磁盘重载：跳过「已开标签直接激活」，覆盖标签里的未保存内容
+    await openWsFile(cur.path, { reload: true });
   }
 
   /** 载入挂起的本地草稿（覆盖编辑器内容；保存后草稿清除）。 */
@@ -877,6 +1073,8 @@ export function App() {
     }
     applyOpen({ root: "ws", path: clean }, "", fileUri(wsRoot()!, clean));
     setSavedText(null); // 未落盘：处于待保存状态
+    // applyOpen 会清 fileMsg，提示放它后面（Ctrl+S 走 saveCurrent 落盘）
+    setFileMsg("Unsaved buffer — press Ctrl+S to create the file in the workspace");
   }
 
   async function deleteFile(path: string, isDir = false) {
@@ -886,6 +1084,24 @@ export function App() {
     const res = await client.deleteFile(path);
     if (res.ok) {
       void kvDel(draftKey("ws", path));
+      // 命中该路径（目录含子路径）的草稿一并清掉，防止重开后「恢复草稿」复活
+      const draftPaths = [path];
+      if (isDir) {
+        for (const e of entries()) {
+          if (!e.dir && e.path.startsWith(`${path}/`)) draftPaths.push(e.path);
+        }
+      }
+      for (const dp of draftPaths) void kvDel(draftKey("ws", dp));
+      // 该文件的编辑器标签全部关闭（keepDraft：草稿已清，不回写），
+      // closeTab 内会停掉其运行中任务并从任务列表移除
+      const doomed = tabs()
+        .filter(
+          (tb) =>
+            tb.file.root === "ws" &&
+            (tb.file.path === path || (isDir && tb.file.path.startsWith(`${path}/`))),
+        )
+        .map((tb) => tabKey(tb.file));
+      for (const k of doomed) closeTab(k, { keepDraft: true });
       // 删除目录：目录内文件的“上次文件”记录一并清掉（草稿留在库里无害）
       if (isDir) {
         const last = await kvGet<CurrentFile>(Keys.lastFile);
@@ -893,8 +1109,6 @@ export function App() {
           void kvDel(Keys.lastFile);
         }
       }
-      // 删除打开中的文件：缓冲保留（保存即重建）
-      if (current()?.root === "ws" && current()?.path === path) setSavedText(text());
       // 导航历史剔除被删条目（目录删除连子路径一起），游标收拢到相邻条目
       const idx = navIdx();
       let nextIdx = idx;
@@ -928,9 +1142,22 @@ export function App() {
       }
       if (current()?.root === "ws" && current()?.path === path) {
         const root = wsRoot();
-        setCurrent({ root: "ws", path: to });
+        // 标签页文件路径改写（保留内容与 dirty 状态）+ LSP 会话以新 URI 重放
+        setTabs((ts) =>
+          ts.map((tb) =>
+            tabKey(tb.file) === tabKey({ root: "ws", path }) ? { ...tb, file: { root: "ws", path: to } } : tb,
+          ),
+        );
+        setActiveKey(tabKey({ root: "ws", path: to }));
         lsp.openDoc(root ? fileUri(root, to) : `file:///${to}`, text());
         refreshAnalyze();
+      } else if (tabs().some((tb) => tabKey(tb.file) === tabKey({ root: "ws", path }))) {
+        // 非活跃标签里的文件被改名：同步改写标签路径（内容不变）
+        setTabs((ts) =>
+          ts.map((tb) =>
+            tabKey(tb.file) === tabKey({ root: "ws", path }) ? { ...tb, file: { root: "ws", path: to } } : tb,
+          ),
+        );
       }
       const last = await kvGet<CurrentFile>(Keys.lastFile);
       if (last?.root === "ws" && last.path === path) {
@@ -942,6 +1169,50 @@ export function App() {
     } else {
       setFileMsg(`rename failed: ${res.error}`);
     }
+  }
+
+  /** 关闭文档标签：所有脏的工作区标签（含被关的与后台的）先把未保存内容写入
+   *  IndexedDB 草稿（1s 防抖可能未触发）；关闭当前标签时激活相邻标签（右优先，
+   *  无则左），全部关闭回到示例文档空态。keepDraft 跳过写草稿（删除文件时用：
+   *  草稿要清掉而不是写入）。 */
+  function closeTab(key: string, opts?: { keepDraft?: boolean }) {
+    const idx = tabs().findIndex((tb) => tabKey(tb.file) === key);
+    if (idx < 0) return;
+    if (!opts?.keepDraft) {
+      syncActiveTab(); // 被关的是当前标签时，编辑器实时内容先落账进标签
+      flushAllDrafts();
+    }
+    // 该文件的运行中任务一并停止并移除（任务数据随文档标签走）
+    for (const t of runTasks()) {
+      if (t.fileKey === key && t.running) void client.runStop(t.id);
+    }
+    setRunTasks((ts) => ts.filter((t) => t.fileKey !== key));
+    const next = tabs().filter((_, i) => i !== idx);
+    setTabs(next);
+    if (activeKey() !== key) return;
+    const neighbor = next[idx] ?? next[idx - 1] ?? null;
+    if (neighbor) {
+      const uri =
+        neighbor.file.root === "ws"
+          ? fileUri(wsRoot() ?? "", neighbor.file.path)
+          : `file:///${neighbor.file.path}`;
+      applyOpen(neighbor.file, "", uri);
+      return;
+    }
+    // 全部关闭：回到示例文档空态（与初始挂载一致）
+    setActiveKey(null);
+    setDoc(view, SAMPLE_DOC);
+    setText(SAMPLE_DOC);
+    setSavedText(SAMPLE_DOC);
+    setFileMsg(null);
+    setAnalyzeErr(null);
+    setDeclParams([]);
+    setPendingDraft(null);
+    setDiags([]);
+    setAnalyzeDoc(null);
+    setRecipeDoc(null);
+    setSymbols([]);
+    if (view) applyDiagnostics(view, []);
   }
 
   /** 新建目录：父目录链自动创建，已存在报错。 */
@@ -1006,6 +1277,12 @@ export function App() {
       e.preventDefault();
       navForward();
     }
+    // Alt+W 关闭当前文档标签（Ctrl+W 是浏览器级关闭，拦截不了）
+    if (e.altKey && e.key.toLowerCase() === "w") {
+      e.preventDefault();
+      const k = activeKey();
+      if (k) closeTab(k);
+    }
   }
 
   function setPanelPersist(p: Panel) {
@@ -1034,20 +1311,24 @@ export function App() {
       onGotoPktlFile: (t) => openRecipePkgToken(t),
     });
 
-    // 配置（版本号 + WS 路径 + 内置原语名单）
+    // 配置（版本号 + WS 路径 + 内置原语名单 + WS 鉴权 token）
     try {
       const cfg = await fetch("/config.json").then((r) => r.json());
       setVersion(cfg.version ?? "");
       if (Array.isArray(cfg.builtins)) setBuiltins(new Set(cfg.builtins as string[]));
+      // token 契约（服务端并行新增）：connect 前注入，连接与断线重连统一携带；
+      // 缺失/为空则不带 token 连接（服务端拒绝时经 onServerError 呈现）
+      if (typeof cfg.token === "string" && cfg.token) client.setAuthToken(cfg.token);
     } catch {
       /* dev 代理未起时忽略 */
     }
 
     window.addEventListener("keydown", onKeydown);
+    window.addEventListener("resize", onResize);
 
     // 恢复持久化的面板选择（IndexedDB 不可用时静默跳过）
     void kvGet<Panel>(Keys.panel).then((p) => {
-      if (p === "diagnostics" || p === "layers" || p === "hex" || p === "run") setPanel(p);
+      if (p === "diagnostics" || p === "layers" || p === "hex" || p === "outline" || p === "run") setPanel(p);
     });
     // 恢复 Run 选项快照（旧条目缺字段时并入当前默认，避免半快照）
     void kvGet<RunSettings>(Keys.runSettings).then((s) => {
@@ -1061,14 +1342,12 @@ export function App() {
 
   onCleanup(() => {
     window.removeEventListener("keydown", onKeydown);
-    // 卸载前 flush 未落库的草稿（编辑中途刷新不丢）
-    if (draftTimer) {
-      clearTimeout(draftTimer);
-      const cur = current();
-      if (cur?.root === "ws" && text() !== savedText()) {
-        void kvSet(draftKey("ws", cur.path), text());
-      }
-    }
+    window.removeEventListener("resize", onResize);
+    // 卸载前 flush 所有脏标签的草稿（编辑中途刷新不丢；后台标签一并保住）
+    if (draftTimer) clearTimeout(draftTimer);
+    if (fileMsgClearTimer) clearTimeout(fileMsgClearTimer);
+    syncActiveTab();
+    flushAllDrafts();
     client.close();
   });
 
@@ -1078,6 +1357,15 @@ export function App() {
   return (
     <div class="app">
       <header class="topbar">
+        {/* 侧栏显隐切换（CSS 契约见 .main.side-hidden；side-head 行动区在 files.tsx，
+            按钮放顶栏保证侧栏隐藏后仍可恢复） */}
+        <button
+          class="icon-btn side-toggle"
+          onClick={toggleSide}
+          title="toggle sidebar"
+        >
+          {sideVisible() ? "◧" : "▢"}
+        </button>
         <span class="brand">prping web</span>
         <span class="version">{version() && `v${version()}`}</span>
         <span class={`status status-${status()}`} title="WebSocket status">
@@ -1185,7 +1473,7 @@ export function App() {
           </span>
         </Show>
       </header>
-      <main class="main" classList={{ "main-md": isMd() }}>
+      <main class="main" classList={{ "main-md": isMd(), "side-hidden": !sideVisible() }}>
         <FileSidebar
           wsRoot={wsRoot()}
           entries={entries()}
@@ -1208,19 +1496,66 @@ export function App() {
           onConfirm={dlgConfirm}
           onClose={() => setFolderDlg(false)}
         />
-        <section
-          class="editor-pane"
-          classList={{ hidden: isMd() && mdMode() === "render" }}
-          ref={editorHost}
-        />
-        <Show when={isMd() && mdMode() === "render"}>
+        <div class="editor-col">
+          {/* 文档标签条：每打开一个文件一个 tab（✕ 关闭；● 为未保存修改） */}
+          <Show when={tabs().length > 0}>
+            <div class="doc-tabs" role="tablist">
+              <For each={tabs()}>
+                {(tb) => {
+                  const key = tabKey(tb.file);
+                  const tabDirty = () =>
+                    tb.file.root === "ws" &&
+                    (activeKey() === key ? text() !== savedText() : tb.text !== tb.savedText);
+                  return (
+                    <div
+                      class="doc-tab"
+                      classList={{ active: activeKey() === key }}
+                      title={tb.file.root + ":" + tb.file.path}
+                      onClick={() => {
+                        if (activeKey() === key) return;
+                        applyOpen(tb.file, "", fileUri(
+                          tb.file.root === "ws" ? (wsRoot() ?? "") : "",
+                          tb.file.path,
+                        ));
+                      }}
+                    >
+                      <span class="doc-tab-name">{tb.file.path.split("/").pop()}</span>
+                      <Show when={fileHasRunning(key)}>
+                        <span class="doc-tab-run" title="task running">●</span>
+                      </Show>
+                      <Show when={tabDirty()}>
+                        <span class="dirty-dot" title="unsaved changes" />
+                      </Show>
+                      <button
+                        class="doc-tab-close"
+                        title="close tab (Alt+W)"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTab(key);
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                }}
+              </For>
+            </div>
+          </Show>
           <section
-            class="editor-pane md-render"
-            // renderMarkdown 先整体转义 HTML 再套标记——文件内容注入安全
-            innerHTML={renderMarkdown(text())}
-            ref={mdRenderHost}
+            class="editor-pane"
+            classList={{ hidden: isMd() && mdMode() === "render" }}
+            ref={editorHost}
           />
-        </Show>
+          <Show when={isMd() && mdMode() === "render"}>
+            <section
+              class="editor-pane md-render"
+              // renderMarkdown 先整体转义 HTML 再套标记——文件内容注入安全
+              innerHTML={renderMarkdown(text())}
+              ref={mdRenderHost}
+            />
+          </Show>
+        </div>
         {/* Markdown 大纲栏：标题层级树，点击滚动定位（渲染）/行跳转（编辑） */}
         <Show when={isMd()}>
           <aside class="md-outline">
@@ -1250,7 +1585,7 @@ export function App() {
             setPanel={setPanelPersist}
             diagCount={diags().length + (buildErrShown() ? 1 : 0)}
             recipe={isPktl()}
-            running={runningCount() > 0}
+            running={fileHasRunning(activeKey())}
           />
           {/* 构建错误不再作横幅盖在 Layers/Hex 上——统一进 Diagnostics 页签
               （诊断行 + 页签计数），Layers/Hex 空态给指向提示 */}
@@ -1335,8 +1670,8 @@ export function App() {
           </Show>
           <Show when={panel() === "run"}>
             <RunPanel
-              tasks={runTasks()}
-              activeId={activeRunId()}
+              tasks={runTasks().filter((t) => t.fileKey === activeKey())}
+              activeId={activeTask()?.id ?? null}
               setActive={setActiveRunId}
               settings={runSettings()}
               setSettings={updateRunSettings}
@@ -1347,6 +1682,7 @@ export function App() {
               onRun={() => void doRun()}
               onStopTask={(id) => void onStopTask(id)}
               onCloseTask={onCloseTask}
+              onStopAll={doStopAll}
             />
           </Show>
           </aside>

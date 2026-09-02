@@ -1,0 +1,14 @@
+Ctrl+Click 'http_req'(#1) -> banner: <no banner>
+Ctrl+Click 'http'(#0) -> banner: <no banner>
+Ctrl+Click 'http_req'(#0) -> banner: <no banner>
+Ctrl+Click 'syn.pkt'(#0) -> banner: <no banner>
+syn.pkt lines: ['# bad_network 步骤 1：TCP SYN（三次握手第一步）', '# 模拟网络差的场景：客户端发起连接', '# sniffer 匹配 SYN-ACK，--wait 时提取服务端 seq/ack 到 global', 'p = raw(bytes="")', 'syn_pkt = use(p) |> tcp(sport=params("sport", 40000), dport=params("port", 80),', '                        seq=global("cseq", 0x1000), flags=syn())']
+Ctrl+Click 'ipv4'(#0) -> banner: <no banner>
+WS SEND def: {"textDocument": {"uri": "file:///mnt/mydata/mycoding/prping/target/debug/examples/bad_network/http_get.pkt"}, "position": {"line": 4, "character": 15}}
+WS RECV def id=5: {"range": {"end": {"character": 8, "line": 3}, "start": {"character": 0, "line": 3}}, "uri": "file:///mnt/mydata/mycoding/prping/target/debug/examples/bad_network/http_get.pkt"}
+WS SEND def: {"textDocument": {"uri": "file:///mnt/mydata/mycoding/prping/target/debug/examples/bad_network/http_get.pkt"}, "position": {"line": 3, "character": 0}}
+WS RECV def id=7: {"range": {"end": {"character": 8, "line": 3}, "start": {"character": 0, "line": 3}}, "uri": "file:///mnt/mydata/mycoding/prping/target/debug/examples/bad_network/http_get.pkt"}
+WS SEND def: {"textDocument": {"uri": "file:///mnt/mydata/mycoding/prping/target/debug/examples/bad_network/http_get.pkt"}, "position": {"line": 3, "character": 0}}
+WS RECV def id=9: {"range": {"end": {"character": 8, "line": 3}, "start": {"character": 0, "line": 3}}, "uri": "file:///mnt/mydata/mycoding/prping/target/debug/examples/bad_network/http_get.pkt"}
+WS SEND def: {"textDocument": {"uri": "file:///mnt/mydata/mycoding/prping/target/debug/examples/bad_network/syn.pkt"}, "position": {"line": 6, "character": 19}}
+WS RECV def id=14: {"range": {"end": {"character": 9, "line": 162}, "start": {"character": 5, "line": 162}}, "uri": "file:///mnt/mydata/mycoding/prping/target/debug/lib/headers.pkt"}

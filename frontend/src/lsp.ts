@@ -30,6 +30,8 @@ export class LspClient {
   /** 接入服务端透传的 LSP 消息（在 PrpingClient.onLsp 里调用）。 */
   handle(message: any): void {
     if (message?.method === "textDocument/publishDiagnostics") {
+      // 只收当前文档：didOpen/didChange 的应答窗口里可能残留上一个文档的推送
+      if (message.params?.uri !== this.uri) return;
       const diags: LspDiagnostic[] = (message.params?.diagnostics ?? []).map((d: any) => ({
         line: d.range?.start?.line ?? 0,
         character: d.range?.start?.character ?? 0,
@@ -105,18 +107,23 @@ export class LspClient {
     this.start(uri, text);
   }
 
-  lspRequest(method: string, params: unknown): Promise<any> {
+  /** 最近一次 lspRequest 是否因超时返回 null（区分「无定义」与「会话忙/已死」）。 */
+  lastTimedOut = false;
+
+  lspRequest(method: string, params: unknown, timeoutMs = 3000): Promise<any> {
     return new Promise((resolve) => {
       const id = ++this.seq;
+      this.lastTimedOut = false;
       this.pending.set(id, resolve);
       this.client.lspSend({ jsonrpc: "2.0", id, method, params });
-      // 超时兜底（服务端忙/断线时不悬挂补全）
+      // 超时兜底（服务端忙/断线时不悬挂补全）；置 lastTimedOut 供调用方区分空结果
       setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
+          this.lastTimedOut = true;
           resolve(null);
         }
-      }, 3000);
+      }, timeoutMs);
     });
   }
 
@@ -141,12 +148,13 @@ export class LspClient {
     });
   }
 
-  /** go-to-definition（Location[] | null；跨文件目标 uri 指向目标文件）。 */
+  /** go-to-definition（Location[] | null；跨文件目标 uri 指向目标文件）。
+   *  超时放宽到 5s：definition 常伴随刚切入的文件（didOpen/didChange 链）。 */
   definition(line: number, character: number): Promise<any> {
     return this.lspRequest("textDocument/definition", {
       textDocument: { uri: this.uri },
       position: { line, character },
-    });
+    }, 5000);
   }
 
   get documentUri(): string {

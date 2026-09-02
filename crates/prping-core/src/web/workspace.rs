@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 
 use rust_i18n::t;
 
+use super::code;
+use super::coded;
+
 /// 默认工作区目录名（位于二进制所在目录或启动目录下）。
 const WORKSPACE_DIR: &str = "examples";
 
@@ -126,9 +129,38 @@ fn join_rel(prefix: &str, name: &str) -> String {
     }
 }
 
+/// 读工作区文件大小上限：误点大文件（pcap/日志）先拒绝，不整读进内存后才判二进制
+/// （save 上限 MAX_SAVE_TEXT 的读侧对称约束）。
+const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
+/// 二进制探测窗口：前 8KB 含 NUL 即按二进制拒绝（UTF-8 文本不含 NUL）。
+const BINARY_PROBE: u64 = 8 * 1024;
+
 /// 读工作区文件（任意扩展名；二进制/非 UTF-8 → 明确报错而非乱码）。
 pub(crate) fn read_file(root: &Path, rel: &str) -> anyhow::Result<String> {
     let path = resolve_in_root(root, rel, false)?;
+    let meta = std::fs::metadata(&path)
+        .map_err(|e| anyhow::anyhow!(t!("web.ws_read_failed", err = e.to_string())))?;
+    if !meta.is_file() {
+        anyhow::bail!(coded(code::NOT_FOUND, t!("web.ws_not_file").to_string()));
+    }
+    if meta.len() > MAX_READ_BYTES {
+        anyhow::bail!(coded(
+            code::TOO_LARGE,
+            t!("web.ws_read_too_large", max = MAX_READ_BYTES).to_string()
+        ));
+    }
+    // 前 8KB 探 NUL：二进制提前拒绝，避免整读后才发现不可显示
+    let probe_len = meta.len().min(BINARY_PROBE) as usize;
+    let mut f = std::fs::File::open(&path)
+        .map_err(|e| anyhow::anyhow!(t!("web.ws_read_failed", err = e.to_string())))?;
+    use std::io::Read;
+    let mut probe = vec![0u8; probe_len];
+    f.read_exact(&mut probe)
+        .map_err(|e| anyhow::anyhow!(t!("web.ws_read_failed", err = e.to_string())))?;
+    if probe.contains(&0) {
+        anyhow::bail!(coded(code::BINARY, t!("web.ws_binary").to_string()));
+    }
+    drop(f);
     let bytes = std::fs::read(&path)
         .map_err(|e| anyhow::anyhow!(t!("web.ws_read_failed", err = e.to_string())))?;
     String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{}", t!("web.ws_binary")))
@@ -137,7 +169,10 @@ pub(crate) fn read_file(root: &Path, rel: &str) -> anyhow::Result<String> {
 /// 保存工作区文件（任意扩展名；新建或覆盖；临时文件 + rename 保证不落半个文件）。
 pub(crate) fn save_file(root: &Path, rel: &str, text: &str) -> anyhow::Result<()> {
     if text.len() > MAX_SAVE_TEXT {
-        anyhow::bail!(t!("web.ws_too_large", max = MAX_SAVE_TEXT));
+        anyhow::bail!(coded(
+            code::TOO_LARGE,
+            t!("web.ws_too_large", max = MAX_SAVE_TEXT).to_string()
+        ));
     }
     let path = resolve_in_root(root, rel, false).or_else(|_| {
         // 新建语义：父目录缺失时创建目录链后重走常规解析。validate_rel 已保证
@@ -188,18 +223,21 @@ pub(crate) fn rename_entry(root: &Path, from: &str, to: &str) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!(t!("web.ws_rename_failed", err = e.to_string())))?;
     let dst = root_canon.join(&dst_rel);
     if dst.exists() {
-        anyhow::bail!("{}", t!("web.ws_target_exists"));
+        anyhow::bail!(coded(
+            code::CONFLICT,
+            t!("web.ws_target_exists").to_string()
+        ));
     }
     let parent = dst.parent().unwrap_or(root_canon.as_path());
     let parent_canon = std::fs::canonicalize(parent)
         .map_err(|e| anyhow::anyhow!(t!("web.ws_rename_failed", err = e.to_string())))?;
     if !parent_canon.starts_with(&root_canon) {
-        anyhow::bail!("{}", t!("web.ws_escape"));
+        anyhow::bail!(coded(code::ESCAPE, t!("web.ws_escape").to_string()));
     }
     let dst = parent_canon.join(
         dst_rel
             .file_name()
-            .ok_or_else(|| anyhow::anyhow!("{}", t!("web.ws_bad_path")))?,
+            .ok_or_else(|| coded(code::ESCAPE, t!("web.ws_bad_path").to_string()))?,
     );
     std::fs::rename(&src, &dst)
         .map_err(|e| anyhow::anyhow!(t!("web.ws_rename_failed", err = e.to_string())))
@@ -212,14 +250,17 @@ pub(crate) fn mkdirs(root: &Path, rel: &str) -> anyhow::Result<PathBuf> {
         .map_err(|e| anyhow::anyhow!(t!("web.ws_mkdir_failed", err = e.to_string())))?;
     let path = root_canon.join(&rel_path);
     if path.exists() {
-        anyhow::bail!("{}", t!("web.ws_target_exists"));
+        anyhow::bail!(coded(
+            code::CONFLICT,
+            t!("web.ws_target_exists").to_string()
+        ));
     }
     std::fs::create_dir_all(&path)
         .map_err(|e| anyhow::anyhow!(t!("web.ws_mkdir_failed", err = e.to_string())))?;
     let canon = std::fs::canonicalize(&path)
         .map_err(|e| anyhow::anyhow!(t!("web.ws_mkdir_failed", err = e.to_string())))?;
     if !canon.starts_with(&root_canon) {
-        anyhow::bail!("{}", t!("web.ws_escape"));
+        anyhow::bail!(coded(code::ESCAPE, t!("web.ws_escape").to_string()));
     }
     Ok(canon)
 }
@@ -300,18 +341,18 @@ fn home_dir() -> Option<PathBuf> {
 /// 任意文件读/删/改名/建目录为 false）。
 pub(crate) fn validate_rel(rel: &str, require_pkt: bool) -> anyhow::Result<PathBuf> {
     if rel.is_empty() || rel.len() > MAX_REL_LEN {
-        anyhow::bail!("{}", t!("web.ws_bad_path"));
+        anyhow::bail!(coded(code::ESCAPE, t!("web.ws_bad_path").to_string()));
     }
     if rel.contains('\\') || rel.contains(':') || rel.starts_with('/') || rel.ends_with('/') {
-        anyhow::bail!("{}", t!("web.ws_bad_path"));
+        anyhow::bail!(coded(code::ESCAPE, t!("web.ws_bad_path").to_string()));
     }
     for seg in rel.split('/') {
         if seg.is_empty() || seg.starts_with('.') || is_windows_reserved(seg) {
-            anyhow::bail!("{}", t!("web.ws_bad_path"));
+            anyhow::bail!(coded(code::ESCAPE, t!("web.ws_bad_path").to_string()));
         }
     }
     if require_pkt && !is_pkt_file(rel) {
-        anyhow::bail!("{}", t!("web.ws_bad_ext"));
+        anyhow::bail!(coded(code::ESCAPE, t!("web.ws_bad_ext").to_string()));
     }
     Ok(PathBuf::from(rel))
 }
@@ -372,7 +413,7 @@ pub(crate) fn resolve_in_root(
         let canon = std::fs::canonicalize(&path)
             .map_err(|e| anyhow::anyhow!(t!("web.ws_read_failed", err = e.to_string())))?;
         if !canon.starts_with(&root_canon) {
-            anyhow::bail!("{}", t!("web.ws_escape"));
+            anyhow::bail!(coded(code::ESCAPE, t!("web.ws_escape").to_string()));
         }
         Ok(canon)
     } else {
@@ -380,7 +421,7 @@ pub(crate) fn resolve_in_root(
         let parent_canon = std::fs::canonicalize(parent)
             .map_err(|e| anyhow::anyhow!(t!("web.ws_save_failed", err = e.to_string())))?;
         if !parent_canon.starts_with(&root_canon) {
-            anyhow::bail!("{}", t!("web.ws_escape"));
+            anyhow::bail!(coded(code::ESCAPE, t!("web.ws_escape").to_string()));
         }
         let name = rel_path
             .file_name()

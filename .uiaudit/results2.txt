@@ -1,0 +1,24 @@
+### 1 AUTOCOMPLETE — PASS
+popup appeared automatically on typing 'tc' in pipeline position: True; 100 options ['use流水线组合 use(元件, …)', 'eth#[proto] func ... -> by', 'arp#[proto] func ... -> by', 'ipv4#[proto] func ... -> b', 'ipv6#[proto] func ... -> b', 'icmp#[proto] func ... -> b', 'tcp#[proto] func ... -> by', 'udp#[proto] func ... -> by']; ArrowDown moves aria-selected ('tcp#[proto] func ... -> by' -> 'tcp_bytesfunc tcp_bytes(by'); Escape closes + Backspace reverts (dirty cleared: True)
+
+### 2 HOVER DOCS — PASS
+1 hover tooltip after 1.8s on 'tcp(' — content: '#[proto] func ... -> bytes tcp(sport, dport, seq, ack, data_offset=bor(0x50, 0), flags, window, checksum, urg, options) |  | TCP 传输控制协议头（20B 定长 + 变长 options；自表示协议 proto） | TCP 协议结构（RFC 793） | TCP 是可靠的传输层协议，特点： |   - 面向连接：三次握手建立连接，四次挥手断开 |   - 可靠传输：序列号、确认号、重传机制 |   - 流量控制：滑动'
+
+### 3c Ctrl+Click jump — FAIL
+TimeoutError: Locator.hover: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator(".cm-ident").filter(has_text="http_req").first
+
+
+### 5 NEW FILE + DELETE — PARTIAL
+prompt answered '_uiaudit_tmp.pkt' (dialogs: ['prompt:New file (relative path, .pkt/.pktl):']); row appeared: False; typed icmp(): False; deleted via tree ✕ + confirm: True; app msg: ''
+
+### 6 DIAGNOSTICS(scratch) — PARTIAL
+scratch file could not be created — see flow 5
+
+### 7 FOLDER DIALOG — PARTIAL
+dialog 'Open folder' rows=23; pcaps/ + Open switched workspace: True; opening .pcap -> '二进制或非 UTF-8 文件——无法显示'; abs-path input jump: input now '/mnt/mydata/mycoding/prping/examples', err=''; restored examples root: False
+
+### 8 RUN PANEL — FAIL
+AssertionError: workspace not back at examples
+

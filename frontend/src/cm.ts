@@ -5,7 +5,8 @@
 
 import { autocompletion, closeBrackets, startCompletion, type CompletionResult } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
+import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
+import { tags as t } from "@lezer/highlight";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
 import { highlightSelectionMatches, search } from "@codemirror/search";
 import { Compartment, EditorState, Facet, RangeSetBuilder, type Text, type Extension } from "@codemirror/state";
@@ -53,7 +54,8 @@ const theme = EditorView.theme(
       padding: "8px 12px",
       fontSize: "12px",
       lineHeight: "1.55",
-      maxHeight: "400px",
+      // 小视口时随视口收缩（内容内部滚动，tooltip 恒小于窗口）
+      maxHeight: "min(400px, calc(100vh - 90px))",
       overflowY: "auto",
       overscrollBehavior: "contain",
     },
@@ -95,7 +97,20 @@ const theme = EditorView.theme(
   { dark: true },
 );
 
-const highlight = syntaxHighlighting(defaultHighlightStyle, { fallback: true });
+/** 深色语法高亮（与 UI 配色一致；defaultHighlightStyle 是浅色取向，注释会
+ *  发白发虚）。fallback:true = 未命中的 tag 落回默认着色，不必穷举。 */
+const pktHighlightStyle = HighlightStyle.define([
+  { tag: t.comment, color: "#7f848e", fontStyle: "italic" },
+  { tag: t.keyword, color: "#c678dd" },
+  { tag: t.string, color: "#98c379" },
+  { tag: [t.number, t.constant(t.name), t.bool], color: "#d19a66" },
+  { tag: [t.function(t.name), t.function(t.variableName), t.definition(t.variableName)], color: "#61afef" },
+  { tag: [t.typeName, t.namespace], color: "#e5c07b" },
+  { tag: [t.operator, t.punctuation, t.separator, t.bracket], color: "#abb2bf" },
+  { tag: t.invalid, color: "#e06c75" },
+]);
+
+const highlight = syntaxHighlighting(pktHighlightStyle, { fallback: true });
 
 /** 可编辑开关（Compartment：库文件只读 / 工作区文件可写，切换不重建编辑器）。 */
 const editableCompartment = new Compartment();
@@ -227,8 +242,24 @@ const linkScope = Facet.define<LinkScope, LinkScope>({
 });
 
 const linkScopeCompartment = new Compartment();
+/** 各视图最近一次下传的 scope：名字集未变就跳过 compartment 重配——App 在
+ *  每次文本变化都构造新 Set，逐键重配扩展是纯开销（浅比较挡掉）。 */
+const lastLinkScope = new WeakMap<EditorView, LinkScope>();
+
+function sameNameSet(a: Set<string>, b: Set<string>): boolean {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  for (const n of a) if (!b.has(n)) return false;
+  return true;
+}
+
 /** 下传可跳判定数据（名字集/内置名单变化时调用；装饰随之重建）。 */
 export function setLinkScope(view: EditorView, link: LinkScope): void {
+  const prev = lastLinkScope.get(view);
+  if (prev && sameNameSet(prev.names, link.names) && sameNameSet(prev.builtins, link.builtins)) {
+    return;
+  }
+  lastLinkScope.set(view, link);
   view.dispatch({ effects: linkScopeCompartment.reconfigure(linkScope.of(link)) });
 }
 
@@ -641,16 +672,22 @@ export function createEditor(parent: HTMLElement, opts: EditorOpts): EditorView 
     linkMarks,
     modGotoTracking,
     gotoClick(opts),
-    tooltips({ position: "absolute" }),
+    // 悬浮定位用 fixed：tooltip 渲染在 .editor-pane（overflow:hidden）内，absolute
+    // 会被面板边界拦腰裁掉；fixed 相对视口定位可逃离裁切容器，放不下时 CM 自动
+    // 上下翻转（旧版 CM 默认 absolute，6.3x 起默认改 fixed 正是为此）
+    tooltips({ position: "fixed" }),
     cmCompletion,
     cmHover,
     updateListener,
   ];
 
-  return new EditorView({
+  const view = new EditorView({
     state: EditorState.create({ doc: opts.doc, extensions }),
     parent,
   });
+  // 登记扩展清单：setDoc/换档重建 EditorState 用同一份（见 viewExtensions 注释）
+  viewExtensions.set(view, extensions);
+  return view;
 }
 
 /** LSP 诊断（0-based 行列）→ CM lint 诊断并推送。 */
@@ -682,9 +719,55 @@ export function applyDiagnostics(
   view.dispatch(setDiagnostics(view.state, cmDiags));
 }
 
-/** 替换整个文档（打开库文件时）。 */
+/** 各视图创建时的扩展清单（setState 换档重建 EditorState 需要同一份）。 */
+const viewExtensions = new WeakMap<EditorView, Extension[]>();
+
+/**
+ * 替换整个文档（打开文件/换标签时）。
+ *
+ * 走 setState 重建而非 dispatch 变更：dispatch 的换档动作会并入当前 history，
+ * Ctrl+Z 能一路撤销回上一个文件的内容（跨档 undo 串档）；整档重建后 history
+ * 从零开始，各档撤销栈互相隔离。重建的新档不带任何 compartment 之外的残留
+ * （诊断/链接 scope 等由调用方随后重新下发）。
+ */
 export function setDoc(view: EditorView, text: string): void {
+  const exts = viewExtensions.get(view);
+  if (exts) {
+    lastLinkScope.delete(view); // 新档 scope 为空：强制下次下传真的重配
+    view.setState(EditorState.create({ doc: text, extensions: exts }));
+    return;
+  }
   view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+}
+
+/** 编辑器快照：整份 EditorState（含 undo 历史/选区/诊断）+ 滚动位置。
+ *  每个文档标签离开时存一份、切回时整体还原——切档不串撤销栈，光标滚动复位。 */
+export interface EditorSnapshot {
+  state: EditorState;
+  scrollTop: number;
+  scrollLeft: number;
+}
+
+/** 抓取当前编辑器完整状态快照（存入文档标签）。 */
+export function saveEditorState(view: EditorView): EditorSnapshot {
+  return {
+    state: view.state,
+    scrollTop: view.scrollDOM.scrollTop,
+    scrollLeft: view.scrollDOM.scrollLeft,
+  };
+}
+
+/** 还原快照（切回文档标签）：state 整体换入，滚动位置在布局后回填。 */
+export function restoreEditorState(view: EditorView, snap: EditorSnapshot): void {
+  lastLinkScope.delete(view); // state 已整体替换：强制下次下传真的重配
+  view.setState(snap.state);
+  view.requestMeasure({
+    read: () => null,
+    write: () => {
+      view.scrollDOM.scrollTop = snap.scrollTop;
+      view.scrollDOM.scrollLeft = snap.scrollLeft;
+    },
+  });
 }
 
 /** 跳到指定位置（0 基行 + 可选字符区间）：选中目标、滚动到视区中部并聚焦——
