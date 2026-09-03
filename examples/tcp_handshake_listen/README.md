@@ -2,7 +2,7 @@
 
 服务端**配方**：`wait:`（无值）链路层监听完整帧，按 sniffer 规则匹配纯 SYN，
 `extract` 取请求的端口/序列号/双向 IP 写 global，**触发后续步骤**构造 SYN-ACK
-（`ack = 请求 seq + 1`）发回；客户端 `--raw --wait SECS` 发 SYN、校验 SYN-ACK、
+（`ack = 请求 seq + 1`）发回；客户端配方（client.pktl）发 SYN、校验 SYN-ACK、
 再发最终 ACK——三个握手段齐全。
 
 > 单文件 `--wait --raw` 应答模板（`reply("层","字段")` 内联取值）已移除；
@@ -14,8 +14,8 @@
 # 终端 1 —— 服务端配方：命中纯 SYN 就回 SYN-ACK
 sudo prping packet examples/tcp_handshake_listen/server.pktl
 
-# 终端 2 —— 客户端：发 SYN + ACK，--wait 2 等并校验 SYN-ACK
-sudo prping packet --raw --wait 2 examples/tcp_handshake_listen/client.pkt 127.0.0.1
+# 终端 2 —— 客户端配方：发 SYN + ACK，wait 校验 SYN-ACK 并 extract 服务端 ISN
+sudo prping packet examples/tcp_handshake_listen/client.pktl 127.0.0.1
 ```
 
 客户端输出（节选）：`✓ reply matched: flags=syn,ack ack=4097`——服务端回的 SYN-ACK
@@ -56,13 +56,34 @@ recipe:
   IP 栈路由注入，回环与局域网均无需 MAC 解析）；校验和由序列化器自动重算；
 - 一个 `wait:` 步骤服务一次握手；连续服务就多写几组 listen+synack 步骤。
 
+## 客户端配方（client.pktl）
+
+```pktl
+global:
+- sseq
+
+recipe:
+- packet: client.pkt   # 先后导出 SYN + 最终 ACK（内容未变）+ sniffer 校验 SYN-ACK
+  raw: true            # 有 tcp 传输层，必须显式 raw（等价旧 CLI --raw）
+  wait: 2
+  extract:
+  - name: sseq
+    from: reply.tcp.seq
+    as: int            # 从 SYN-ACK 提取服务端 ISN → global.sseq（真实握手的标志性动作）
+```
+
+本示例的 ACK 用固定值（ack=0x2001）直观展示数值关系；把提取的 `global.sseq` 用于
+**动态构造**后续包的完整变体见 `examples/tcp_http_mock/`（ACK/GET 的 ack 全部来自
+extract，客户端无需预知服务端序号）。
+
 ## 注意
 
 - **固定 seq/ack**：为直观展示数值关系，服务端 ISN 固定 0x2000、客户端固定
   0x1000/0x1001。真实三次握手应由客户端**提取**服务端 seq 后动态构造 ACK——
-  配方变体见 `examples/tcp_handshake/`（`extract: from: reply.tcp.seq` 存
-  `global.sseq` 后再发 ACK）。
+  完整配方变体见 `examples/tcp_http_mock/`（`extract: from: reply.tcp.seq` 存
+  `global.sseq` 后动态发 ACK 与 GET）。
 - **位常量遮蔽**：元件/变量名勿用 `syn`/`ack`/`fin` 等（会遮蔽 eng_lib/bytes.pkt
   的位常量值函数，见 `client.pkt` 里 `syn_pkt`/`ack_pkt` 的命名）。
-- 客户端 ACK 在 `--wait` 前随 SYN 一起发出（两个 export 先发送）；服务端只响应
-  SYN，ACK 不匹配规则——握手段完整但 ACK 无回应（真实场景用配方变体保证顺序）。
+- 客户端 ACK 在 `wait:` 前随 SYN 一起发出（client.pkt 两个 export 先发送）；
+  服务端只响应 SYN，ACK 不匹配规则——握手段完整但 ACK 无回应（真实场景用
+  `tcp_http_mock/` 的分步配方保证顺序）。

@@ -1,132 +1,90 @@
 # 协议学习用 Examples
 
-本目录包含用于学习网络协议的 `.pktl` 配方文件，每个目录演示一个协议的完整流程。**每个 `.pktl` 和 `.pkt` 文件都包含详细的中文注释**，解释协议结构、字段含义和工作原理。
+本目录的协议流程示例统一为 **mock server/client 形式**：每个协议一个 `*_mock`
+目录，内含**两个配方**——`server.pktl`（服务端：`wait:` 无值持续监听 +
+sniffer 匹配 + `extract` 写 global + 触发发包步骤）与 `client.pktl`（客户端：
+发包 + `wait: N` + sniffer 校验回包 + extract 复用），两个终端各跑一个即可在
+本机闭环模拟一次完整协议会话。形态标杆是 `icmp_mock/`。
 
-## 目录结构
+每个 `.pktl` 和 `.pkt` 都包含详细中文注释，解释协议结构、字段含义与工作原理。
 
-### 1. `icmp_ping/` - ICMP Ping 协议
-- **icmp_ping.pktl** - ICMP Echo Request/Reply 流程（学习用）
-- **icmp_request.pkt** - ICMP Echo Request（ping 请求）
-- **icmp_reply.pkt** - ICMP Echo Reply（ping 应答）
-- **icmp_ping_step.pkt** - ICMP Echo Request 步骤（用于多步配方）
-- **icmp_ping_real_1.pktl** - 1 次 ICMP Echo Request 配方
-- **icmp_ping_real_2.pktl** - 2 次 ICMP Echo Request 配方
-- **icmp_ping_real_3.pktl** - 3 次 ICMP Echo Request 配方
-- **icmp_ping_real_4.pktl** - 4 次 ICMP Echo Request 配方
-- **icmp_ping_real_5.pktl** - 5 次 ICMP Echo Request 配方
-- **icmp_ping_real_6.pktl** - 6 次 ICMP Echo Request 配方
-- **icmp_ping_real_7.pktl** - 7 次 ICMP Echo Request 配方
-- **icmp_ping_real_8.pktl** - 8 次 ICMP Echo Request 配方
-- **icmp_ping_real_9.pktl** - 9 次 ICMP Echo Request 配方
-- **icmp_ping_real_10.pktl** - 10 次 ICMP Echo Request 配方
-- **generate_recipes.sh** - 生成不同次数的配方文件
-- **学习要点**：ICMP 协议结构、Type/Code 字段、Echo Request/Reply 匹配机制、pktlang 多步配方
+## Mock server/client 系列（双配方闭环）
 
-### 2. `http_flow/` - HTTP 协议
-- **http_flow.pktl** - HTTP 请求/响应流程
-- **http_request.pkt** - HTTP GET 请求
-- **http_response.pkt** - HTTP 200 OK 响应
-- **学习要点**：HTTP 协议结构、请求/响应格式、常见方法和状态码
+| 目录 | 协议/场景 | 监听方式 | 备注 |
+| --- | --- | --- | --- |
+| `icmp_mock/` | ICMP echo 会话 | 链路层（root） | **形态标杆**：回包 seq 偏移 +1000 作配方标记，排除回环内核替答 |
+| `http_mock/` | HTTP GET/POST → 200 OK | 链路层（root） | http 反解分派要求 TCP dport=80/8080；客户端用 tcp 字段匹配应答 |
+| `dhcp_mock/` | DHCP DORA 四步 | UDP :67（root） | 裸字节数组构造；固定 xid；Offer/Ack 单播回包 |
+| `tcp_data_mock/` | TCP 数据传输/确认 | 链路层（root） | 数据段 → 纯 ACK（ack=seq+载荷长度），两轮 seq/ack 推进 |
+| `tcp_http_mock/` | TCP 三次握手 + HTTP GET | 链路层（root） | 客户端 extract 服务端 ISN，动态构造 ACK/GET（Scapy 手动握手对照） |
+| `arp_mock/` | ARP 请求/应答 | 链路层（root） | who-has → is-at 单播应答；含 gratuitous ARP 演示 |
+| `udp_mock/` | 同一服务端分派 DNS + VNC | UDP（按端口） | 「端口即服务」分派：DNS 应答与 VNC 横幅两种协议 |
 
-### 3. `dhcp_flow/` - DHCP 协议
-- **dhcp_flow.pktl** - DHCP 四步流程（DORA）
-- **dhcp_discover.pkt** - DHCP Discover（客户端广播发现）
-- **dhcp_offer.pkt** - DHCP Offer（服务端提供 IP）
-- **dhcp_request.pkt** - DHCP Request（客户端确认请求）
-- **dhcp_ack.pkt** - DHCP Ack（服务端确认分配）
-- **学习要点**：DHCP 协议结构、四步流程、地址分配机制
+## 同构 server/client 变体（机制针对性演示）
 
-### 4. `dns_flow/` - DNS 协议
-- **dns_flow.pktl** - DNS 查询/响应流程
-- **dns_query.pkt** - DNS 查询请求
-- **dns_response.pkt** - DNS 查询响应
-- **学习要点**：DNS 协议结构、域名解析机制、记录类型
+| 目录 | 演示点 | 监听方式 |
+| --- | --- | --- |
+| `icmp_echo_server/` | **配方服务端入门样板**：单组 listen+reply 的 ICMP echo | 链路层（root） |
+| `dns_echo_listen/` | **DNS mock**：查询 → 带 A 记录应答；客户端两步 extract 复用 tid | UDP :53（root 绑定） |
+| `dns_trigger/` | **配方监听触发最小样例**：`wait:` 无值命中后触发发包 | UDP 55353（免 root） |
+| `tcp_handshake_listen/` | **TCP 握手 mock**：listen 纯 SYN → SYN-ACK（ack=seq+1），客户端 extract 服务端 ISN | 链路层（root） |
+| `sniffer_chat/` | **双进程对话模拟**：`sent.`/`reply.` 两种 extract 来源 + and/not sniffer 组合 | UDP 55353（免 root） |
 
-### 5. `tcp_data_flow/` - TCP 数据传输
-- **tcp_data_flow.pktl** - TCP 数据传输流程
-- **tcp_data.pkt** - TCP 数据发送（PSH|ACK）
-- **tcp_ack.pkt** - TCP 数据确认（ACK）
-- **学习要点**：TCP 数据传输机制、序列号/确认号、滑动窗口
+## 机制/素材类（保留原样，mock 形态不适用）
+
+- `network_icmp_bare/` — 真实 ICMP echo，裸 IP 走内核路由（代理/Clash fake-ip 环境
+  可用）。**内核即应答方**，mock 配方会与内核替答冲突，故保留真实探测形态。
+- `wait_timeout/` — 配方 `on_timeout` 超时处理机制演示（发备选包），非协议流程。
+- `bad_network/` — 重传/RST 时序重放（`--out` 生成 pcap 供 tcpdump 分析），
+  LSP 诊断测试引用其文件。
+- `quic_initial/` — QUIC Initial/Short 构造展示（保护前裸结构，AEAD/头部保护不在
+  DSL 范围），无应答语义可模拟。
+- `icmp_ping/` — 对**真实目标**发 1～10 次 ICMP ping 的实用配方（`icmp_ping_real_N`）。
+- `pcaps/` — pcap 素材文件。
 
 ## 使用方法
 
-### 查看协议结构
+### 查看协议结构（engine 概览）
+
 ```bash
-# 查看 ICMP Ping 协议结构
-prping engine icmp_ping
-
-# 查看 HTTP 流程协议结构
-prping engine http_flow
-
-# 查看 DHCP 流程协议结构
-prping engine dhcp_flow
-
-# 查看 DNS 流程协议结构
-prping engine dns_flow
-
-# 查看 TCP 数据传输协议结构
-prping engine tcp_data_flow
+prping engine examples/icmp_mock/server.pktl    # 配方概览（global + 步骤）
+prping engine examples/icmp_mock/reply.pkt      # 单包层栈 + 字节 hexdump
+prping engine examples/network_icmp_bare        # 带同名 .pktl 的目录可省略文件名
 ```
 
-### 查看单个协议包结构
+### 运行 mock 会话（两个终端）
+
 ```bash
-# 查看 ICMP Request 包结构
-prping engine examples/icmp_ping/icmp_request.pkt
+# 终端 1 —— 服务端配方（多数 mock 需 root：链路层监听 / 绑定低位端口）
+sudo prping packet examples/icmp_mock/server.pktl
 
-# 查看 HTTP Request 包结构
-prping engine examples/http_flow/http_request.pkt
-
-# 查看 DNS Query 包结构
-prping engine examples/dns_flow/dns_query.pkt
+# 终端 2 —— 客户端配方
+sudo prping packet examples/icmp_mock/client.pktl 127.0.0.1
 ```
 
-### 发送协议包
-```bash
-# 发送 ICMP Ping（需要 root 权限；ICMP 无端口，--raw 用裸 HOST）
-sudo prping packet icmp_ping 127.0.0.1 --raw --wait 1
-
-# 发送 4 次 ICMP Echo Request（使用 pktlang 配方）
-sudo prping packet examples/icmp_ping/icmp_ping_real_4.pktl --raw --wait 1 -p ip=127.0.0.1
-
-# 发送 HTTP 请求（需要 HTTP 服务监听）
-prping packet http_flow 127.0.0.1:80 --wait 1
-
-# 发送 DHCP 流程（需要 root 权限；UDP 广播无目标端口）
-sudo prping packet dhcp_flow --raw --wait 2
-
-# 发送 DNS 查询（需要 DNS 服务监听）
-prping packet dns_flow 127.0.0.1:53 --wait 1
-
-# 发送 TCP 数据传输（需要 TCP 服务监听）
-prping packet tcp_data_flow 127.0.0.1:80 --wait 1
-
-# 发送 ARP 请求（需要 root 权限；链路层帧，--raw 用裸 IP）
-sudo prping packet link_arp 127.0.0.1 --raw --wait 1
-```
+免 root 的组合：`dns_trigger/`、`sniffer_chat/`（UDP 55353）、
+`udp_mock/` 的 VNC 步骤（高位端口）、`dns_echo_listen/` 的客户端（payload 模式）。
 
 ### 参数注入
+
 ```bash
-# 注入目标 IP（ICMP 无端口，--raw 用裸 HOST）
-sudo prping packet icmp_ping 127.0.0.1 --raw -p ip=192.168.1.1
-
-# 注入目标 IP 和端口
-prping packet http_flow 127.0.0.1:80 -p ip=192.168.1.1,port=8080
-
-# 注入 MAC 地址（ARP 链路层帧）
-sudo prping packet icmp_ping 127.0.0.1 --raw -p mac=00:11:22:33:44:55
+# 目标 IP/端口注入（-p）；global 覆盖注入（-g）
+sudo prping packet examples/icmp_ping/icmp_ping_real_4.pktl --raw --wait 1 -p ip=192.168.1.1
+prping packet examples/dns_trigger/client.pktl 127.0.0.1:55353 -p port=55353
 ```
 
 ## 协议学习建议
 
-1. **从简单开始**：先学习 ICMP Ping，了解网络协议的基本结构
-2. **理解分层**：学习 HTTP、DNS 等应用层协议，理解协议栈的分层设计
-3. **掌握状态机**：学习 TCP 数据传输，理解序列号和确认号机制
-4. **实践验证**：使用 `prping engine` 查看协议结构，使用 `prping packet` 发送协议包
+1. **从形态标杆开始**：`icmp_mock/` 理解 mock server/client 的双向配方结构；
+2. **理解监听方式自动选择**：包内有 udp → 数据报监听；无传输层 → 链路层监听
+   （对照 `dns_trigger/` 与 `icmp_mock/` 的 listen.pkt）；
+3. **掌握 extract 数据流**：`reply.`/`sent.`/`reply.peer.*` 三种来源，
+   对照 `sniffer_chat/` 与 `dns_echo_listen/`；
+4. **进阶动态协议**：`tcp_http_mock/` 的 seq/ack 全链 extract 推导。
 
 ## 相关资源
 
-- **eng_lib/headers.pkt** - OSI 模型各层协议头定义（包含详细学习注释）
-- **eng_lib/quic.pkt** - QUIC 协议实现
-- **eng_lib/tls.pkt** - TLS/SSL 安全传输层协议
-- **docs/protocol-learning.md** - 详细的协议学习指南
-- **PROTOCOL_SUPPORT.md** - 完整的协议支持清单
+- `eng_lib/` — 25+ 协议 .pkt 库文件（headers/dhcp/quic/tls/…，带 RFC 引用注释）
+- `docs/protocol-learning.md` — 协议学习指南
+- `docs/claude-rules/engine.md` — 配方/extract/sniffer 语义权威文档
+- `PROTOCOL_SUPPORT.md` — 协议支持清单

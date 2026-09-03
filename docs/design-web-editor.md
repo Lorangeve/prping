@@ -556,7 +556,7 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 
 1. `tree` → root 为二进制同目录 `examples/`，107 条目、目录在前、含 .pkt、无非
    `.pkt(l)` 文件、`writable: true`；
-2. `read root:"ws" app_http/http_get.pkt` → ok + `writable: true`；`read net.pkt`
+2. `read root:"ws" http_mock/http_get.pkt` → ok + `writable: true`；`read net.pkt`
    （库）→ ok + `writable: false`；
 3. `save zz_e2e_test.pkt` → 读回一致、目录树出现；`delete` → 再读报错；
 4. `save ../evil.pkt` / `x.txt` / `a//b.pkt` / `read C:/win.pkt` → 全部拒绝（i18n 文案）；
@@ -576,7 +576,7 @@ CLI 帮助走 cli locale（`cmd.web` / `usage_web` / `footer_web` / `options.web
 
 执行端到端（Node `WebSocket` 客户端对真实服务端，全部通过）：
 
-1. `run` 配方（`transport_udp`，target 127.0.0.1:9、`--wait 1`）→ ack `{run}` →
+1. `run` 配方（`bad_network`，target 127.0.0.1:9、`--wait 1`）→ ack `{run}` →
    `run_out` 逐行（构建层栈/发送/hexdump/无应答提示）→ `run_exit` code 0；
 2. 持续监听（`wait: true`，sniffer `.pkt` 高位端口）→ 监听横幅流出；期间再次
    `run` → `ok:false`（`web.run_busy`）；

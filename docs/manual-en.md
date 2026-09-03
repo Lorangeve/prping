@@ -906,13 +906,20 @@ prping engine --pcap x.pcap --to-pkt dir/ --structured  # semantic structured co
 **Extension-less arguments auto-locate the pktl**: when the `engine`/`packet` file
 argument has no extension, prping first tries `<arg>.pktl` (in the current directory /
 the argument's directory), and if that file does not exist, tries the same-named
-folder's `<arg>/<basename>.pktl`. The examples are organized this way — one folder
-per pktl (`examples/<name>/<name>.pktl` plus its `.pkt` files):
+folder's `<arg>/<basename>.pktl`. Example folders with a same-named `.pktl`
+(network_icmp_bare, quic_initial, bad_network, ...) are organized this way —
+one folder per pktl (`examples/<name>/<name>.pktl` plus its `.pkt` files):
 
 ```bash
-prping engine examples/tcp_handshake    # = examples/tcp_handshake/tcp_handshake.pktl
-prping packet tcp_handshake 127.0.0.1:80 --wait 1   # (from inside examples/)
+prping engine examples/network_icmp_bare    # = examples/network_icmp_bare/network_icmp_bare.pktl
+prping packet network_icmp_bare 127.0.0.1 --raw --wait 2   # (from inside examples/)
 ```
+
+The *_mock series (`icmp_mock`, `http_mock`, `dhcp_mock`, `tcp_data_mock`,
+`tcp_http_mock`, `arp_mock`, `udp_mock`, ...) follows the **mock server/client
+form** — a `server.pktl` + `client.pktl` recipe pair (no same-named pktl), run
+by path: `prping packet examples/icmp_mock/server.pktl` plus, in another
+terminal, `prping packet examples/icmp_mock/client.pktl 127.0.0.1`.
 
 ### pcap → .pkt/.pktl conversion (`engine --pcap --to-pkt`)
 
@@ -1081,7 +1088,7 @@ sending**: AF_PACKET delivers by the frame's dst MAC (`--iface` selects the NIC,
 default lo); the target is only used for side logic such as IP source-address filling:
 
 ```bash
-prping packet examples/link_arp/arp_request.pkt --raw   # ARP request (broadcast) sent directly
+prping packet examples/arp_mock/arp_request.pkt --raw   # ARP request (broadcast) sent directly
 #   target: none — link-layer frame, no IP target (AF_PACKET sends by the frame dst MAC)
 ```
 
@@ -1106,19 +1113,20 @@ A `.pktl` (package list) file runs several `.pkt` files in order as one session
 **global store** — any step can read values set by any earlier step, not just the previous one:
 
 ```text
-# examples/dns_recipe/dns_recipe.pktl
+# examples/dns_echo_listen/client.pktl
 global:
-- name: tid             # shared variable (init optional; -g overrides init)
-  init: 0x4321
+- tid=0x1111           # shared variable (inline init; -g overrides init)
 
 recipe:
-- packet: recipe_query.pkt # send recipe_query.pkt, wait for the reply, extract dns.id → global.tid
-  wait: 1
+- packet: client.pkt        # send the DNS query, wait for the reply, extract dns.id → global.tid
+  wait: 2
   extract:
   - name: tid
     from: reply.dns.id    # dissected reply field (layer.field, same field set as sniffer)
     as: hex               # default int; also hex / str / bytes
-- packet: recipe_query.pkt # bare filename = no extra options
+- packet: client_reuse.pkt  # resend a query reusing global("tid") (server has two listen groups)
+  wait: 2
+  delay: 0.5
 ```
 
 - **Syntax**: `global:` / `recipe:` section headers and step items (`- `) start at
@@ -1210,20 +1218,40 @@ recipe:
   step options, and validates extract field names — the expression form
   validates its `reply(...)` leaves too). `packet FILE.pktl` prints the same
   param summary in its header.
-- **Examples** (one folder per protocol — a same-named `.pktl` plus its `.pkt`
-  files, every one a **sendable multi-packet flow**): `examples/tcp_handshake/`
-  (TCP three-way handshake: SYN → ACK → HTTP GET, seq/ack chained via
-  `global("cseq") + 1` arithmetic), `examples/transport_udp/` (UDP send tests:
-  DNS query + VNC banner payloads), `examples/dns_recipe/` (DNS query: extract
-  the reply `dns.id` and reuse it), `examples/network_icmp_bare/` (ICMP echo:
-  sniffer + extract id/seq reuse, bare IP through kernel routing; `--raw` needs
-  root), `examples/app_http/` (HTTP GET/POST over TCP, `-p port=` injection),
-  `examples/link_arp/` (ARP request/reply), `examples/quic_initial/`
-  (QUIC Initial/Short headers), `examples/icmp_mock/` (a recipe **pair simulating
-  ICMP**: server.pktl link-layer listen-trigger + client.pktl multi-step flow with
-  extract reuse; reply seq offset +1000 as a recipe marker to rule out the kernel's
-  own echo reply on loopback).
-  Run e.g. `prping packet examples/dns_recipe 127.0.0.1:5353 --wait 1`.
+- **Examples** all follow the **mock server/client form** (a `server.pktl` recipe:
+  valueless `wait:` listen + extract + triggered send steps; a `client.pktl`
+  recipe: send + `wait: N` + sniffer verification + extract; full catalog in
+  `examples/README.md`):
+  `examples/icmp_mock/` (**ICMP mock, the form's reference**: server.pktl
+  link-layer listen-trigger + client.pktl multi-step flow with extract reuse;
+  reply seq offset +1000 as a recipe marker to rule out the kernel's own echo
+  reply on loopback),
+  `examples/http_mock/` (**HTTP mock**: link-layer listen GET/POST → 200 OK),
+  `examples/dhcp_mock/` (**DHCP mock**: DORA four steps, listen :67 → Offer/Ack
+  unicast replies),
+  `examples/tcp_data_mock/` (**TCP data mock**: data segment → pure ACK,
+  ack=seq+payload-length),
+  `examples/tcp_http_mock/` (**TCP handshake + HTTP mock**: the client extracts
+  the server ISN and builds ACK/GET dynamically),
+  `examples/arp_mock/` (**ARP mock**: who-has → is-at unicast reply + gratuitous
+  ARP demo),
+  `examples/udp_mock/` (**UDP mock**: one server dispatching DNS answers and VNC
+  banners by port),
+  `examples/dns_echo_listen/` (**DNS mock**: query → A-record answer; client
+  extracts and reuses `dns.id` across two steps),
+  `examples/dns_trigger/` (**listen-trigger minimal sample**: a valueless `wait:`
+  step matches the query → extract → a later step sends the answer),
+  `examples/icmp_echo_server/` (**recipe-server starter**: one listen+reply group),
+  `examples/tcp_handshake_listen/` (**TCP handshake mock**: listen pure SYN →
+  SYN-ACK),
+  `examples/sniffer_chat/` (**two-process conversation**: sent/reply extract
+  sources). Mechanism/asset folders keep their original form:
+  `examples/network_icmp_bare/` (real ICMP echo, bare IP through kernel routing —
+  the kernel is the responder), `examples/wait_timeout/` (**wait timeout**:
+  `on_timeout` sends a fallback packet), `examples/bad_network/` (retransmission/
+  RST timing replay), `examples/quic_initial/` (QUIC Initial/Short construction),
+  `examples/icmp_ping/` (real-target ping recipes), `examples/pcaps/`.
+  Run e.g. `prping packet examples/dns_echo_listen/client.pktl 127.0.0.1:53`.
 
 ### Loopback kernel echo vs. recipe replies
 

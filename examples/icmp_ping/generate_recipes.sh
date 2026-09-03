@@ -39,7 +39,7 @@ EOF
 
     # 生成 recipe 步骤
     for j in $(seq 1 "$i"); do
-        echo "- pkg: icmp_ping_step.pkt" >> "$FILE"
+        echo "- packet: icmp_ping_step.pkt" >> "$FILE"
         echo "  wait: 1" >> "$FILE"
         echo "  extract:" >> "$FILE"
         echo "  - name: id${j}" >> "$FILE"

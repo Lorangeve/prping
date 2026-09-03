@@ -1,8 +1,0 @@
-# 配方步骤（dns_recipe / udp_flow 配方复用）：DNS 查询——id 来自配方全局 tid
-# （global("tid", 0x4321)：未注入时用默认值 0x4321，独立 packet 也直接可用）
-# 目标地址可注入：-p ip=127.0.0.1（默认本机回环）
-q = dns(id=global("tid", 0x4321), questions=["example.com"])
-full = use(q) |> udp(dport=53) |> ipv4(dst=params("ip", "127.0.0.1")) |> eth()
-
-export:
-- full

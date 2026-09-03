@@ -1,0 +1,24 @@
+# client 配方 · 步骤 1：发 TCP SYN（三次握手第 1 段），wait: 2 校验 SYN-ACK 并
+# extract 服务端 ISN 写 global.sseq——**动态提取对端序号**是真实三次握手的核心动作
+# （tcp_handshake 教学里"客户端不知道服务端 ISN，只能双方都硬编码"的局限在此闭环）。
+#
+# 客户端 ISN 固定 0x1000（global.cseq，-g cseq=0x... 可覆盖）；sniffer 的 ack=0x1001
+# = cseq+1 字面量（SYN-ACK 的确认号必然是 SYN seq+1——与 server 的 ack=r_seq+1 对称）。
+# sport 固定 40000：sniffer 要用字面量 dport=40000 匹配应答方向（应答帧的 dport =
+# 我方 sport）——固定值便于教学对照，真实场景内核随机选临时端口。
+# sniffer 的 flags=bor(syn(), ack()) 是**字节形态**（与 SYN-ACK flags 字段的 2 字节
+# 大端 0x00,0x12 比较）；server 侧 listen_syn 用字符串形态 flags="syn" 精确串比较，
+# 两种形态对照着读（内核噪声 RST 的 flags 字节 rst|ack=0x14 ≠ syn|ack=0x12，
+# 字面量 ack=0x1001 也把乱序噪声挡在外面）。
+#
+# 裸 IP 外层 + raw: true（有 tcp 传输层的发送必须显式 raw，否则走 TCP 载荷建连）。
+# src 必须显式写：裸 IP 构造缺省 src=0.0.0.0，而 IP_HDRINCL 裸发送内核不替你补源
+# 地址——server 会把帧里的 0.0.0.0 提取成"本机 IP"（r_dst_ip）回包，全链路地址就错了。
+# dport 用 params 注入（缺省 80，http 分派白名单端口，见 listen_get.pkt 注释）。
+# cseq 缺省 0x1000 仅用于独立解析/展示（对照 tcp_handshake 的 global("cseq", 0x1000)
+# 惯例）；配方运行时用 global: init 的同一教学值，-g cseq= 可覆盖。
+payload = raw(bytes="")
+use(payload) |> tcp(sport=40000, dport=params("port", 80), seq=global("cseq", 0x1000), flags=syn(), window=65535) |> ipv4(src=params("sip", "127.0.0.1"), dst=params("ip", "127.0.0.1"))
+
+sniffer:
+  - match tcp(sport=80, dport=40000, flags=bor(syn(), ack()), ack=0x1001)

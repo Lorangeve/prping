@@ -1,0 +1,28 @@
+# server 配方 · 第 2 组步骤 2（触发发包）：构造 HTTP/1.1 200 OK 响应发回请求方。
+#
+# seq/ack 推导（本目录最核心的动态链，对照 README 时序表逐项对账）：
+#   r2_seq = 客户端 GET 的 tcp.seq = 0x1001（GET 载荷 38 字节，占 seq 0x1001..0x1026）
+#   r2_ack = 客户端 GET 的 tcp.ack = 0x2001（= 服务端 ISN 0x2000 + 1）
+#   响应 seq = r2_ack：**对端的 ack 直接当自己的 seq 用**——客户端已确认到 0x2001，
+#            即"服务端下一个该发的字节序号"，响应数据正好从 0x2001 起。这是 TCP
+#            两条方向各推一条数轴的自然结果（client.pktl 的 tcp_ack.pkt 是镜像操作：
+#            客户端也拿 SYN-ACK 的 seq+1 当自己的 ack）。
+#   响应 ack = r2_seq + 38：服务端确认收下整个 GET。38 = 0x26 字节 =
+#            "GET / HTTP/1.1\r\n"(14+2) + "Host: mock.example\r\n"(18+2) + 空行"\r\n"(2)
+#            ——即下一期望序号 = 0x1001 + 0x26 = 0x1027。GET 的字节数是**两端手工
+#            对齐的常量**（http_get.pkt 改 headers 时必须同步这里；教学 mock 不自动
+#            算长度；38 已用 packet --out + engine --pcap 实测：ipv4 total 78 =
+#            20(IP) + 20(TCP) + 38(载荷)）。
+#
+# http 层构造（eng_lib/headers.pkt）：start_line=状态行整体、headers=头部行列表、
+# body=响应体；http() 拼接 = 每行+\r\n + 空行 \r\n + body。Content-Length 与 body
+# 手工保持一致（24 = "hello from tcp_http_mock"）。响应行的反解与请求行不同：
+# start_line 以 "HTTP/" 开头 → method/path=None、version=整行 "HTTP/1.1 200 OK"
+# ——client 的 http_get.pkt sniffer 正是用 version 精确字面量钉住状态行。
+#
+# 裸 IP 外层 + raw: true（tcp 传输层必须显式 raw，同 synack.pkt）；
+# r2_src_ip（请求方）→ dst、r2_dst_ip（本机）→ src，地址互换。
+# global 缺省值仅用于独立解析/展示（prping engine 单跑本文件时的占位，取时序表教学
+# 值 → 单跑展示 seq=0x2001 / ack=0x1027）；配方运行时由 listen_get 步骤 extract 注入真实值。
+resp = http(start_line="HTTP/1.1 200 OK", headers=["Content-Type: text/plain", "Content-Length: 24"], body="hello from tcp_http_mock")
+use(resp) |> tcp(sport=80, dport=global("r2_sport", 40000), seq=global("r2_ack", 0x2001), ack=global("r2_seq", 0x1001) + 38, flags=bor(psh(), ack()), window=65535) |> ipv4(src=global("r2_dst_ip", "127.0.0.1"), dst=global("r2_src_ip", "127.0.0.1"))

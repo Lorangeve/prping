@@ -1,8 +1,0 @@
-# free ARP（gratuitous ARP）：spa=tpa=192.168.81.1
-# 目的：宣布/探测该 IP 是否有其他设备使用
-# op=request，广播目的 ff:ff:ff:ff:ff:ff
-# sha = 本机接口 MAC；tha = 00:00:00:00:00:00（request 模式）
-
-fa = arp(op=request(), sha="2c:f0:5d:ac:20:6a", spa="192.168.81.1", tha="00:00:00:00:00:00", tpa="192.168.81.1")
-
-use(fa) |> eth(src_mac="2c:f0:5d:ac:20:6a", dst_mac="ff:ff:ff:ff:ff:ff")

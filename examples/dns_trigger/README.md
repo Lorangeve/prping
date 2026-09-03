@@ -11,8 +11,8 @@
 # 终端 1 —— 服务端（配方：wait 监听匹配查询 → 触发发包应答）
 prping packet examples/dns_trigger/server.pktl
 
-# 终端 2 —— 客户端：发查询 + --wait 校验应答
-prping packet --wait 2 examples/dns_trigger/client.pkt 127.0.0.1:55353
+# 终端 2 —— 客户端配方：发查询 + wait 校验应答
+prping packet examples/dns_trigger/client.pktl 127.0.0.1:55353
 ```
 
 客户端输出（节选）：`✓ reply matched: id=16962 flags=33280`——服务端配方触发的

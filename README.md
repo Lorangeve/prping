@@ -168,8 +168,8 @@ packet-dsl 引擎内置只保留字节原语（`hex`/`raw` + `concat`/`be16`/`co
 - **库导出隐式可见**：eng_lib 模块的 `export:` 无需 `import` 直接可用
   （如直接写 `net4(dst=...)`、`eth_frame(payload=hex("..."))`）；
   显式 `import` 仍支持，本地定义优先遮蔽。
-- 示例：`prping engine examples/tcp_handshake`（无扩展名自动定位到
-  `examples/tcp_handshake/tcp_handshake.pktl`）。
+- 示例：`prping engine examples/network_icmp_bare`（无扩展名自动定位到
+  `examples/network_icmp_bare/network_icmp_bare.pktl`）。
 
 ### 包构造引擎（同一 binary 的 `engine` / `packet` 子命令）
 
@@ -195,14 +195,24 @@ LSP / pcap）集成在 prping 同一 binary 中（与测量模式互斥）。
   （等回包）/ `delay:`（开始前等待，非首步）/ `params:` / `extract:`（回包反解取值写 global，如 `from:
   reply.dns.id`）/ `on_error: stop|continue`；`.pkt` 内用 `global("名"[, 默认])`
   值原语读取，`-g k=v`（`--global`）注入覆盖 init、`-p k=v`（`--params` 短选项）注入
-  普通参数；`engine FILE.pktl` 展示概览。示例（每协议一个文件夹，内含同名
-  `.pktl` 与其 `.pkt`，均为可实际发送的多包流程）：
-  `examples/tcp_handshake/`（TCP 三次握手：SYN → ACK → HTTP GET，seq/ack 经
-  `global` 链）、`examples/transport_udp/`（UDP：DNS 查询 + VNC 横幅）、
-  `examples/dns_recipe/`（DNS 查询 + extract 复用）、`examples/network_icmp_bare/`
-  （ICMP echo，裸 IP 走内核路由）、`examples/app_http/`（HTTP GET/POST over TCP）、
-  `examples/link_arp/`（ARP 请求/应答）、`examples/quic_initial/`（QUIC Initial/Short）。
-  运行如 `prping packet examples/dns_recipe 127.0.0.1:5353 --wait 1`。
+  普通参数；`engine FILE.pktl` 展示概览。示例统一为 **mock server/client 形式**
+  （服务端配方 server.pktl：`wait:` 无值监听 + extract + 触发发包；客户端配方
+  client.pktl：发包 + `wait: N` + sniffer 校验 + extract——形态标杆见
+  `examples/icmp_mock/`，完整清单见 `examples/README.md`）：
+  `examples/icmp_mock/`（ICMP echo：seq+1000 配方标记排除内核替答）、
+  `examples/http_mock/`（HTTP GET/POST → 200 OK，链路层监听）、
+  `examples/dhcp_mock/`（DORA 四步：:67 监听 → Offer/Ack 单播回包）、
+  `examples/tcp_data_mock/`（数据段 → 纯 ACK，ack=seq+len）、
+  `examples/tcp_http_mock/`（三次握手 + HTTP GET，客户端 extract 动态 seq/ack）、
+  `examples/arp_mock/`（who-has → is-at + gratuitous ARP）、
+  `examples/udp_mock/`（同一服务端按端口分派 DNS 应答与 VNC 横幅）、
+  `examples/dns_echo_listen/`（DNS 查询 → A 记录应答，客户端两步 extract 复用 tid）、
+  `examples/dns_trigger/`、`examples/icmp_echo_server/`、
+  `examples/tcp_handshake_listen/`、`examples/sniffer_chat/`（同构 server/client 变体）；
+  机制/素材类保留原样：`network_icmp_bare/`（真实 ICMP echo，裸 IP 走内核路由——
+  内核即应答方）、`wait_timeout/`（on_timeout）、`bad_network/`（重传/RST 时序）、
+  `quic_initial/`（QUIC 构造）、`icmp_ping/`（真实目标 ping 配方）、`pcaps/`。
+  运行如 `prping packet examples/dns_echo_listen/client.pktl 127.0.0.1:53`。
 
 ### 测量功能（万用表）
 

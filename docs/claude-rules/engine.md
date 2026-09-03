@@ -198,10 +198,12 @@
   与 `engine FILE.pktl` 按扩展名分派到**配方**（见下条）。
    **无扩展名参数自动定位 pktl**：`engine`/`packet` 收到不带扩展名的文件参数时，
    先试 `<arg>.pktl`（当前目录/参数所在目录下的同名文件），找不到该文件再试
-   `<arg>/<basename>.pktl`（同名文件夹里的同名 pktl）——examples 即以「每 pktl
-   及其 pkt 一个文件夹」组织（`examples/<name>/<name>.pktl` + 其 .pkt），
-   因此在 `examples/` 下 `prping engine transport_tcp` 与仓库根下
-   `prping engine examples/transport_tcp` 都直接可用（`main.rs::resolve_pktl_arg`）。
+   `<arg>/<basename>.pktl`（同名文件夹里的同名 pktl）——examples 里带同名 .pktl
+   的目录按此组织（`examples/<name>/<name>.pktl` + 其 .pkt，如 network_icmp_bare/
+   quic_initial/bad_network），因此在 `examples/` 下 `prping engine quic_initial`
+   与仓库根下 `prping engine examples/quic_initial` 都直接可用
+   （`main.rs::resolve_pktl_arg`）；*_mock 系列是 server.pktl + client.pktl
+   双配方（无同名 pktl），按路径运行 `prping packet examples/icmp_mock/server.pktl`。
 - **配方（.pktl = package list）**：`src/recipe.rs` 解析清单（`global:` 段声明跨步骤
   共享变量 + `recipe:` 段按顺序列出步骤）；`pkg.rs::send_recipe` 执行——每步 = 一个
   `.pkt`（解析/求值注入当前 global 快照），步骤项键 `- packet: 文件`（旧键 `pkg:`
@@ -241,25 +243,38 @@
   （表达式形态遍历 `reply(...)` 叶子校验）。
   `send_packets`/`send_recipe` 共用发送循环 `pkg.rs::send_module`（`SendCtx` 携带
   module/sources/params/globals + 回包回调 `on_reply` + 发包回调 `on_sent`，
-  均 `ReplyCb`）。示例（每协议一个文件夹，
-  内含同名 `.pktl` 与其 `.pkt`，均为可实际发送的多包流程）：
-  `examples/tcp_handshake/`（TCP 三次握手：SYN → ACK → HTTP GET，seq/ack 经
-  `global` 算术链）/ `examples/transport_udp/`（UDP：DNS 查询 + VNC 横幅）/
-  `examples/dns_recipe/`（DNS 查询 + extract 复用）/ `examples/network_icmp_bare/`
-  / `examples/dns_echo_listen/`（**DNS 发包/回包模拟**：服务端模板构造带 A 记录的
-  应答，id 回显、客户端校验）
-  / `examples/tcp_handshake_listen/`（**TCP 三次握手模拟**：`--wait --raw` 服务端
-  按 sniffer 匹配 SYN、模板构造 SYN-ACK（ack=seq+1/地址互换），客户端校验并回 ACK）
-  / `examples/sniffer_chat/`（**双进程通信模拟**：裸 `--wait` 服务端按 sniffer
-  规则回显 + 客户端配方 sent/reply extract——见该目录 README.md）
-  / `examples/wait_timeout/`（**wait 超时处理**：`on_timeout` 发备选包）
-  / `examples/icmp_mock/`（**配方对模拟 ICMP**：server.pktl 链路层监听触发发包 +
-    client.pktl 两步 request + extract 复用——配方可含任意多包；回包 seq 偏移
-    +1000 作配方标记，排除回环内核替答）
-  / `examples/dns_trigger/`（**配方监听触发**：`wait:` 无值步骤匹配 DNS 查询 →
-  extract id/`reply.peer.port` 对端 → 触发步骤发包应答——纯配方服务端）
-  （ICMP echo，裸 IP 走内核路由）/ `examples/app_http/`（HTTP GET/POST over TCP）/
-  `examples/link_arp/`（ARP 请求/应答）/ `examples/quic_initial/`（QUIC Initial/Short）。
+  均 `ReplyCb`）。示例统一为 **mock server/client 形式**（形态标杆 `examples/icmp_mock/`：
+  server.pktl = `wait:` 无值监听 + extract + 触发发包，client.pktl = 发包 +
+  `wait: N` + sniffer 校验 + extract 复用；完整清单见 `examples/README.md`）：
+  `examples/icmp_mock/`（**ICMP mock**：链路层监听触发发包 + 两步 request，回包 seq
+    偏移 +1000 作配方标记，排除回环内核替答）
+  / `examples/http_mock/`（**HTTP mock**：链路层监听 GET/POST → 200 OK，客户端 raw
+    TCP；http 反解分派要求 dport=80/8080）
+  / `examples/dhcp_mock/`（**DHCP mock**：UDP :67 监听 Discover/Request → Offer/Ack
+    单播回包，DORA 四步；裸字节数组 + 固定 xid）
+  / `examples/tcp_data_mock/`（**TCP 数据 mock**：监听 PSH|ACK 数据段 → 纯 ACK
+    （ack=seq+载荷长度），两轮 seq/ack 推进）
+  / `examples/tcp_http_mock/`（**TCP 握手+HTTP mock**：listen SYN → SYN-ACK →
+    listen GET → 200 OK；客户端 extract 服务端 ISN 动态构造 ACK/GET）
+  / `examples/arp_mock/`（**ARP mock**：链路层监听 who-has → is-at 单播应答 +
+    gratuitous ARP 演示）
+  / `examples/udp_mock/`（**UDP mock**：同一服务端按端口分派 DNS 应答与 VNC 横幅）
+  / `examples/dns_echo_listen/`（**DNS mock**：UDP :53 监听查询 → A 记录应答；客户端
+    两步 extract 复用 tid——原 dns_recipe 的 extract 教学点并入）
+  / `examples/dns_trigger/`（**配方监听触发最小样例**：`wait:` 无值步骤匹配 DNS 查询
+    → extract id/`reply.peer.port` 对端 → 触发步骤发包应答）
+  / `examples/icmp_echo_server/`（**配方服务端入门样板**：单组 listen+reply 的 ICMP
+    echo 服务端）
+  / `examples/tcp_handshake_listen/`（**TCP 握手 mock**：listen 纯 SYN → SYN-ACK
+    （ack=seq+1/地址互换），客户端 extract 服务端 ISN）
+  / `examples/sniffer_chat/`（**双进程对话模拟**：sent/reply 两种 extract 来源 +
+    and/not sniffer 组合——见该目录 README.md）。
+  机制/素材类保留原样（mock 形态不适用）：`examples/network_icmp_bare/`（真实 ICMP
+  echo，裸 IP 走内核路由——内核即应答方，mock 配方会与内核替答冲突）/
+  `examples/wait_timeout/`（**wait 超时处理**：`on_timeout` 发备选包——机制演示）/
+  `examples/bad_network/`（重传/RST 时序重放，`--out` 生成 pcap 供 tcpdump 分析）/
+  `examples/quic_initial/`（QUIC Initial/Short 构造展示，保护前裸结构、无应答语义）/
+  `examples/icmp_ping/`（对真实目标的 1-10 次 ping 配方）/ `examples/pcaps/`（pcap 素材）。
 
 ## hex/raw 为基 + 层 bytes 直喂
 

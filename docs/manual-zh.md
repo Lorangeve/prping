@@ -884,13 +884,20 @@ prping engine --pcap x.pcap --to-pkt dir/ --structured  # 语义结构化转码
 
 **无扩展名参数自动定位 pktl**：`engine`/`packet` 的文件参数不带扩展名时，
 先找 `<arg>.pktl`（当前目录/参数所在目录），找不到该文件再找同名文件夹里的
-`<arg>/<basename>.pktl`。examples 即按此组织——每示例一个文件夹
+`<arg>/<basename>.pktl`。examples 里带同名 `.pktl` 的目录（network_icmp_bare、
+quic_initial、bad_network 等）按此组织——每示例一个文件夹
 （`examples/<name>/<name>.pktl` + 其 .pkt），如：
 
 ```bash
-prping engine examples/tcp_handshake    # = examples/tcp_handshake/tcp_handshake.pktl
-prping packet tcp_handshake 127.0.0.1:80 --wait 1   # （在 examples/ 目录下）
+prping engine examples/network_icmp_bare    # = examples/network_icmp_bare/network_icmp_bare.pktl
+prping packet network_icmp_bare 127.0.0.1 --raw --wait 2   # （在 examples/ 目录下）
 ```
+
+*_mock 系列（`icmp_mock`、`http_mock`、`dhcp_mock`、`tcp_data_mock`、
+`tcp_http_mock`、`arp_mock`、`udp_mock` 等）是 **server.pktl + client.pktl
+双配方**的 mock server/client 形式（无同名 pktl），按路径运行：
+`prping packet examples/icmp_mock/server.pktl` + 另一终端
+`prping packet examples/icmp_mock/client.pktl 127.0.0.1`。
 
 ### pcap → .pkt/.pktl 转码（`engine --pcap --to-pkt`）
 
@@ -1036,7 +1043,7 @@ Windows 补充说明：
 目的 MAC 直发（`--iface` 指定网卡，默认 lo），目标仅用于 IP 源地址填充等旁路逻辑：
 
 ```bash
-prping packet examples/link_arp/arp_request.pkt --raw   # ARP 请求（广播帧）直接发出
+prping packet examples/arp_mock/arp_request.pkt --raw   # ARP 请求（广播帧）直接发出
 #   target: none — 链路层帧，无需 IP 目标（AF_PACKET 按帧内目的 MAC 直发）
 ```
 
@@ -1057,19 +1064,20 @@ over IP、ARP over eth）在 `engine FILE.pkt` 逐包展示时橙色提示「本
 并用 **global 存储**跨步骤共享数据——不只是上一步，任意步骤都能读：
 
 ```text
-# examples/dns_recipe/dns_recipe.pktl
+# examples/dns_echo_listen/client.pktl
 global:
-- name: tid             # 跨步骤共享变量（init 可选；-g 键值覆盖 init）
-  init: 0x4321
+- tid=0x1111           # 跨步骤共享变量（一行内联 init；-g 键值覆盖 init）
 
 recipe:
-- packet: recipe_query.pkt  # 发 recipe_query.pkt，等回包，提取 dns.id → global.tid
-  wait: 1
+- packet: client.pkt        # 发 DNS 查询，等应答，提取 dns.id → global.tid
+  wait: 2
   extract:
   - name: tid
     from: reply.dns.id    # 回包反解字段（层.字段，与 sniffer 字段集一致）
     as: hex               # 默认 int；可选 hex / str / bytes
-- packet: recipe_query.pkt # 裸文件名 = 无额外选项
+- packet: client_reuse.pkt  # 复用 global("tid") 再发查询（服务端配方两组监听应答）
+  wait: 2
+  delay: 0.5
 ```
 
 - **语法**：`global:` / `recipe:` 段头与步骤项（`- `）在行首；步骤选项行缩进。
@@ -1135,23 +1143,30 @@ recipe:
   提前报错，与 extract 字段校验同一哲学）+ 步骤选项，并校验 extract 的
   层/字段名——表达式形态同样校验 `reply(...)` 叶子）；`packet FILE.pktl` 执行时
   header 同样汇总打印参数名。
-- **示例**（每协议一个文件夹，内含同名 `.pktl` 与其 `.pkt`，均为可实际发送的
-  **多包流程**）：
-  `examples/tcp_handshake/`（TCP 三次握手：SYN → ACK → HTTP GET，seq/ack 经
-  `global("cseq") + 1` 算术链）、
-  `examples/transport_udp/`（UDP 发包：DNS 查询 + VNC 横幅两种载荷）、
-  `examples/dns_recipe/`（DNS 查询：提取应答 dns.id 复用）、
-  `examples/network_icmp_bare/`（ICMP echo：sniffer + extract id/seq 复用，裸 IP
-  走内核路由，`--raw` 需 root）、
-  `examples/app_http/`（HTTP GET/POST over TCP，`-p port=` 注入端口）、
-  `examples/link_arp/`（ARP 请求/应答）、
-  `examples/quic_initial/`（QUIC Initial/Short 长/短头）、
-  `examples/dns_trigger/`（**监听触发**：配方 `wait:` 无值匹配查询 → extract →
-  触发步骤发包应答，纯配方服务端）、
-  `examples/wait_timeout/`（**wait 超时处理**：`on_timeout` 发备选包）、
-  `examples/icmp_mock/`（**配方对模拟 ICMP 发包/回包**：server.pktl 监听触发 +
-  client.pktl 多包流程；回包 seq 偏移 +1000 作配方标记，排除回环内核替答）。
-  运行如 `prping packet examples/dns_recipe 127.0.0.1:5353 --wait 1`。
+- **示例**统一为 **mock server/client 形式**（服务端配方 `server.pktl`：`wait:` 无值
+  监听 + extract + 触发发包；客户端配方 `client.pktl`：发包 + `wait: N` + sniffer
+  校验 + extract；完整清单见 `examples/README.md`）：
+  `examples/icmp_mock/`（**ICMP mock，形态标杆**：链路层监听触发发包 + client.pktl
+  多包流程；回包 seq 偏移 +1000 作配方标记，排除回环内核替答）、
+  `examples/http_mock/`（**HTTP mock**：链路层监听 GET/POST → 200 OK）、
+  `examples/dhcp_mock/`（**DHCP mock**：DORA 四步，:67 监听 → Offer/Ack 单播回包）、
+  `examples/tcp_data_mock/`（**TCP 数据 mock**：数据段 → 纯 ACK，ack=seq+载荷长度）、
+  `examples/tcp_http_mock/`（**TCP 握手+HTTP mock**：客户端 extract 服务端 ISN 动态
+  构造 ACK/GET）、
+  `examples/arp_mock/`（**ARP mock**：who-has → is-at 单播应答 + gratuitous ARP）、
+  `examples/udp_mock/`（**UDP mock**：同一服务端按端口分派 DNS 应答与 VNC 横幅）、
+  `examples/dns_echo_listen/`（**DNS mock**：查询 → A 记录应答，客户端两步 extract
+  复用 tid）、
+  `examples/dns_trigger/`（**监听触发最小样例**：配方 `wait:` 无值匹配查询 →
+  extract → 触发步骤发包应答）、
+  `examples/icmp_echo_server/`（**配方服务端入门样板**：单组 listen+reply）、
+  `examples/tcp_handshake_listen/`（**TCP 握手 mock**：listen 纯 SYN → SYN-ACK）、
+  `examples/sniffer_chat/`（**双进程对话模拟**：sent/reply 两种 extract 来源）。机制/
+  素材类保留原样：`examples/network_icmp_bare/`（真实 ICMP echo，裸 IP 走内核路由——
+  内核即应答方）、`examples/wait_timeout/`（**wait 超时处理**：`on_timeout` 发备选包）、
+  `examples/bad_network/`（重传/RST 时序重放）、`examples/quic_initial/`（QUIC 
+  Initial/Short 构造）、`examples/icmp_ping/`（真实目标 ping 配方）、`examples/pcaps/`。
+  运行如 `prping packet examples/dns_echo_listen/client.pktl 127.0.0.1:53`。
 
 ### 回环内核替答与配方标记（监听/回包验证）
 

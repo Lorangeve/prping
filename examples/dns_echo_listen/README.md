@@ -14,8 +14,8 @@
 # 终端 1 —— 服务端配方
 sudo prping packet examples/dns_echo_listen/server.pktl
 
-# 终端 2 —— 客户端：payload 模式发查询，--wait 2 等并校验应答
-prping packet --wait 2 examples/dns_echo_listen/client.pkt 127.0.0.1:53
+# 终端 2 —— 客户端配方（两步：查询 + 校验提取 → 复用 tid 再查询）
+prping packet examples/dns_echo_listen/client.pktl 127.0.0.1:53
 ```
 
 客户端输出（节选）：`✓ reply matched: id=16962 flags=33280`——服务端配方回的应答
@@ -45,15 +45,27 @@ recipe:
   `answers=[["example.com", 1, 1, 300, ip4("93.184.216.34")]]`（**列表元组**形式
   的 A 记录，`ip4(...)` 生成记录字节）。
 
-## 客户端（client.pkt，未变）
+## 客户端配方（client.pktl，两步）
 
-```pkt
-q = dns(id=0x4242, questions=["example.com"])
-use(q) |> udp(dport=53) |> ipv4(dst=params("ip", "127.0.0.1")) |> eth()
+```pktl
+global:
+- tid=0x1111
 
-sniffer:
-  - match dns(id=id, flags=0x8180)   # id 与发包一致（SentField），应答位
+recipe:
+- packet: client.pkt   # 发查询（id=0x4242）+ sniffer 校验应答（内容未变）
+  wait: 2
+  extract:
+  - name: tid
+    from: reply.dns.id
+    as: hex            # 提取应答 dns.id → global.tid
+- packet: client_reuse.pkt   # 复用 global("tid") 再发查询（第二步校验同款）
+  wait: 2
+  delay: 0.5           # 给服务端配方重开下一轮监听留时间（回环客户端太快会错过）
 ```
+
+payload 模式（UDP 载荷经内核送达，无需 root）；`id=id` 是发包字段引用（SentField），
+要求回包 dns.id 与发包一致。第二步复用提取的 tid——原 `dns_recipe/` 的「extract 回包
+字段 → global → 跨步骤复用」教学点已并入本目录。
 
 ## 验证（字节级，不依赖 root/网络）
 
@@ -68,3 +80,20 @@ sniffer:
 | 配方服务端（本示例） | `server.pktl` | extract → 触发步骤发包（标准 :53 + A 记录） |
 | 配方服务端（多步编排演示） | `examples/dns_trigger/` | 同款触发模式，端口 55353 |
 | 纯监听 | `packet --wait listen.pkt` | 无（只打印匹配详情） |
+
+## DNS 协议学习速查（原 dns_flow/ 的学习注释并入）
+
+**报文结构**（头部 12 字节）：ID(2B) 事务标识符 + Flags(2B)（QR/Opcode/AA/TC/RD/RA/
+RCODE）+ 四区计数 QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT（各 2B）+ 问题区（QNAME+QTYPE+
+QCLASS）+ 应答区（NAME+TYPE+CLASS+TTL+RDLENGTH+RDATA）。本示例的应答走
+`answers=[["example.com", 1, 1, 300, ip4("93.184.216.34")]]` **列表元组**形式
+（A 记录，`ip4()` 生成记录字节）；DNS 为省空间使用压缩指针（0xC0xx 指向报文前部域名）。
+
+**记录类型**：1=A（IPv4）、28=AAAA（IPv6）、5=CNAME（别名）、15=MX（邮件交换）、
+2=NS（权威服务器）、6=SOA（起始授权）、16=TXT（文本）。
+
+**响应码 RCODE**：0=NoError、1=FormatError、2=ServerFailure、3=NXDOMAIN（域名不存在）、
+4=NotImplemented、5=Refused。
+
+**查询方式**：RD=1（flags=0x0100）递归查询——客户端要求服务端完成完整解析；RD=0 迭代
+查询——客户端自行逐级查询。应答 flags=0x8180 = QR(应答)+RD+RA（支持递归）。

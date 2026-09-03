@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn validate_rel_accepts_relative_pkt_paths() {
         assert!(validate_rel("icmp.pkt", true).is_ok());
-        assert!(validate_rel("dns_flow/query.pkt", true).is_ok());
+        assert!(validate_rel("http_mock/http_get.pkt", true).is_ok());
         assert!(validate_rel("a/b/c.pktl", true).is_ok());
         // 任意扩展名模式（读/删/改名/建目录）
         assert!(validate_rel("plain.txt", false).is_ok());

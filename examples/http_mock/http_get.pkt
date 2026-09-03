@@ -1,0 +1,56 @@
+# client 配方 · 步骤 1：发 HTTP GET 请求（raw: true 链路层发送 + wait: 2 校验 200 OK 应答）。
+#
+# HTTP 请求格式（RFC 2616/7230，应用层文本协议，基于 TCP 传输）：
+#   请求行：方法 路径 HTTP版本\r\n        → "GET /index.html HTTP/1.1"
+#   头部行：字段名: 值\r\n（若干行）
+#   空行：\r\n（头部结束标志）
+#   体：GET 无体（body=""）
+# 引擎 http(...) 构造 = 纯拼接（start_line + 各头行 + \r\n + body），
+# 不会自动补 Content-Length/Host——教学示例手动声明，真实客户端库（curl/浏览器）会自动补。
+#
+# 请求字节数（决定服务端应答的 ack，见下方 sniffer 与 resp_get.pkt 注释）：
+#   请求行 "GET /index.html HTTP/1.1"        24 + \r\n = 26
+#   "Host: example.com"                      17 + \r\n = 19
+#   "Connection: keep-alive"                 22 + \r\n = 24
+#   "Accept: text/html"                      17 + \r\n = 19
+#   空行                                      \r\n      =  2
+#   合计                                                 90 字节
+#   服务端 200 OK 的 ack = 客户端 seq + 90 = 0x1000 + 90 = 0x105A
+#   （TCP 的核心语义：ack = 对方已连续收到的字节数 + 1 的下一期望——
+#     确认号正好推进一个请求长度，证明服务端"吃掉了完整请求"）
+#
+# 固定值说明（mock 的正常手段，便于教学对照）：
+#   - sport=40000 / seq=cseq=0x1000 固定 → 服务端应答的 ack/端口才可预知；
+#     真实场景内核会随机选源端口与 ISN（初始序列号），应动态提取；
+#   - MAC 全零：回环 lo 的真实 MAC 就是 00:00:00:00:00:00，lo 不做 MAC 过滤，
+#     帧照常回环投递；真实网卡实验需改为本机/网关 MAC（可用 -p 注入 ip/port）。
+#
+# 运行：由 client.pktl 编排（sudo prping packet examples/http_mock/client.pktl）。
+# 端口/地址注入：-p port=8080 -p ip=192.168.1.10 -p sip=192.168.1.5
+req = http(start_line="GET /index.html HTTP/1.1",
+           headers=["Host: example.com", "Connection: keep-alive", "Accept: text/html"],
+           body="")
+# seq=global("cseq", 0x1000)：配方 client.pktl 的 global.init（0x1000）是权威值，
+# 内联默认值仅供本文件脱离配方单独分析（engine http_get.pkt）时求值。
+use(req) |> tcp(sport=40000, dport=params("port", 80), seq=global("cseq", 0x1000),
+                flags=bor(psh(), ack()))
+         |> ipv4(src=params("sip", "127.0.0.1"), dst=params("ip", "127.0.0.1"))
+         |> eth(src_mac="00:00:00:00:00:00", dst_mac="00:00:00:00:00:00")
+
+# wait: 2（client.pktl 步骤里）的应答校验，两条规则隐式 OR，命中任一即算收到：
+# ① TCP 层判定（主判据，跨平台最稳）：响应帧四元组反向——服务端 80（或注入端口）→
+#    客户端 40000，此处只钉客户端端口 dport=40000（对 -p port= 注入免疫）；
+#    seq=0x2000 = 服务端固定 ISN（见 resp_get.pkt）；ack=0x105A = seq+90（完整请求
+#    被消费）；flags="psh,ack"（反解展示为小写逗号串）——内核对无监听端口回的 RST
+#    flags 是 "rst"，永不命中，副作用无碍（见 README「内核 RST 副作用」）。
+# ② 内容判定（教学点）：响应方向 dport=40000 不是 80/8080，http 的端口快速分派
+#    规则未命中，但引擎的**内容识别兜底**（"HTTP/" 魔数，headers.pkt 的
+#    #[rule(contains("HTTP/", in=start_line))]，协议识别以内容为准）仍把载荷反解出
+#    http 层——响应行整体落在 version 字段（method/path 为 None，故不能匹配
+#    http(method=...)）。此条验证状态行内容本身。
+# 客户端 sniffer 规则只能用字面量/表达式，不能引用发包字段以外的未知值；listen 步骤
+# 同理（本文件是发送步骤，允许裸 Ident 引用发包同层字段，如 sport=sport——此处用
+# 固定字面量更直观）。
+sniffer:
+  - match tcp(dport=40000, seq=0x2000, ack=0x105a, flags="psh,ack")
+  - match http(version="HTTP/1.1 200 OK")

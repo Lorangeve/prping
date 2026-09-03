@@ -1,0 +1,24 @@
+# server 配方 · 第 1 组步骤 1：链路层持续监听（wait: 无值）——匹配 TCP 三次握手的纯 SYN。
+#
+# 包体只有 ipv4（无 udp/tcp 传输层）→ 引擎自动选**链路层监听**完整帧（Linux AF_PACKET /
+# macOS·Win libpcap，需 root；--iface 可指定网卡，缺省开全接口）。包定义仅用于选监听
+# 方式/文档，实际匹配完全由 sniffer 规则决定（与 examples/tcp_handshake_listen/ 同款）。
+#
+# 监听规则 tcp(flags="syn")：tcp.flags 反解为小写逗号串（ir.rs TcpFlags Display：
+# "syn" / "syn,ack"），与字面量**精确**比较——
+#   * 客户端纯 SYN     → "syn"     ✓ 命中（三次握手第 1 段，触发 synack.pkt）
+#   * 本配方回的 SYN-ACK → "syn,ack" ✗ 不命中——回环上 AF_PACKET 对出向帧同样投递，
+#     精确匹配保证不会把自己刚发的应答当新请求（防自环的关键，"syn,ack" ≠ "syn"）
+#   * 内核噪声 RST     → "rst,ack" ✗ 不命中（见 README「内核 RST 副作用」）
+# flags 也支持字节形态 flags=bor(syn(), ack())（与 flags 字段 2 字节大端比较，
+# 见 syn.pkt 的客户端用法）——两种形态等价，字符串形式可读性更好。
+#
+# 局域网实测提示：纯 SYN 规则会命中线上**任意**主机的握手请求（与 icmp_mock 匹配
+# 任意 echo request 同理，教学 mock 的固有广谱性）；要只服务本机 80 端口可写成
+# 跨层与（sniffer 顶层支持 and/or/not 组合，#[rule] 反而做不到跨层 AND）：
+#   - and(match tcp(dport=80), match tcp(flags="syn"))
+p = raw(bytes="")
+use(p) |> ipv4()
+
+sniffer:
+  - match tcp(flags="syn")

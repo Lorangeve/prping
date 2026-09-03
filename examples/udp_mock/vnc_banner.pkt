@@ -1,0 +1,20 @@
+# server 配方 · 第 2 组步骤 2（触发发包）：回 VNC 版本横幅（RFB 握手）。
+# 真实 VNC（RFC 6143）握手由**服务端先发**版本横幅，客户端回自己的版本；
+# 本 mock 反过来：客户端先发横幅、服务端回显——为的是复用「监听触发 → 回包」
+# 的配方形态（与第 1 组 DNS 同构），教学重点是横幅格式与端口分派，不是
+# VNC 的真实时序（时序见 README 的 RFB 握手说明）。
+#
+# 字段来源（listen_vnc.pkt 是链路层监听，帧内各层字段齐全——但**没有
+# reply.peer.***：peer 地址来自 UDP 数据报监听的 socket，链路层监听没有）：
+#   global.cip2   = 客户端 IP（reply.ipv4.src——帧内 IPv4 头的源地址）
+#   global.cport2 = 客户端 UDP 源端口（reply.udp.sport——帧内 UDP 头，内核
+#                   发出的真实临时端口，不是载荷里写的 sport=12346）
+# 横幅固定 "RFB 003.008\n"：RFB = Remote Frame Buffer 协议魔数，003.008 =
+# 主版本 3 / 次版本 8（3.8 是最常用的经典版本，RFB 003.008）。固定值便于
+# 教学对照（client 按「收到即回包」核验，见 udp_vnc.pkt）；真实场景版本号
+# 应取自服务端支持的最高版本（eng_lib/vnc.pkt 的 vnc_version(major, minor)）。
+b = raw(bytes="RFB 003.008\n")
+full = use(b) |> udp(sport=5900, dport=global("cport2")) |> ipv4(dst=global("cip2")) |> eth()
+
+export:
+- full

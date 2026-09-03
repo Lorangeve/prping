@@ -13,8 +13,8 @@ echo reply（`reply.pkt`）并发回——回应包的构造属编排，一律�
 # 终端 1 —— 服务端配方（需 root / 管理员；Linux AF_PACKET / macOS·Windows libpcap·Npcap）
 sudo prping packet examples/icmp_echo_server/server.pktl
 
-# 终端 2 —— 客户端（任选其一）
-sudo prping packet --raw --wait 2 examples/icmp_echo_server/client.pkt 127.0.0.1
+# 终端 2 —— 客户端配方（client.pktl：发包 + wait 校验 + extract；等价旧 CLI 裸 --wait）
+sudo prping packet examples/icmp_echo_server/client.pktl 127.0.0.1
 prping ping 127.0.0.1          # 或本机局域网 IP；-n 3 限制次数
 ```
 
@@ -51,17 +51,21 @@ recipe:
 - 一个 `wait:` 步骤服务一个请求；连续服务就多写几组 listen+reply 步骤
   （见 `examples/icmp_mock/server.pktl`）。
 
-## 客户端（client.pkt，未变）
+## 客户端配方（client.pktl）
 
-```pkt
-p = raw(bytes="hello ping")
-use(p) |> icmp(type=8, id=0x1234, seq=1) |> ipv4(dst=params("ip", "127.0.0.1"))
-
-sniffer:
-  - match icmp(type=0, id=id, seq=seq)   # 回包必须是 echo reply，id/seq 与发包一致
+```pktl
+recipe:
+- packet: client.pkt   # client.pkt 构造 echo request + sniffer 校验（内容未变）
+  raw: true            # 有 ipv4 外层（裸 IP）走内核 IP 栈 raw socket，等价旧 --raw
+  wait: 2              # 等匹配应答并打印 `✓ reply matched` + RTT
+  extract:
+  - name: cid
+    from: reply.icmp.id
+    as: int            # 从回包提取 icmp.id 存 global.cid（多步可复用，本单步示例存而不用）
 ```
 
-`--raw --wait 2`：raw 发送 echo request，等匹配应答并打印 `✓ reply matched` + RTT。
+统一为配方形态后与 icmp_mock/client.pktl 同构——区别仅在本示例是**单步**且 reply
+为纯回显（无 seq+1000 配方标记）。
 
 ## 模式对照
 

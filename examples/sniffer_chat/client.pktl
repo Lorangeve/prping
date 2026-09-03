@@ -21,6 +21,7 @@ recipe:
     as: int
 - packet: step2.pkt
   wait: 2
+  delay: 0.5
   extract:
   - name: echoed_id
     from: reply.dns.id

@@ -1,0 +1,40 @@
+# server 配方 · 步骤 2（触发发包）：构造「数据确认段」发回请求方——纯 ACK、无载荷。
+# 字段全部来自 listen 步骤的 extract（global）：
+#   r_sport =请求的 tcp.sport → ACK 的 dport（发回请求方端口）；
+#   r_seq   =请求的 tcp.seq   → ack = r_seq + 45（确认号 = 期望接收的下一个字节
+#             序号；+45 = 数据段载荷字节数，逐字计算见下）；
+#   r_src_ip（请求方）→ dst、r_dst_ip（本机）→ src（双向 IP 互换）。
+# seq=0x2000 为服务端固定序号——固定值便于教学对照（两轮 ACK 的 seq 恒为
+# 0x2000，与 client 提取的 sseq 对得上）；真实场景 ISN 应随机化。
+#
+# 载荷字节数 45 的逐字计算（tcp_data.pkt / tcp_data2.pkt 的载荷
+# "Hello, TCP! This is a data transmission test."）：
+#   "Hello, "       = 7   （H e l l o , ␣）
+#   "TCP!"          = 4   （→ 11）
+#   " This"         = 5   （→ 16）
+#   " is"           = 3   （→ 19）
+#   " a"            = 2   （→ 21）
+#   " data"         = 5   （→ 26）
+#   " transmission" = 13  （→ 39）
+#   " test."        = 6   （→ 45）
+#   合计 45 字节（0x2D）→ 第一轮 ack = 0x1000 + 45 = 0x102D；第二轮 = 0x102D + 45 = 0x105A。
+# 改载荷必须同步改这里 + client 两步 sniffer 的 ack 字面量（mock 用固定字面量便于
+# 对照数值关系；真实 TCP 的确认号从收到的段头动态读取，不存在手工同步问题）。
+# 用 global("r_seq") + 45 表达式而非固定 0x102D：同一份 tcp_ack.pkt 可服务两轮
+# 监听（r_seq 每轮重新 extract），确认号永远 = 本轮数据段 seq + 45——这正是
+# 「确认号推导」的教学点本身。
+#
+# 裸 `prping engine tcp_ack.pkt` 分析没有配方上下文，global 未设置会在求值期
+#报错——这里给默认值（= 第一轮数值示例：dport=40000/ack=0x1000+45/双向 127.0.0.1），
+#配方运行时 extract 先写 global，默认值不生效（**延迟求值**：全局已设置时默认
+#表达式根本不求值，见 packet-dsl eval.rs 的 global 语义）。裸分析因此能展示一份
+#具体的第一轮确认段，与两终端实跑的数值互相对照。
+#
+# 纯 ACK：payload 为空 → tcp 层只有 20 字节头（dataofs=5），无载荷。
+# 「带括号 ack() 是标志位常量（0x10），裸 ack= 是确认号参数」——两者同名但语法
+# 可区分（见 eng_lib/bytes.pkt 注释）；位常量勿用同名变量遮蔽。
+# 裸 IP 外层（无 eth）：配 raw: true 走内核 IP 栈路由注入（Linux IPPROTO_RAW+
+# IP_HDRINCL 整包 / macOS 剥 IP 头按协议发载荷），回环与局域网均无需 MAC 解析；
+# TCP/IPv4 校验和由序列化器自动重算。
+payload = raw(bytes="")
+use(payload) |> tcp(sport=9090, dport=global("r_sport", 40000), seq=0x2000, ack=global("r_seq", 0x1000) + 45, flags=ack(), window=65535) |> ipv4(src=global("r_dst_ip", "127.0.0.1"), dst=global("r_src_ip", "127.0.0.1"))

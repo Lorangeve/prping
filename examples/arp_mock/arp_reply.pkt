@@ -1,0 +1,30 @@
+# arp_mock · server 配方 · 步骤 2（触发发包）：构造 ARP 应答单播发回请求方。
+# 字段来自 listen 步骤的 extract（global），语义对照 RFC 826 的应答格式：
+#
+#   op=reply()            操作码 2——"告知"（对比请求的 request()=1）
+#   sha="66:77:88:99:aa:bb"  应答者硬件地址："我就是这个 MAC"
+#                         （固定值是 mock 约定，便于教学对照 + client sniffer
+#                         靠它排除真实网段真实应答的干扰；真实场景应答者 MAC
+#                         就是本机网卡 MAC，不应写死）
+#   spa=global("r_tpa",…)  应答者协议地址 = **请求里被询问的 tpa**——
+#                         「谁问的 IP 我来答」：请求问"谁是 tpa"，应答就自称
+#                         spa=tpa（真实场景应答者会先判断 tpa 是否归自己）
+#   tha=global("r_sha",…)  目标硬件地址 = 请求方 MAC（把请求的 sha 回填进 tha）
+#   tpa=global("r_spa",…)  目标协议地址 = 请求方 IP（把请求的 spa 回填进 tpa）
+#
+# 关于 global 的**默认值**（第二参数）：配方执行时 server.pktl 的 listen 步骤
+# extract 会先写好这三个 global，默认值被覆盖、不影响真实流程；给默认值是为了让
+# 本模板**独立**通过 engine 解析验证（对照 icmp_mock 的 reply.pkt 无默认值，
+# 单独 engine 校验会报"全局未设置"退出 1）。默认值取名义对话（127.0.0.1 ↔
+# 00:11:22:33:44:55），单独发送本模板即可复现一次应答帧。
+#
+# eth 层：src=服务端固定 MAC，dst=请求方 MAC（global.r_sha）——ARP 应答是
+# **单播**（对比请求的广播 ff:ff:ff:ff:ff:ff，见 arp_request.pkt 注释）。
+#
+# 引擎自动处理：ethertype 由 arp 层自动推导 0x0806；ARP 协议**没有校验和字段**
+# （对照 ICMP/TCP/IP 都要引擎重算 checksum——ARP 的完整性靠"局域网内明文广播+
+# 全员可验"保证，这也是它能被 gratuitous ARP 滥用刷缓存的原因之一）。
+rpl = arp(op=reply(), sha="66:77:88:99:aa:bb",
+          spa=global("r_tpa", "127.0.0.1"), tha=global("r_sha", "00:11:22:33:44:55"),
+          tpa=global("r_spa", "127.0.0.1"))
+use(rpl) |> eth(src_mac="66:77:88:99:aa:bb", dst_mac=global("r_sha", "00:11:22:33:44:55"))

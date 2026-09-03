@@ -1,0 +1,26 @@
+# server 配方 · 第 2 组步骤 1：监听 VNC 客户端的 RFB 版本横幅（:5900，VNC 注册端口；
+# RFB over TCP 是常态，这里用 UDP 承载做 mock 教学简化）。命中后配方继续（触发
+# 第 2 步回横幅）。
+#
+# ── 为什么本组的监听要走链路层（server.pktl 里配 raw: true）──
+# 裸 UDP 数据报监听只收到载荷（无 IP/UDP 头），反解引擎对裸载荷只尝试 dns/http
+# 两种声明（dissect_bare_app）——RFB 横幅是纯文本，两者都解析失败 → **一个层都
+# 产不出**，任何 sniffer 规则（包括 raw(...) 字节谓词）都无从匹配（实测：横幅
+# 数据报被 ignored）。而链路层监听收到完整帧：eth→ipv4→udp→载荷，解析不到
+# dns/http 时载荷保留为 raw 层 → udp 层（带 dport）和 raw 层（带横幅字节）
+# 都齐全，跨层 AND 规则即可精确匹配（见 sniffer_chat 的 and(match udp, ...)）。
+#
+# ── 匹配规则：跨层 AND ──
+#   match udp(dport=5900)       端口层确认：这是发往 VNC 服务的包（端口即服务）
+#   match raw(startswith("RFB "))  内容确认：RFB 协议魔数前缀（Remote Frame Buffer）
+#   只认 dport=5900 会误收任何发往该端口的包；只认 "RFB " 前缀会误收恰好像横幅的
+#   别的端口的包——两层 AND 是「端口分派 + 内容识别」的标准写法。
+#   sniffer 规则只能用字面量（监听没有发包可引用，不能写 SentField）。
+#
+# 包定义仅用于文档与 sniffer 的 udp 层佐证（链路层监听不按端口绑定，看全接口
+# 的帧）；载荷是空占位。
+p = raw(bytes="")
+use(p) |> udp(dport=5900) |> ipv4(dst="127.0.0.1") |> eth()
+
+sniffer:
+  - and(match udp(dport=5900), match raw(startswith("RFB ")))

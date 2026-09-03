@@ -18,7 +18,7 @@
 
 | 文件 | 角色 |
 | --- | --- |
-| `server.pktl` | 服务端配方：listen 步骤（`wait:` 无值）→ extract → echo 步骤回显 |
+| `server.pktl` | 服务端配方：**两组** listen 步骤（`wait:` 无值）→ extract → echo 步骤回显（对应 client 两步查询——每步发包用独立 socket，只有一组的话第二步的查询无人应答） |
 | `listen.pkt` | 服务端步骤 1：`sniffer:` 即监听规则（`and`/`not` 组合 + 字段等式） |
 | `echo.pkt` | 服务端步骤 2：用 global 重建查询（同 id）发回查询方 |
 | `step1.pkt` | 客户端步骤 1：发固定 id 的 DNS 查询（sent extract 的取值来源） |
