@@ -35,6 +35,7 @@ pub mod proto;
 pub mod registry;
 pub mod semantic;
 pub mod serialize;
+mod shape;
 pub mod stack;
 mod tpl;
 pub use ast::{SnifferSpec, SnifferValue};

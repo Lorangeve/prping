@@ -784,33 +784,22 @@ fn val_bytes(
             .as_bytes()
             .to_vec()),
         Value::List(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for it in items {
-                let b = match it {
-                    Value::Int(i) if (0..=255).contains(i) => *i as u8,
-                    Value::Hex(h) if *h <= 255 => *h as u8,
-                    Value::Int(i) => {
-                        return Err(Diagnostic::at(
-                            format!("参数 `{what}` 的字节超出范围 0..255：{i}"),
-                            span,
-                        ));
-                    }
-                    Value::Hex(h) => {
-                        return Err(Diagnostic::at(
-                            format!("参数 `{what}` 的字节超出范围 0..255：0x{h:X}"),
-                            span,
-                        ));
-                    }
-                    other => {
-                        return Err(Diagnostic::at(
-                            format!("参数 `{what}` 需要字节列表，得到 {}", describe(other)),
-                            span,
-                        ));
-                    }
-                };
-                out.push(b);
+            // 元素分类/范围规则走 shape 表（与 eval 值上下文同一权威）；文案属地在此
+            match crate::shape::flat_bytes_checked(items) {
+                Ok(bytes) => Ok(bytes),
+                Err(Value::Int(i)) => Err(Diagnostic::at(
+                    format!("参数 `{what}` 的字节超出范围 0..255：{i}"),
+                    span,
+                )),
+                Err(Value::Hex(h)) => Err(Diagnostic::at(
+                    format!("参数 `{what}` 的字节超出范围 0..255：0x{h:X}"),
+                    span,
+                )),
+                Err(other) => Err(Diagnostic::at(
+                    format!("参数 `{what}` 需要字节列表，得到 {}", describe(other)),
+                    span,
+                )),
             }
-            Ok(out)
         }
         Value::Call {
             name,

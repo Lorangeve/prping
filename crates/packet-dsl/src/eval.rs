@@ -82,28 +82,20 @@ fn v_span(v: &Value) -> crate::ast::Span {
     }
 }
 
-/// 值 → 字节列表。
+/// 值 → 字节列表（元素分类走 `shape` 表；报错文案属地在此——与 registry
+/// 层参数路径的措辞不同，但"什么算字节"必须一致）。
 fn bytes_of(v: &Value, span: crate::ast::Span) -> PktResult<Vec<u8>> {
     match v {
-        Value::List(items) => {
-            let mut out = Vec::new();
-            for it in items {
-                match it {
-                    Value::Int(i) if (0..=255).contains(i) => out.push(*i as u8),
-                    Value::Hex(h) if *h <= 255 => out.push(*h as u8),
-                    other => {
-                        return Err(Diagnostic::at(
-                            format!(
-                                "期望字节列表（0..255 整数），得到 {}",
-                                crate::registry::describe(other)
-                            ),
-                            span,
-                        ));
-                    }
-                }
-            }
-            Ok(out)
-        }
+        Value::List(items) => match crate::shape::flat_bytes_checked(items) {
+            Ok(bytes) => Ok(bytes),
+            Err(bad) => Err(Diagnostic::at(
+                format!(
+                    "期望字节列表（0..255 整数），得到 {}",
+                    crate::registry::describe(bad)
+                ),
+                span,
+            )),
+        },
         Value::Str(s) => Ok(s.as_bytes().to_vec()),
         other => Err(Diagnostic::at(
             format!(
@@ -937,10 +929,10 @@ impl EvalCtx<'_> {
                 // quic_initial 的 payload = concat(quic_crypto(), pad(...)) 求值为
                 // 全 Int/Hex 的字节列表，须按原样直喂，不能逐项当参数调子 proto；
                 // 含 Str/List 元素才是元素列表（HTTP headers / DNS questions））
-                let is_bytes_list = matches!(
-                    &v,
-                    Value::List(items) if items.iter().all(|x| matches!(x, Value::Int(_) | Value::Hex(_)))
-                );
+                // 类型档分类（不管 0..255 范围；范围由下方 coercer 报）——
+                // 规则唯一化到 shape 表（is_flat_numeric）
+                let is_bytes_list =
+                    matches!(&v, Value::List(items) if crate::shape::is_flat_numeric(items));
                 if f.list_count.is_some()
                     || (f.rest_proto.is_some() && matches!(v, Value::List(_)) && !is_bytes_list)
                 {
@@ -1701,19 +1693,10 @@ impl EvalCtx<'_> {
                 Ok(bytes_value(out))
             }
             "u8" | "be16" | "be32" | "le16" | "le32" | "be64" | "le64" => {
-                let (width, little) = match name {
-                    "u8" => (1, false),
-                    "be16" | "le16" => (2, name == "le16"),
-                    "be32" | "le32" => (4, name == "le32"),
-                    _ => (8, name == "le64"),
-                };
-                // 8 字节按 i64::MAX 封顶（与字段类型编码一致：无符号 2^64 超出
-                // i64 表示）；其余宽度 2^位宽 封顶
-                let max = if width == 8 {
-                    1u64 << 63
-                } else {
-                    1u64 << (width * 8)
-                };
+                // 宽度/上限/端序取自 shape 表（与字段类型编码、静态检查同一权威；
+                // 8 字节按 i64::MAX 封顶——无符号 2^64 超出 i64 表示）
+                let (width, max, little) =
+                    crate::shape::int_width(name).expect("已匹配定宽整数原语");
                 // 同宽字节直通 + 范围检查 + 编码与字段类型共用（encode_int_bytes）
                 Ok(bytes_value(encode_int_bytes(
                     args.first(),

@@ -24,87 +24,28 @@ use crate::diag::Diagnostic;
 use crate::registry::{describe, hex_string_bytes};
 use crate::semantic::Module;
 
-/// 定宽整数原语 → (字节数, 上限 2^n)；与 eval 的 u8/be16/... 分派一致。
+// 宽度/字节分类规则表在 `shape.rs`（唯一权威，与 eval coercer / registry 共用）；
+// 下面四个函数是 check 侧薄别名（签名与全部调用点不变，报错文案属地不变）。
+
+/// 定宽整数原语 → (字节数, 上限 2^n)。
 fn int_prim(name: &str) -> Option<(usize, u64)> {
-    let width = match name {
-        "u8" => 1,
-        "be16" | "le16" => 2,
-        "be32" | "le32" => 4,
-        "be64" | "le64" => 8,
-        _ => return None,
-    };
-    // 8 字节按 i64::MAX 封顶（无符号 2^64 超出 i64 表示），与 encode_int_bytes 一致
-    let max = if width == 8 {
-        1u64 << 63
-    } else {
-        1u64 << (width * 8)
-    };
-    Some((width, max))
+    crate::shape::int_width(name).map(|(w, max, _little)| (w, max))
 }
 
 /// 标准库地址值函数 → 字节宽度（eng_lib 值函数基于 tpl，等宽直通）。
 fn std_addr_width(name: &str) -> Option<usize> {
-    match name {
-        "ip4" => Some(4),
-        "ip6" => Some(16),
-        "mac" => Some(6),
-        _ => None,
-    }
+    crate::shape::std_addr_width(name)
 }
 
 /// 整数字面量（Int/Hex 同进数值上下文）→ i64。
 fn literal_int(v: &Value) -> Option<i64> {
-    match v {
-        Value::Int(i) => Some(*i),
-        Value::Hex(h) => Some(*h as i64),
-        _ => None,
-    }
+    crate::shape::literal_int(v)
 }
 
-/// 静态可算的产字节宽度：字面量/封闭原语 → Some(n)，含未知成分 → None。
-/// 字符串 = 字节上下文的 UTF-8 编码（`raw("abc")` ≡ `b"abc"`）。
+/// 静态可算的产字节宽度：字面量/封闭原语 → Some(n)，含未知成分 → None
+/// （None = 静态侧跳过，零误报；求值期 coercer 接管）。
 fn width_of(v: &Value) -> Option<usize> {
-    match v {
-        Value::Str(s) => Some(s.len()),
-        Value::List(items) => {
-            let mut n = 0;
-            for it in items {
-                match it {
-                    Value::Int(i) if (0..=255).contains(i) => n += 1,
-                    Value::Hex(h) if *h <= 255 => n += 1,
-                    _ => return None,
-                }
-            }
-            Some(n)
-        }
-        Value::Call { name, args, .. } => match name.as_str() {
-            "u8" => Some(1),
-            "be16" | "le16" => Some(2),
-            "be32" | "le32" => Some(4),
-            "be64" | "le64" => Some(8),
-            "cksum" => Some(2),
-            "md5" => Some(16),
-            "sha1" => Some(20),
-            "sha256" => Some(32),
-            "rand_bytes" | "pad" => match args.first().and_then(literal_int) {
-                Some(n) if (0..=65535).contains(&n) => Some(n as usize),
-                _ => None,
-            },
-            "raw" => match args.first() {
-                Some(Value::Str(s)) => Some(s.len()),
-                _ => None,
-            },
-            "concat" => {
-                let mut n = 0;
-                for a in args {
-                    n += width_of(a)?;
-                }
-                Some(n)
-            }
-            other => std_addr_width(other),
-        },
-        _ => None,
-    }
+    crate::shape::fixed_width(v)
 }
 
 /// 对模块做静态形状检查，返回全部诊断（按源码位置排序、去重）。

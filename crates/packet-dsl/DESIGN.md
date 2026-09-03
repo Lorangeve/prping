@@ -344,6 +344,13 @@ dissect）。设计杠杆 = 可变的（字节怎么算）放开放声明，不�
 | hex 字符串 → 字节 | `hex()`：去空白、可选 `0x`/`0X` 前缀、须偶数长度纯 hex，否则报错 |
 | 值函数体 → 字节 | `-> bytes` 是**声明 + 运行时校验**（`bytes_of`），非静态检查 |
 
+> **实现收敛（shape.rs）**：本节的宽度/字节分类规则在代码中收敛于
+> `packet-dsl/src/shape.rs`（`int_width`/`std_addr_width`/`fixed_width`/
+> `is_flat_numeric`/`flat_bytes_checked`）——求值期 coercer（`eval.rs`/`registry.rs`）
+> 与静态形状检查（`check.rs`）共用同一张表。本节仍是语义权威、shape.rs 是执行
+> 权威；两档分类（类型档 `is_flat_numeric` 不管范围 / coercer 档
+> `flat_bytes_checked` 查 0..255）刻意分开，合并会改变 proto 重复区的直喂判定。
+
 ### 6.4 歧义点与既定规则
 
 - **字符串不隐式转数值**：`be16("0x4242")` / `u8("80")` 一律报错——hex 形式写

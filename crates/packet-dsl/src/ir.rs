@@ -2,6 +2,20 @@
 //!
 //! 字段用 `Option` 表示「自动」——宿主序列化时填随机值 / 默认值 / checksum / length。
 //! IR 纯净、可复用、可跨进程传递（serde）。
+//!
+//! # raw 双轨不变式（字节直通轨 ↔ 语义字段轨）
+//!
+//! 每个语义层 struct 同时携带两轨：
+//! - `raw: Option<Vec<u8>>` = **线上字节权威**：序列化走 raw 分支整层直出
+//!   （`serialize.rs`），仅定点补自动字段（length/checksum/ethertype 内层推导），
+//!   不重编头；
+//! - 类型化字段 = **宿主消费视图**（payload 提取、`--wait` 匹配、`derive_target`/
+//!   `patch_zero_src`、sniffer 字段校验），由构造路径保证与 raw 一致——proto 层经
+//!   `eval.rs::typed_layer` 按字段表回填，`layer()` 原语由调用方字节直喂。
+//!
+//! `Layer::Raw` 是通用字节载荷层（`hex`/`raw`、无 kind 的裸协议、语义表达不了的层）。
+//! **任何新增层构造路径必须同时填两轨；单改一轨视为缺陷**（不变式测试：
+//! `tests/raw_invariant.rs`——序列化后层长必须等于 raw 长度）。
 
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
