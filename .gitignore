@@ -17,3 +17,7 @@ frontend/dist/*
 # just dotenv 本地配置（set dotenv-load；不提交）
 .env
 
+# 测试循环现场（.test-loop/：每轮验证沙箱——截图/探针脚本/日志/二进制拷贝一律不入库；
+# 有留存价值的最终截图/结论文档收尾挑拣拷贝进 .uiaudit/ 留档）
+.test-loop/
+

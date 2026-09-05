@@ -96,6 +96,13 @@ prping -s ADDR|IFACE ...    指定源地址/网卡（测量子命令内）
 
 使用 [jujutsu](https://github.com/jj-vcs/jj) (jj) 进行版本控制。
 
+## 测试循环产物约定
+
+- 测试循环（UI 审计/功能验证/沙箱实验）的**现场产物一律进仓库根 `.test-loop/NN-描述/`**（每轮一个子目录，`just test-loop-new [描述]` 创建，gitignored 不入库）：沙箱目录、拷贝的二进制/UI、探针脚本、日志、中间截图等都在这里
+- **禁入库**：探针脚本、日志、中间截图、二进制/UI 拷贝、沙箱——循环结束可整轮删除（`just test-loop-ls` 查看、`just test-loop-clean` 删空轮）
+- **留档**：确有留存价值的最终截图/审计结论文档，收尾时挑拣拷贝进 `.uiaudit/`（编号 `NN-描述.png` 系列 + 结论文档）随 commit 提交
+- 后端 pktlang 测试套件（`pktlang_tests/`，justfile `test-pkt`/`test-engine`/…）是正式入库代码，不受此约定约束
+
 ## 详细规则（docs/claude-rules/，按需阅读）
 
 - `docs/claude-rules/engine.md` — 包构造引擎（engine/packet/LSP/pcap/转码/配方）、packet-dsl、hex/raw 字节体系、eng_lib 与库搜索、运行时参数。**改动原语或协议声明、新增协议支持前必读**

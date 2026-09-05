@@ -426,3 +426,38 @@ artifacts:
 # 清理全部构建产物
 clean:
     cargo clean
+
+# ── 测试循环（.test-loop/ 现场沙箱，gitignored）────────────
+
+# 新建一轮测试循环目录 .test-loop/NN-描述（现场产物/沙箱/截图/日志都放这，不入库）
+test-loop-new desc="run":
+    #!/bin/sh
+    set -e
+    mkdir -p .test-loop
+    n=1
+    for d in .test-loop/[0-9][0-9]-*; do
+        [ -e "$d" ] || continue
+        m=$((10#$(basename "$d" | cut -c1-2)))
+        [ "$m" -ge "$n" ] && n=$((m + 1))
+    done
+    dir=$(printf '.test-loop/%02d-%s' "$n" "{{desc}}")
+    mkdir -p "$dir"
+    echo "created: $dir"
+
+# 查看现有轮次
+test-loop-ls:
+    @ls -1 .test-loop 2>/dev/null || echo "(无 .test-loop 轮次)"
+
+# 删除空轮次（非空轮需人工清理，防止误删现场）
+test-loop-clean:
+    #!/bin/sh
+    set -e
+    [ -d .test-loop ] || { echo "no .test-loop"; exit 0; }
+    empty=$(find .test-loop -mindepth 1 -maxdepth 1 -type d -name '[0-9][0-9]-*' -empty)
+    if [ -n "$empty" ]; then
+        echo "$empty" | xargs rmdir
+        echo "removed empty rounds"
+    else
+        echo "no empty rounds"
+    fi
+    echo "remaining:"; ls -1 .test-loop
