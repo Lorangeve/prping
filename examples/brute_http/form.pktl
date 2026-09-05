@@ -1,0 +1,40 @@
+# HTTP 表单登录爆破 · 客户端配方（form.pktl）：对本机靶场 lab_server.py 的
+# /login 端点逐个试弱口令。同一个 form_attempt.pkt 反复出现，步骤级 params:
+# 覆盖候选——.pktl 没有循环，长候选表请用「单步配方 + shell 循环」（见 README）。
+#
+# 每步结构：
+#   params: q=user=admin&password=XXXX   本步候选（整段查询注入，保持字符串类型，
+#                                        见 form_attempt.pkt 注释）
+#   delay: 0.5            步前等待——刻意低速，真实爆破也应如此（还容易被限速）
+#   wait: 2               发后读响应；错误凭据靶场静默断开 → ✗ 超时
+#   on_error: continue    超时失败不中止配方（默认 stop 会剪断后续尝试）
+#   最后一步 wait: 2      命中步：收到 200 OK → ✓（回包 hexdump 可见状态行）
+#
+# 运行（先起靶场）：python3 examples/brute_http/lab_server.py
+#   prping packet examples/brute_http/form.pktl 127.0.0.1:8000
+#
+# ⚠ 仅限授权环境/本机靶场。对未授权目标使用属违法行为。
+recipe:
+- packet: form_attempt.pkt
+  params: q=user=admin&password=password
+  wait: 2
+  delay: 0.5
+  on_error: continue
+- packet: form_attempt.pkt
+  params: q=user=admin&password=123456
+  wait: 2
+  delay: 0.5
+  on_error: continue
+- packet: form_attempt.pkt
+  params: q=user=admin&password=qwerty
+  wait: 2
+  delay: 0.5
+  on_error: continue
+- packet: form_attempt.pkt
+  params: q=user=admin&password=letmein
+  wait: 2
+  delay: 0.5
+  on_error: continue
+- packet: form_attempt.pkt
+  params: q=user=admin&password=secret123
+  wait: 2

@@ -14,8 +14,10 @@
 - **文本编辑**：CodeMirror 6 + 引擎现有 LSP（诊断 / 补全 / 悬停 / 文档符号）；
 - **实时反馈**：编辑即分析——层栈字段、字节数、hexdump、层序警告实时刷新；
 - **协议学习**：eng_lib 协议库（headers.pkt 等 21 个文件）只读浏览；
-- **执行**：Run 页签 / 顶栏 ▶ 运行工作区 `.pkt/.pktl`（target/count/wait/listen/fuzz/raw/
-  iface/params）——服务端 spawn 自身 `packet` 子命令（§4.9），输出与退出码流式回显；
+- **执行**：Run 页签 / 顶栏 ▶ 运行工作区 `.pkt/.pktl`（params/count/wait/listen/fuzz/
+  raw/iface）——服务端 spawn 自身 `packet` 子命令（§4.9），输出与退出码流式回显；
+  **无 target**：发包地址由包字段承载（params 注入 IP 层 dst / 传输层 dport），
+  socket 目标由引擎从包内推导；显式 HOST:PORT 只留在 CLI 位置参数。
 - **文件管理**：左栏文件树——默认打开**启动目录**的 `examples/` 文件夹（发现方法与
   `UI/`、`lib` 一致：二进制目录优先、其次启动目录），可编辑/保存（Ctrl+S）/新建/删除；
   也可从页面打开任意本地文件夹作工作区；eng_lib 库文件始终只读；
@@ -196,7 +198,7 @@ LSP `ChanReader` 读到 EOF → `run_lsp_on` 返回 → `out_tx`（ChanWriter）
 { "type": "workspace", "id": 7, "path": "…" }     // 打开/重置/查询工作区根（path 省略=查询）
 { "type": "browse", "id": 8, "path": "/dir" }     // 列子目录（文件夹选择对话框数据源；缺省=主目录）
 { "type": "run", "id": 9, "name": "a/b.pktl",     // 运行工作区 .pkt/.pktl：spawn 自身二进制
-  "target": "h:p", "params": {"k":"v"},           // packet 子命令；wait=数字秒 或 true（裸
+  "params": {"k":"v"},                            // packet 子命令；wait=数字秒 或 true（裸
   "count": N, "wait": SECS|true, "raw": bool,     // --wait 持续监听）；未给字段按 CLI 缺省
   "iface": "eth0", "out": "run.pcap", "globals": {"k":"v"},
   "json": bool }                                  // --json：JSONL 结构化输出（前端按行渲染
@@ -394,7 +396,7 @@ frontend/
 - 执行（Run）：顶栏 ▶ 或 Run 页签 → dirty 先保存（执行所见 = 磁盘内容）→ `run` 信封
   → 启动 ack 后聚合 `run_out` 行（上限 4000 行，超出丢头部）到控制台，`run_exit`
   落终态（exit code / stopped / truncated）；`run_stop` 停止活跃运行；选项快照
-  （target/count/wait/listen/fuzz/raw/iface/json）经 IndexedDB 持久化，参数输入与
+  （params/count/wait/listen/fuzz/raw/iface/json）经 IndexedDB 持久化，参数输入与
   Layers 页签共用同一份 `runValues`。**json 默认开**：控制台按 JSONL 解析渲染
   （✓/✗ 包行 + 层栈/字节/目标/错误、步骤行、汇总行，悬停看原始 JSON），非 JSON
   行（stderr 提示）原样回退；listen 勾选时 json 自动失效（CLI 禁 `--json` × 持续监听）。

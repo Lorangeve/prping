@@ -1,0 +1,14 @@
+# server 配方 · 步骤 1：持续监听（wait: 无值）——有 udp 传输层 → 自动选 UDP
+# 数据报监听（绑定 :55353，载荷反解后按 sniffer 匹配），命中后配方继续。
+#
+# 注意：sniffer 字段集只含 proto 实际解析的字段（dns: id/flags——opcode 不
+# 在线格式中独立解析，用 flags 位即可）。
+#
+# 这里的包定义仅用于推导监听端口（最外层 udp dport）与文档说明；
+# 实际匹配完全由 sniffer 规则决定。sniffer 支持 and/or/not 组合与
+# mask/startswith/endswith/contains 字节谓词——监听规则用字面量（不能引用发包字段）。
+p = raw(bytes="DNS query placeholder")
+use(p) |> udp(dport=55353) |> ipv4(dst="127.0.0.1") |> eth()
+
+sniffer:
+  - and(match dns(flags=0x0100), not(match dns(flags=0x8180)))

@@ -120,7 +120,65 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     let mut out_archive = super::send::SendArchive::default();
     let mut total_failed = 0usize;
     let mut packets_sent = 0usize;
-    for (i, step) in recipe.steps.iter().enumerate() {
+    // ── loop 块运行态（`- loop:` 块，块内步骤已平铺且连续）──
+    // 块边界索引：LoopCtx.id → (块首下标, 块尾下标 = 末步 + 1)
+    // （闸门收工时跳到块尾；末步执行完回跳块首重新判定）
+    let mut loop_bounds: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (idx, s) in recipe.steps.iter().enumerate() {
+        if let Some(ctx) = &s.loop_ctx {
+            let e = loop_bounds.entry(ctx.id).or_insert((idx, idx + 1));
+            e.1 = idx + 1; // 末次写入 = 块尾
+        }
+    }
+    // 块 id → 运行态（iter = 已开始的轮数（1 起）；until_hit = until 谓词已命中）
+    let mut loop_runs: std::collections::HashMap<usize, LoopRun> = std::collections::HashMap::new();
+    // 步骤下标显式推进（loop 闸门可整块跳过 → while 而非 for）
+    let mut i = 0usize;
+    while i < recipe.steps.len() {
+        let step = &recipe.steps[i];
+        // ── loop 块首：迭代闸门（until / Ctrl+C / 次数，先到先退）──
+        if let Some(ctx) = step.loop_ctx.as_ref().filter(|c| c.first) {
+            let run = loop_runs.entry(ctx.id).or_default();
+            let end_reason = if run.until_hit {
+                Some("until")
+            } else if crate::util::interrupted() {
+                Some("interrupted")
+            } else if ctx.count.is_some_and(|n| run.iter >= n) {
+                Some("count")
+            } else {
+                None
+            };
+            if let Some(reason) = end_reason {
+                print_loop_end(&mut w, opts, ctx.id, run.iter, reason)?;
+                i = loop_bounds[&ctx.id].1;
+                continue;
+            }
+            // 轮间延迟（第 2 轮起）：响应 Ctrl+C 提前优雅收工
+            if run.iter > 0
+                && let Some(secs) = ctx.delay
+                && secs > 0.0
+            {
+                if !json && !opts.summary {
+                    print_dim(
+                        &mut w,
+                        format!(
+                            "{}delay {secs}s before loop {} round {} ...",
+                            indent(1),
+                            ctx.id + 1,
+                            run.iter + 1
+                        ),
+                    )?;
+                    writeln!(&mut w)?;
+                }
+                if !sleep_interruptible(secs) {
+                    print_loop_end(&mut w, opts, ctx.id, run.iter, "interrupted")?;
+                    i = loop_bounds[&ctx.id].1;
+                    continue;
+                }
+            }
+            run.iter += 1;
+        }
         if !json && !opts.summary {
             writeln!(&mut w)?;
         }
@@ -230,6 +288,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         if has_reply_extract && !can_reply {
             fail_step(&mut w, &t!("engine.recipe_extract_needs_wait"))?;
             total_failed += 1;
+            i += 1;
             continue;
         }
         // 解析 + 求值（注入当前 global 快照）
@@ -245,6 +304,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                     ),
                 )?;
                 total_failed += 1;
+                i += 1;
                 continue;
             }
         };
@@ -253,11 +313,21 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         let mut sent_bytes: Vec<Vec<u8>> = Vec::new();
         // listen 步骤的对端（UDP 监听；`reply.peer.*` extract 用）
         let mut listen_peer: Option<std::net::SocketAddr> = None;
+        // loop 块内步骤：标题附 loop 序号与当前轮次（如 [loop 1 r2/10]）
+        let loop_tag = match &step.loop_ctx {
+            Some(ctx) => {
+                let iter = loop_runs.get(&ctx.id).map(|r| r.iter).unwrap_or(0);
+                let bound = ctx.count.map(|n| format!("/{n}")).unwrap_or_default();
+                format!("  [loop {} r{iter}{bound}]", ctx.id + 1)
+            }
+            None => String::new(),
+        };
         let header = format!(
-            "step {}/{}  {}",
+            "step {}/{}  {}{}",
             i + 1,
             recipe.steps.len(),
-            step.pkg.display()
+            step.pkg.display(),
+            loop_tag
         );
         if json {
             let raw = step.raw.as_ref().map(|r| match r {
@@ -304,6 +374,18 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                     None => json!(null),
                 },
             );
+            if let Some(ctx) = &step.loop_ctx {
+                let iter = loop_runs.get(&ctx.id).map(|r| r.iter).unwrap_or(0);
+                m.insert(
+                    "loop".into(),
+                    json!({
+                        "id": ctx.id + 1,
+                        "iter": iter,
+                        "count": ctx.count,
+                        "until": ctx.until,
+                    }),
+                );
+            }
             serde_json::to_writer(&mut w, &Value::Object(m))?;
             writeln!(&mut w)?;
         }
@@ -318,6 +400,21 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
             let matcher =
                 packet_dsl::Matcher::build(&spec, Some(&module), &step_params, &globals, false)
                     .map_err(|d| anyhow::anyhow!("{d}"))?;
+            // until 谓词匹配器（loop 块内）：每轮重建——global 取上一轮 extract 最新值
+            let until_matcher = match step.loop_ctx.as_ref().and_then(|c| c.until.as_ref()) {
+                Some(preds) => {
+                    match build_until_matcher(preds, Some(&module), &step_params, &globals) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            fail_step(&mut w, &e.to_string())?;
+                            total_failed += 1;
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+                None => None,
+            };
             if !json && !opts.summary {
                 print_magenta(&mut w, &header)?;
                 writeln!(&mut w)?;
@@ -359,7 +456,9 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
             }
             // 持续监听（wait 无值）无超时；`listen_once` 内部轮询 Ctrl+C
             let timeout: Option<Duration> = None;
-            // 命中第一个匹配包即返回（replies 供 extract）；对端供 reply.peer.* 取值
+            // 命中第一个匹配包即返回（replies 供 extract）；对端供 reply.peer.* 取值。
+            // loop 块内：until 命中 / Ctrl+C → 优雅收工（loop_abort = 块尾下标）
+            let mut loop_abort: Option<usize> = None;
             let mut listen_reply: Option<Vec<u8>> = None;
             match mode {
                 super::SendMode::Payload => {
@@ -370,13 +469,40 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                         &matcher,
                         &step_opts,
                         timeout,
+                        until_matcher.as_ref(),
                     ) {
-                        Ok(Some((b, fields, peer))) => {
-                            listen_matched(&mut w, opts, &b, &fields, Some(&peer))?;
+                        Ok(Some(super::listen::UdpListen::Hit {
+                            data,
+                            fields,
+                            peer,
+                            until_matched,
+                        })) => {
+                            listen_matched(&mut w, opts, &data, &fields, Some(&peer))?;
                             listen_peer = Some(peer);
-                            listen_reply = Some(b);
+                            listen_reply = Some(data);
+                            if until_matched
+                                && let Some(ctx) = &step.loop_ctx
+                                && let Some(run) = loop_runs.get_mut(&ctx.id)
+                            {
+                                run.until_hit = true; // 本轮结束后收工
+                            }
                         }
-                        Ok(None) => {}
+                        Ok(Some(super::listen::UdpListen::Until)) => {
+                            // until 命中（非本步 sniffer 命中）：跳过本轮后续步骤，整块收工
+                            if let Some(ctx) = &step.loop_ctx {
+                                let run = loop_runs.entry(ctx.id).or_default();
+                                print_loop_end(&mut w, opts, ctx.id, run.iter, "until")?;
+                                loop_abort = loop_bounds.get(&ctx.id).map(|b| b.1);
+                            }
+                        }
+                        Ok(None) => {
+                            // Ctrl+C：loop 块内优雅收工；非 loop 维持旧行为（步骤失败）
+                            if let Some(ctx) = &step.loop_ctx {
+                                let run = loop_runs.entry(ctx.id).or_default();
+                                print_loop_end(&mut w, opts, ctx.id, run.iter, "interrupted")?;
+                                loop_abort = loop_bounds.get(&ctx.id).map(|b| b.1);
+                            }
+                        }
                         Err(e) => {
                             fail_step(
                                 &mut w,
@@ -387,6 +513,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                                 ),
                             )?;
                             total_failed += 1;
+                            i += 1;
                             continue;
                         }
                     }
@@ -394,14 +521,37 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                 super::SendMode::Raw { iface } => {
                     match super::listen_raw::listen_raw_once(
                         Arc::new(matcher),
+                        until_matcher.map(Arc::new),
                         iface.as_deref(),
                         timeout,
                     ) {
-                        Ok(Some(b)) => {
-                            listen_matched(&mut w, opts, &b, &[], None)?;
-                            listen_reply = Some(b);
+                        Ok(Some(super::listen_raw::RawListen::Hit {
+                            data,
+                            until_matched,
+                        })) => {
+                            listen_matched(&mut w, opts, &data, &[], None)?;
+                            listen_reply = Some(data);
+                            if until_matched
+                                && let Some(ctx) = &step.loop_ctx
+                                && let Some(run) = loop_runs.get_mut(&ctx.id)
+                            {
+                                run.until_hit = true;
+                            }
                         }
-                        Ok(None) => {}
+                        Ok(Some(super::listen_raw::RawListen::Until)) => {
+                            if let Some(ctx) = &step.loop_ctx {
+                                let run = loop_runs.entry(ctx.id).or_default();
+                                print_loop_end(&mut w, opts, ctx.id, run.iter, "until")?;
+                                loop_abort = loop_bounds.get(&ctx.id).map(|b| b.1);
+                            }
+                        }
+                        Ok(None) => {
+                            if let Some(ctx) = &step.loop_ctx {
+                                let run = loop_runs.entry(ctx.id).or_default();
+                                print_loop_end(&mut w, opts, ctx.id, run.iter, "interrupted")?;
+                                loop_abort = loop_bounds.get(&ctx.id).map(|b| b.1);
+                            }
+                        }
                         Err(e) => {
                             fail_step(
                                 &mut w,
@@ -412,14 +562,20 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                                 ),
                             )?;
                             total_failed += 1;
+                            i += 1;
                             continue;
                         }
                     }
                 }
             }
+            if let Some(end) = loop_abort {
+                i = end;
+                continue;
+            }
             let Some(hit) = listen_reply else {
                 fail_step(&mut w, &t!("engine.recipe_listen_interrupted"))?;
                 total_failed += 1;
+                i += 1;
                 continue;
             };
             replies.push(hit);
@@ -440,6 +596,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                         ),
                     )?;
                     total_failed += 1;
+                    i += 1;
                     continue;
                 }
             }
@@ -450,6 +607,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                 &format!("{}: {}", step.pkg.display(), t!("engine.err_no_packets")),
             )?;
             total_failed += 1;
+            i += 1;
             continue;
         }
         // --out 收集已下沉到 send_module（与发送共用同一序列化器）；listen 步骤
@@ -483,6 +641,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                         ),
                     )?;
                     total_failed += 1;
+                    i += 1;
                     continue;
                 }
             }
@@ -730,6 +889,15 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                 ));
             }
         }
+        // 常规路径：块内末步 → 回跳块首（闸门重新判定收工条件）；否则下一步骤。
+        // （失败路径与 loop 闸门跳转各自显式改 i，不走这里）
+        if let Some(ctx) = &step.loop_ctx
+            && ctx.last
+        {
+            i = loop_bounds[&ctx.id].0;
+            continue;
+        }
+        i += 1;
     }
 
     if let Some(out) = &opts.out {
@@ -782,6 +950,84 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// loop 块运行态（块 id → 迭代计数 / until 命中标记）。
+#[derive(Default)]
+struct LoopRun {
+    /// 已开始的轮数（1 起：闸门放行时 +1）。
+    iter: usize,
+    /// until 谓词已命中（本轮结束后收工）。
+    until_hit: bool,
+}
+
+/// loop 块收工打印（`--json`：`{"type":"loop_end",...}` 行；人读：青色一行，
+/// 摘要模式静默）。`reason`：until / count / interrupted。
+fn print_loop_end(
+    w: &mut StandardStream,
+    opts: &PkgOptions,
+    id: usize,
+    iterations: usize,
+    reason: &str,
+) -> anyhow::Result<()> {
+    if crate::stats::json() {
+        let mut m = Map::new();
+        m.insert("type".into(), json!("loop_end"));
+        m.insert("loop".into(), json!(id + 1));
+        m.insert("iterations".into(), json!(iterations));
+        m.insert("reason".into(), json!(reason));
+        serde_json::to_writer(&mut *w, &Value::Object(m))?;
+        writeln!(w)?;
+        return Ok(());
+    }
+    if opts.summary {
+        return Ok(());
+    }
+    let reason_str = match reason {
+        "until" => t!("engine.recipe_loop_reason_until").to_string(),
+        "count" => t!("engine.recipe_loop_reason_count").to_string(),
+        _ => t!("engine.recipe_loop_reason_interrupted").to_string(),
+    };
+    print_cyan(
+        w,
+        t!(
+            "engine.recipe_loop_end",
+            id = id + 1,
+            iters = iterations,
+            reason = reason_str
+        ),
+    )?;
+    writeln!(w)?;
+    Ok(())
+}
+
+/// `until:` 谓词列表 → Matcher：合成只含 `sniffer:` 段的源文本复用 packet-dsl
+/// 解析器（语法已在解析期预检），再按 sniffer 同一构建路径做层/字段名与值语义
+/// 检查（`allow_sent=false`——监听无发包可引用）。`module` 提供值函数作用域、
+/// `globals` 供 `global(...)` 取值（loop 每轮重建 → 取上一轮 extract 最新值）。
+fn build_until_matcher(
+    preds: &[String],
+    module: Option<&packet_dsl::Module>,
+    params: &packet_dsl::Params,
+    globals: &packet_dsl::Globals,
+) -> anyhow::Result<packet_dsl::Matcher> {
+    let mut text = String::from("sniffer:\n");
+    for p in preds {
+        text.push_str("- ");
+        text.push_str(p);
+        text.push('\n');
+    }
+    let ast = packet_dsl::parser::parse_ast(&text)
+        .map_err(|d| anyhow::anyhow!("{}", t!("engine.recipe_until_pred_fail", err = d)))?;
+    let spec = ast
+        .stmts
+        .into_iter()
+        .find_map(|s| match s {
+            packet_dsl::ast::Stmt::Sniffer(spec) => Some(spec),
+            _ => None,
+        })
+        .expect("sniffer 段已在解析期预检");
+    packet_dsl::Matcher::build(&spec, module, params, globals, false)
+        .map_err(|d| anyhow::anyhow!("{}", t!("engine.recipe_until_pred_fail", err = d)))
+}
 /// 步骤级 `raw:` 覆盖 → 本步发送方式（CLI 模式为基准）。
 ///
 /// - `raw: true`：强制 raw 发送；未指定网卡时继承 CLI `--iface`（CLI 也未给则平台默认）。

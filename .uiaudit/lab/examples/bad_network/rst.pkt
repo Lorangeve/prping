@@ -1,0 +1,13 @@
+# bad_network 步骤 7：TCP RST（连接重置）
+# 模拟服务端拒绝连接或连接异常关闭
+# RST 包的 seq/ack 号通常与最后收到的包一致（或为 0）
+# 这里用 global 算术保持一致性
+p = raw(bytes="")
+rst_pkt = use(p) |> tcp(sport=params("sport", 40000), dport=params("port", 80),
+                        seq=global("sseq", 0x2000) + 1, ack=global("cseq", 0x1000) + 1,
+                        flags=rst())
+                |> ipv4(dst=params("ip", "127.0.0.1"))
+                |> eth()
+
+export:
+- rst_pkt

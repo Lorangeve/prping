@@ -1,0 +1,273 @@
+# eng_lib/rdp.pkt —— RDP 远程桌面协议（ITU-T T.128 / MS-RDPBCGR）
+#
+# RDP (Remote Desktop Protocol) 是微软开发的远程桌面协议，
+# 用于在本地计算机上显示和控制远程计算机的桌面。
+#
+# RDP 特点：
+#   - 高效传输：支持多种压缩和缓存机制
+#   - 丰富功能：剪贴板重定向、打印机重定向、音频重定向等
+#   - 安全性：支持 TLS/SSL 加密和 NLA 网络级别认证
+#   - 可扩展：支持多种通道和插件
+#
+# RDP 工作流程（基于 TCP 端口 3389）：
+#   1. 连接请求：客户端发送 X.224 Connection Request
+#   2. 连接确认：服务器回复 X.224 Connection Confirm
+#   3. 基本设置交换：MCS Connect Initial / Confirm
+#   4. 通道加入：MCS Channel Join
+#   5. 安全设置：加密协商
+#   6. 能力交换：客户端和服务器交换能力集
+#   7. 桌面交互：图形更新、输入事件等
+
+# X.224 连接请求（ITU-T X.224 §13）
+# X.224 是 ISO 传输协议，RDP 使用其连接管理功能：
+#   - 长度指示：整个 TPDU 的长度
+#   - TPDU 类型：0xE0 = 连接请求（CR）
+#   - 目标引用：通常为 0
+#   - 源引用：通常为 0
+#   - 选项：协商选项
+#   - RDP Cookie：可选的 Cookie 数据
+# @param length: TPDU 长度（1字节）
+#                整个 X.224 TPDU 的字节数（不含长度字节本身）
+# @param code: TPDU 类型（1字节）
+#              0xE0 = 连接请求（Connection Request）
+#              0xD0 = 连接确认（Connection Confirm）
+#              0x80 = 数据（Data）
+# @param dst_ref: 目标引用（2字节，大端序）
+#                 通常为 0
+# @param src_ref: 源引用（2字节，大端序）
+#                 通常为 0
+# @param class: 选项类别（1字节）
+#               高 4 位：选项类别
+#               低 4 位：选项值
+#               通常为 0（无选项）
+# @param cookie: RDP Cookie（变长，可选）
+#                格式："Cookie: mstshash=用户名\r\n"
+#                用于标识连接的用户
+# @auto: length 自动 = 总 TPDU 长度减 1
+#[proto]
+func rdp_x224_request(length=0, code=0xE0, dst_ref=0, src_ref=0, class=0, cookie="") -> bytes {
+    concat(
+        #[meta(len="auto")] u8(length),     # TPDU 长度：1字节（自动计算）
+        u8(code),                           # TPDU 类型：1字节
+        be16(dst_ref),                      # 目标引用：2字节
+        be16(src_ref),                      # 源引用：2字节
+        u8(class),                          # 选项类别：1字节
+        #[meta(rest="cookie")] cookie       # RDP Cookie：变长（可选）
+    )
+}
+
+# X.224 连接确认
+# X.224 Connection Confirm
+# 服务器回复连接确认：
+#   - 长度指示：整个 TPDU 的长度
+#   - TPDU 类型：0xD0 = 连接确认（CC）
+#   - 目标引用：客户端的源引用
+#   - 源引用：服务器的引用
+#   - 选项：协商结果
+# @param length: TPDU 长度（1字节）
+# @param code: TPDU 类型（1字节）
+#              固定为 0xD0
+# @param dst_ref: 目标引用（2字节，大端序）
+#                 等于客户端请求中的 src_ref
+# @param src_ref: 源引用（2字节，大端序）
+#                 服务器的引用值
+# @param class: 选项类别（1字节）
+#               协商结果
+# @auto: length 自动计算
+#[proto]
+func rdp_x224_confirm(length=0, code=0xD0, dst_ref=0, src_ref=0, class=0) -> bytes {
+    concat(
+        #[meta(len="auto")] u8(length),     # TPDU 长度：1字节（自动计算）
+        u8(code),                           # TPDU 类型：1字节
+        be16(dst_ref),                      # 目标引用：2字节
+        be16(src_ref),                      # 源引用：2字节
+        u8(class)                           # 选项类别：1字节
+    )
+}
+
+# X.224 数据 TPDU
+# X.224 Data TPDU
+# 用于传输 RDP 数据：
+#   - 长度指示：整个 TPDU 的长度
+#   - TPDU 类型：0x80 = 数据（Data）
+#   - 载荷：RDP 协议数据
+# @param length: TPDU 长度（2字节，大端序）
+#                整个 X.224 TPDU 的字节数
+# @param code: TPDU 类型（1字节）
+#              固定为 0x80
+# @param data: RDP 数据（变长）
+#              RDP 协议的上层数据
+# @auto: length 自动计算
+#[proto]
+func rdp_x224_data(length=0, code=0x80, data="") -> bytes {
+    concat(
+        #[meta(len="auto")] be16(length),   # TPDU 长度：2字节（自动计算）
+        u8(code),                           # TPDU 类型：1字节
+        #[meta(rest="data")] data           # RDP 数据：变长
+    )
+}
+
+# MCS Connect Initial（T.125）
+# MCS (Multipoint Communication Service) 是 T.125 标准的会议服务：
+#   - 连接初始：客户端发送能力参数
+#   - 包含 GCC (Generic Conference Control) 数据
+# @param calling_domain: 调用域标识（4字节，大端序）
+#                        通常为 1
+# @param called_domain: 被叫域标识（4字节，大端序）
+#                       通常为 0
+# @param upward: 向上标志（1字节）
+#                通常为 0xFF（TRUE）
+# @param target_params: 目标参数（变长）
+#                       MCS 域参数
+# @param min_params: 最小参数（变长）
+#                    MCS 域参数
+# @param max_params: 最大参数（变长）
+#                    MCS 域参数
+# @param user_data: 用户数据（变长）
+#                   GCC 数据块，包含 RDP 能力集
+# @auto: 无自动字段
+#[proto]
+func rdp_mcs_connect_initial(calling_domain=1, called_domain=0, upward=0xFF, target_params="", min_params="", max_params="", user_data="") -> bytes {
+    concat(
+        be32(calling_domain),               # 调用域标识：4字节
+        be32(called_domain),                # 被叫域标识：4字节
+        u8(upward),                         # 向上标志：1字节
+        #[meta(rest="target_params")] target_params,  # 目标参数：变长
+        #[meta(rest="min_params")] min_params,        # 最小参数：变长
+        #[meta(rest="max_params")] max_params,        # 最大参数：变长
+        #[meta(rest="user_data")] user_data           # 用户数据：变长
+    )
+}
+
+# RDP 能力集（Capability Set）
+# RDP 能力集用于协商客户端和服务器支持的功能：
+#   - 类型：能力集类型
+#   - 长度：能力集总长度
+#   - 数据：能力集特定数据
+# @param capability_type: 能力集类型（2字节，大端序）
+#                         常见类型：
+#                         1 = 通用能力（General Capability）
+#                         2 = 位图能力（Bitmap Capability）
+#                         3 = 顺序能力（Order Capability）
+#                         4 = 位图缓存能力（Bitmap Cache Capability）
+#                         5 = 颜色能力（Color Table Cache Capability）
+#                         6 = 未知类型能力
+#                         7 = 声音能力（Sound Capability）
+#                         8 = 输入能力（Input Capability）
+#                         9 = 字体能力（Font Capability）
+#                         10 = 位图缓存压缩能力
+#                         17 = 大指针能力（Large Pointer Capability）
+#                         18 = 桌面组合能力（Desktop Composition Capability）
+#                         20 = 多片段更新能力
+# @param length: 能力集总长度（2字节，大端序）
+#                包含类型、长度和数据字段
+# @param data: 能力集数据（变长）
+#              能力集特定的参数
+# @auto: length 自动计算
+#[proto]
+func rdp_capability_set(capability_type=1, length=0, data="") -> bytes {
+    concat(
+        be16(capability_type),              # 能力集类型：2字节
+        #[meta(len="auto")] be16(length),   # 能力集总长度：2字节（自动计算）
+        #[meta(rest="data")] data           # 能力集数据：变长
+    )
+}
+
+# RDP 输入事件（Input Event）
+# RDP 输入事件用于发送键盘和鼠标操作：
+#   - 消息类型：输入事件类型
+#   - 事件时间戳：事件发生的时间
+#   - 事件数据：具体的输入数据
+# @param message_type: 消息类型（2字节，大端序）
+#                      1 = 键盘事件（Slow Path Input）
+#                      2 = 鼠标事件（Slow Path Input）
+#                      其他值用于快速路径输入
+# @param event_time: 事件时间戳（4字节，大端序）
+#                    从会话开始的毫秒数
+# @param event_data: 事件数据（变长）
+#                    具体的输入事件数据
+# @auto: 无自动字段
+#[proto]
+func rdp_input_event(message_type=1, event_time=0, event_data="") -> bytes {
+    concat(
+        be16(message_type),                 # 消息类型：2字节
+        be32(event_time),                   # 事件时间戳：4字节
+        #[meta(rest="event_data")] event_data # 事件数据：变长
+    )
+}
+
+# RDP 图形更新（Graphics Update）
+# RDP 图形更新用于传输屏幕变化：
+#   - 更新类型：更新的类型
+#   - 更新数据：具体的图形数据
+# @param update_type: 更新类型（2字节，大端序）
+#                     0 = 命令更新（Orders）
+#                     1 = 位图更新（Bitmap）
+#                     2 = 调色板更新（Palette）
+#                     3 = 同步更新（Synchronize）
+# @param update_data: 更新数据（变长）
+#                     具体的图形更新数据
+# @auto: 无自动字段
+#[proto]
+func rdp_graphics_update(update_type=1, update_data="") -> bytes {
+    concat(
+        be16(update_type),                  # 更新类型：2字节
+        #[meta(rest="update_data")] update_data # 更新数据：变长
+    )
+}
+
+# RDP 安全头（Security Header）
+# RDP 安全头用于加密和签名：
+#   - 安全标志：安全相关的标志位
+#   - 签名：消息签名（可选）
+# @param security_flags: 安全标志（2字节，大端序）
+#                        0x0001 = 使用加密
+#                        0x0002 = 使用安全校验和
+#                        0x0004 = 使用忙等待加密
+#                        0x0008 = 使用快速路径加密
+#                        0x0010 = 使用快速路径输入事件
+# @param signature: 消息签名（8字节，可选）
+#                   用于验证消息完整性
+# @param data: 加密数据（变长）
+#              加密的 RDP 数据
+# @auto: 无自动字段
+#[proto]
+func rdp_security_header(security_flags=0, signature=pad(8), data="") -> bytes {
+    concat(
+        be16(security_flags),               # 安全标志：2字节
+        #[meta(bytes="8")] signature,       # 消息签名：8字节（可选）
+        #[meta(rest="data")] data           # 加密数据：变长
+    )
+}
+
+# RDP 通道消息（Channel Message）
+# RDP 通道消息用于虚拟通道通信：
+#   - 通道 ID：目标通道标识
+#   - 消息长度：消息总长度
+#   - 消息数据：通道特定的数据
+# @param channel_id: 通道标识（2字节，大端序）
+#                    虚拟通道的标识符
+# @param message_length: 消息长度（2字节，大端序）
+#                        消息数据的字节数
+# @param message_data: 消息数据（变长）
+#                      通道特定的数据
+# @auto: message_length 自动计算
+#[proto]
+func rdp_channel_message(channel_id=0, message_length=0, message_data="") -> bytes {
+    concat(
+        be16(channel_id),                   # 通道标识：2字节
+        #[meta(len="auto")] be16(message_length), # 消息长度：2字节（自动计算）
+        #[meta(rest="message_data")] message_data # 消息数据：变长
+    )
+}
+
+export:
+- rdp_x224_request
+- rdp_x224_confirm
+- rdp_x224_data
+- rdp_mcs_connect_initial
+- rdp_capability_set
+- rdp_input_event
+- rdp_graphics_update
+- rdp_security_header
+- rdp_channel_message

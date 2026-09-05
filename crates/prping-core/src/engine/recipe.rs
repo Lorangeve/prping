@@ -40,6 +40,15 @@
 //!   `raw: true|false|网卡名`（覆盖 `--raw`：`true` 开原始发送、网卡名 = 开原始发送并
 //!   指定网卡、`false` 强制载荷发送）、`extract:`（子列表 `- name:` + `from:` + `as:`）、
 //!   `on_error: stop|continue`。
+//! - **loop 块**（`- loop: N`，N 可省或负数 = 无限，与 CLI `--wait` 同语义）：包裹
+//!   一组嵌套步骤（`steps:` 后跟缩进 `- ` 步骤项），每轮完整执行块内步骤——服务端
+//!   "监听→extract→回应"循环编排。
+//!   `until:` 谓词列表（sniffer 同款 `match 层(条件, ...)` / and/or/not，顶层多条
+//!   = 隐式 OR）任一命中 → 本轮结束后收工；`delay: 秒` 轮间延迟（第 2 轮起）；
+//!   `loop: N` 计次（与 until 先到先退）。块内 Ctrl+C 优雅收工（打印统计、退出码
+//!   0）。谓词可用 `global(...)`（每轮重建 Matcher，取上一轮 extract 最新值）。
+//!   解析后块内步骤**平铺**进 `Recipe.steps`（每步携带 [`LoopCtx`]，执行器按
+//!   `first`/`last` 定位块边界循环回跳）。
 //! - `from:` 取值：`reply.<层>.<字段>` 直取回包反解字段（层/字段名与 sniffer 一致）；
 //!   或**值表达式**（可调函数/原语/`+`，内嵌 `reply.<层>.<字段>` 叶子），如
 //!   `from: reply.icmp.seq + 1` / `from: cksum(reply.icmp.payload)`。
@@ -205,6 +214,32 @@ pub enum OnTimeout {
     Packet(PathBuf),
 }
 
+/// 步骤所属 loop 块的上下文（解析期附加到块内**每个**步骤）。
+///
+/// `Recipe.steps` 保持**扁平**（消费方无需感知嵌套）：loop 块解析时展开为连续的
+/// 步骤序列，每步携带同一 [`LoopCtx`]，执行器按 `first`/`last` 定位块边界、
+/// 循环回跳（见 `pkg/recipe.rs::send_recipe`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoopCtx {
+    /// loop 块序号（解析顺序，0 起；同块内步骤相同）。
+    pub id: usize,
+    /// 循环次数；None = 无限（`loop:` 无值或负数，与 CLI `--wait` 同语义——直到
+    /// `until` 命中或 Ctrl+C 优雅收工）。
+    pub count: Option<usize>,
+    /// `until:` 谓词文本列表（sniffer 同款语法：`match 层(条件, ...)` / and/or/not，
+    /// 顶层多条 = 隐式 OR）。任一谓词命中即满足；执行期每轮构建 Matcher
+    /// （`global(...)` 取上一轮 extract 的最新值）。
+    pub until: Option<Vec<String>>,
+    /// 轮间延迟秒数（第 2 轮起、块首步执行前生效；响应 Ctrl+C 提前收工）。
+    pub delay: Option<f64>,
+    /// 块内首步（执行器在此做迭代闸门：次数 / until / Ctrl+C）。
+    pub first: bool,
+    /// 块内末步（块边界 = 末步下标 + 1）。
+    pub last: bool,
+    /// loop 项行号（1 基，报错定位）。
+    pub line: usize,
+}
+
 /// 配方步骤。
 #[derive(Debug, Clone)]
 pub struct Step {
@@ -227,6 +262,8 @@ pub struct Step {
     pub params: Vec<(String, String)>,
     pub extract: Vec<Extract>,
     pub on_error: OnError,
+    /// 所属 loop 块上下文（None = 不在任何 loop 块内）。
+    pub loop_ctx: Option<LoopCtx>,
     pub line: usize,
 }
 
@@ -266,7 +303,14 @@ pub fn parse_text(src: &str, path: &Path) -> anyhow::Result<Recipe> {
     let mut cur_global: Option<GlobalBuf> = None; // 当前 global 项（缩进 init: 行归属）
     let mut step: Option<StepBuf> = None; // 当前步骤
     let mut in_extract = false; // 步骤 extract: 子列表内
-    let mut extract_buf: Option<ExtractBuf> = None; // 当前提取项
+    let mut extract_buf: Option<ExtractBuf> = None; // 当前提取项（顶层/嵌套步骤共用同一状态机）
+    // ── loop 块（`- loop:` 项）解析状态 ──
+    let mut cur_loop: Option<LoopBuf> = None; // 当前 loop 块
+    let mut in_until = false; // until: 谓词列表收集中（`- ` 行 = 谓词）
+    let mut in_loop_steps = false; // 已进入 steps: 嵌套步骤模式
+    let mut nested_item_indent = 0usize; // 嵌套步骤项缩进列（首个嵌套项确定）
+    let mut nested_step: Option<StepBuf> = None; // 当前嵌套步骤
+    let mut loop_id = 0usize; // loop 块计数（LoopCtx.id 分配）
 
     while i < lines.len() {
         let line_no = i + 1;
@@ -281,6 +325,16 @@ pub fn parse_text(src: &str, path: &Path) -> anyhow::Result<Recipe> {
         if indent == 0 {
             // ── 行首：段头 / 步骤项 ──
             if trimmed == "global:" || trimmed == "recipe:" {
+                // 先收尾开着的 loop 块（`- loop:` 未写 steps: 在此报错）
+                finish_loop(
+                    &mut cur_loop,
+                    &mut nested_step,
+                    &mut extract_buf,
+                    &mut in_until,
+                    &mut in_loop_steps,
+                    &mut loop_id,
+                    &mut recipe.steps,
+                )?;
                 // 结束上一个步骤（若有）——先把未完成的提取项并入其 extract
                 flush_extract(&mut step, &mut extract_buf)?;
                 if let Some(s) = step.take() {
@@ -313,31 +367,68 @@ pub fn parse_text(src: &str, path: &Path) -> anyhow::Result<Recipe> {
                     continue;
                 }
                 if in_recipe {
+                    // loop 块项：`- loop: N`（N 可省或负数 = 无限，直到 until/Ctrl+C）。
+                    // 须在 `packet:`/裸文件名 之前判别（裸文件名步骤不允许含冒号）
+                    if let Some(val) = rest.strip_prefix("loop:") {
+                        // 先收尾上一个顶层步骤（loop 项也是顶层项）
+                        flush_extract(&mut step, &mut extract_buf)?;
+                        if let Some(s) = step.take() {
+                            recipe.steps.push(s.finish()?);
+                        }
+                        in_extract = false;
+                        // 收尾已开的 loop 块（缺 steps: 在此报错）
+                        finish_loop(
+                            &mut cur_loop,
+                            &mut nested_step,
+                            &mut extract_buf,
+                            &mut in_until,
+                            &mut in_loop_steps,
+                            &mut loop_id,
+                            &mut recipe.steps,
+                        )?;
+                        // 与 CLI `--wait` 同语义：无值或负数 = 无限（等价 CLI 裸
+                        // `--wait` / 负数 `--wait`）；正整数 = 循环次数
+                        let count = match val.trim() {
+                            "" => None,
+                            other => {
+                                let n: i64 = other.parse().map_err(|_| {
+                                    err(line_no, t!("engine.parse_loop_value", val = other))
+                                })?;
+                                if n == 0 {
+                                    return Err(err(line_no, t!("engine.parse_loop_zero")));
+                                }
+                                if n < 0 { None } else { Some(n as usize) }
+                            }
+                        };
+                        cur_loop = Some(LoopBuf {
+                            count,
+                            delay: None,
+                            until: Vec::new(),
+                            steps: Vec::new(),
+                            line: line_no,
+                        });
+                        in_until = false;
+                        in_loop_steps = false;
+                        nested_item_indent = 0;
+                        continue;
+                    }
+                    // 非 loop 顶层项：先收尾开着的 loop 块（缺 steps: 在此报错）
+                    finish_loop(
+                        &mut cur_loop,
+                        &mut nested_step,
+                        &mut extract_buf,
+                        &mut in_until,
+                        &mut in_loop_steps,
+                        &mut loop_id,
+                        &mut recipe.steps,
+                    )?;
                     // 新步骤：`- packet: 文件` 或裸 `- 文件`（先收尾上一步的提取项）
                     flush_extract(&mut step, &mut extract_buf)?;
                     if let Some(s) = step.take() {
                         recipe.steps.push(s.finish()?);
                     }
                     in_extract = false;
-                    let (pkg_str, line) = match rest.strip_prefix("packet:") {
-                        Some(p) => (p.trim().to_string(), line_no),
-                        None => {
-                            if rest.starts_with("pkg:") {
-                                return Err(err(line_no, t!("engine.parse_pkg_renamed")));
-                            }
-                            if rest.contains(':') {
-                                return Err(err(
-                                    line_no,
-                                    t!("engine.parse_step_syntax", rest = rest),
-                                ));
-                            }
-                            (rest.to_string(), line_no)
-                        }
-                    };
-                    if pkg_str.is_empty() {
-                        return Err(err(line_no, t!("engine.parse_step_no_path")));
-                    }
-                    let pkg = resolve_rel(path, &pkg_str);
+                    let pkg = parse_step_item(rest, line_no, path)?;
                     step = Some(StepBuf {
                         pkg,
                         wait: None,
@@ -348,7 +439,7 @@ pub fn parse_text(src: &str, path: &Path) -> anyhow::Result<Recipe> {
                         params: Vec::new(),
                         extract: Vec::new(),
                         on_error: OnError::Stop,
-                        line,
+                        line: line_no,
                     });
                     continue;
                 }
@@ -384,176 +475,138 @@ pub fn parse_text(src: &str, path: &Path) -> anyhow::Result<Recipe> {
             continue;
         }
         if in_recipe {
-            let Some(step_ref) = step.as_mut() else {
-                return Err(err(line_no, t!("engine.parse_option_after_step")));
-            };
-            // 提取子列表：`- name:` / `- from:` / `- as:` 或以 `- ` 开头的续项
-            if let Some(rest) = trimmed.strip_prefix("- ") {
-                in_extract = true;
-                // 完成上一个提取项
-                if let Some(b) = extract_buf.take() {
-                    step_ref.extract.push(b.finish()?);
-                }
-                let (key, val) = split_kv(rest.trim(), line_no)?;
-                let mut b = ExtractBuf {
-                    line: line_no,
-                    ..Default::default()
-                };
-                match key.as_str() {
-                    "name" => b.name = Some(nonempty(val, "name", line_no)?),
-                    "from" => b.from = Some(parse_from(val, line_no)?),
-                    "as" => {
-                        b.as_ = ExtractAs::parse(val, line_no)?;
-                        b.as_given = true;
+            // ── loop 块上下文（`- loop:` 项内）──
+            if let Some(lb) = cur_loop.as_mut() {
+                if !in_loop_steps {
+                    // loop 选项模式：until: / delay: / steps:（`- ` 行 = until 谓词项）
+                    if let Some(pred) = trimmed.strip_prefix("- ") {
+                        if !in_until {
+                            return Err(err(line_no, t!("engine.parse_loop_item_no_until")));
+                        }
+                        let pred = pred.trim();
+                        if pred.is_empty() {
+                            return Err(err(line_no, t!("engine.parse_until_empty")));
+                        }
+                        lb.until.push((pred.to_string(), line_no));
+                        continue;
                     }
-                    other => {
-                        return Err(err(line_no, t!("engine.parse_extract_only", other = other)));
-                    }
-                }
-                extract_buf = Some(b);
-                continue;
-            }
-            if in_extract {
-                // 提取项的续行（from: / as:），或退出提取回到步骤选项
-                if let Some(b) = extract_buf.as_mut() {
                     let (key, val) = split_kv(trimmed, line_no)?;
                     match key.as_str() {
-                        "from" => {
-                            b.from = Some(parse_from(val, line_no)?);
-                            continue;
+                        "until" => {
+                            // 谓词写在后续 `- ` 行（与 sniffer: 同风格）；不接受内联值
+                            if !val.is_empty() {
+                                return Err(err(line_no, t!("engine.parse_until_inline")));
+                            }
+                            in_until = true;
                         }
-                        "as" => {
-                            b.as_ = ExtractAs::parse(val, line_no)?;
-                            b.as_given = true;
-                            continue;
-                        }
-                        _ => {}
-                    }
-                }
-                // 非提取续行 → 提交当前提取项，回到步骤选项处理
-                in_extract = false;
-                if let Some(b) = extract_buf.take() {
-                    step_ref.extract.push(b.finish()?);
-                }
-            }
-            // 步骤选项行
-            let (key, val) = split_kv(trimmed, line_no)?;
-            match key.as_str() {
-                "wait" => {
-                    // 与 CLI `--wait` 同语义：无值或负数 = 无限等待（无值时本步不发送，
-                    // 用 .pkt 的 sniffer 匹配外部到达的包，命中后配方继续触发后续步骤
-                    // 发包）；非负秒数 = 发送后等一个匹配应答
-                    let mode = match val.trim() {
-                        "" => crate::engine::pkg::WaitMode::Continuous,
-                        other => {
-                            let secs: f64 = other.parse().map_err(|_| {
-                                err(line_no, t!("engine.parse_wait_value", val = val))
+                        "delay" => {
+                            // 轮间延迟（第 2 轮起、块首步执行前生效）
+                            let secs: f64 = val.parse().map_err(|_| {
+                                err(line_no, t!("engine.parse_delay_value", val = val))
                             })?;
                             // NaN/±inf/过大值会使 Duration::from_secs_f64 panic，先拒绝
                             if !secs.is_finite() || secs > crate::MAX_DURATION_SECS {
                                 return Err(err(
                                     line_no,
-                                    t!("engine.parse_wait_finite", val = val),
+                                    t!("engine.parse_delay_finite", val = val),
                                 ));
                             }
                             if secs < 0.0 {
-                                crate::engine::pkg::WaitMode::Continuous
-                            } else {
-                                crate::engine::pkg::WaitMode::OneShot(secs)
+                                return Err(err(line_no, t!("engine.parse_delay_negative")));
                             }
+                            lb.delay = Some(secs);
                         }
-                    };
-                    step_ref.wait = Some(mode);
-                }
-                "delay" => {
-                    let secs: f64 = val
-                        .parse()
-                        .map_err(|_| err(line_no, t!("engine.parse_delay_value", val = val)))?;
-                    // NaN/±inf/过大值会使 Duration::from_secs_f64 panic，先拒绝
-                    if !secs.is_finite() || secs > crate::MAX_DURATION_SECS {
-                        return Err(err(line_no, t!("engine.parse_delay_finite", val = val)));
-                    }
-                    if secs < 0.0 {
-                        return Err(err(line_no, t!("engine.parse_delay_negative")));
-                    }
-                    step_ref.delay = Some(secs);
-                }
-                "params" => {
-                    let pairs = parse_params_list(val, line_no)?;
-                    for (k, v) in pairs {
-                        if let Some(existing) = step_ref.params.iter_mut().find(|(ek, _)| *ek == k)
-                        {
-                            existing.1 = v;
-                        } else {
-                            step_ref.params.push((k, v));
+                        "steps" => {
+                            // 进入嵌套步骤模式（此后直到块尾都是步骤内容）
+                            if !val.is_empty() {
+                                return Err(err(line_no, t!("engine.parse_steps_inline")));
+                            }
+                            in_until = false;
+                            in_loop_steps = true;
+                            nested_item_indent = 0;
                         }
-                    }
-                }
-                "raw" => {
-                    step_ref.raw = Some(parse_step_raw(val, line_no)?);
-                }
-                "on_timeout" => {
-                    let v = val.trim();
-                    let on_timeout = if let Some(rest) = v.strip_prefix("retry") {
-                        // `retry` / `retry N`：重发当前步骤的包（次数默认 1）
-                        let rest = rest.trim();
-                        let n = if rest.is_empty() {
-                            1
-                        } else {
-                            rest.parse::<usize>().map_err(|_| {
-                                err(line_no, t!("engine.parse_retry_count", n = rest))
-                            })?
-                        };
-                        if n == 0 {
-                            return Err(err(line_no, t!("engine.parse_retry_zero")));
-                        }
-                        OnTimeout::Retry(n)
-                    } else {
-                        if v.is_empty() {
-                            return Err(err(line_no, t!("engine.parse_on_timeout_path")));
-                        }
-                        OnTimeout::Packet(resolve_rel(path, v))
-                    };
-                    step_ref.on_timeout = Some(on_timeout);
-                }
-                "count" => {
-                    let n: usize = val
-                        .trim()
-                        .parse()
-                        .map_err(|_| err(line_no, t!("engine.parse_count_value", val = val)))?;
-                    if n == 0 {
-                        return Err(err(line_no, t!("engine.parse_count_zero")));
-                    }
-                    step_ref.count = Some(n);
-                }
-                "on_error" => {
-                    step_ref.on_error = match val {
-                        "stop" => OnError::Stop,
-                        "continue" => OnError::Continue,
+                        "loop" => return Err(err(line_no, t!("engine.parse_loop_nested"))),
                         other => {
                             return Err(err(
                                 line_no,
-                                t!("engine.parse_on_error_value", other = other),
+                                t!("engine.parse_loop_only_opts", other = other),
                             ));
                         }
-                    };
+                    }
+                    continue;
                 }
-                "extract" => {
-                    // 进入提取子列表（extract: 独占一行，后跟 - 项）
-                    in_extract = true;
+                // ── 嵌套步骤模式 ──
+                if indent < nested_item_indent {
+                    // loop 选项（until:/delay:）必须写在 steps: 之前
+                    return Err(err(line_no, t!("engine.parse_loop_opts_before_steps")));
                 }
-                other => {
-                    return Err(err(
-                        line_no,
-                        t!("engine.parse_unknown_option", other = other),
-                    ));
+                let is_item = trimmed.starts_with("- ");
+                if is_item && (nested_item_indent == 0 || indent == nested_item_indent) {
+                    if nested_item_indent == 0 {
+                        nested_item_indent = indent;
+                    }
+                    // 新嵌套步骤：冲刷上一个（提取项 + 步骤本体）
+                    flush_extract(&mut nested_step, &mut extract_buf)?;
+                    if let Some(s) = nested_step.take() {
+                        lb.steps.push(s);
+                    }
+                    in_extract = false;
+                    let rest = trimmed.strip_prefix("- ").expect("已判 - ");
+                    let pkg = parse_step_item(rest.trim(), line_no, path)?;
+                    nested_step = Some(StepBuf {
+                        pkg,
+                        wait: None,
+                        on_timeout: None,
+                        count: None,
+                        delay: None,
+                        raw: None,
+                        params: Vec::new(),
+                        extract: Vec::new(),
+                        on_error: OnError::Stop,
+                        line: line_no,
+                    });
+                    continue;
                 }
+                // 嵌套步骤的选项/提取行：与顶层步骤共用同一状态机（step_line）
+                let Some(step_ref) = nested_step.as_mut() else {
+                    return Err(err(line_no, t!("engine.parse_steps_expect_item")));
+                };
+                step_line(
+                    step_ref,
+                    trimmed,
+                    line_no,
+                    path,
+                    &mut in_extract,
+                    &mut extract_buf,
+                )?;
+                continue;
             }
+            // ── 顶层步骤上下文（与嵌套步骤共用 step_line 状态机）──
+            let Some(step_ref) = step.as_mut() else {
+                return Err(err(line_no, t!("engine.parse_option_after_step")));
+            };
+            step_line(
+                step_ref,
+                trimmed,
+                line_no,
+                path,
+                &mut in_extract,
+                &mut extract_buf,
+            )?;
             continue;
         }
         return Err(err(line_no, t!("engine.parse_indent_outside")));
     }
-    // 收尾：最后一个步骤 / 提取项
+    // 收尾：开着的 loop 块（缺 steps: 在此报错）→ 最后一个步骤 / 提取项
+    finish_loop(
+        &mut cur_loop,
+        &mut nested_step,
+        &mut extract_buf,
+        &mut in_until,
+        &mut in_loop_steps,
+        &mut loop_id,
+        &mut recipe.steps,
+    )?;
     flush_extract(&mut step, &mut extract_buf)?;
     if let Some(s) = step.take() {
         recipe.steps.push(s.finish()?);
@@ -621,6 +674,7 @@ impl StepBuf {
             params: self.params,
             extract: self.extract,
             on_error: self.on_error,
+            loop_ctx: None, // loop 块由 LoopBuf::finish 统一附加
             line: self.line,
         })
     }
@@ -908,6 +962,301 @@ pub fn parse_init_value(s: &str, line: usize) -> anyhow::Result<Value> {
     Err(err(line, t!("engine.parse_init_value_bad", s = s)))
 }
 
+/// 步骤行处理（顶层步骤与 loop 嵌套步骤共用同一状态机）：提取子列表项
+/// （`- name:`/`- from:`/`- as:`）、提取续行、步骤选项键。
+fn step_line(
+    step: &mut StepBuf,
+    trimmed: &str,
+    line_no: usize,
+    path: &Path,
+    in_extract: &mut bool,
+    extract_buf: &mut Option<ExtractBuf>,
+) -> anyhow::Result<()> {
+    // 提取子列表：`- name:` / `- from:` / `- as:` 或以 `- ` 开头的续项
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        *in_extract = true;
+        // 完成上一个提取项
+        if let Some(b) = extract_buf.take() {
+            step.extract.push(b.finish()?);
+        }
+        let (key, val) = split_kv(rest.trim(), line_no)?;
+        let mut b = ExtractBuf {
+            line: line_no,
+            ..Default::default()
+        };
+        match key.as_str() {
+            "name" => b.name = Some(nonempty(val, "name", line_no)?),
+            "from" => b.from = Some(parse_from(val, line_no)?),
+            "as" => {
+                b.as_ = ExtractAs::parse(val, line_no)?;
+                b.as_given = true;
+            }
+            other => {
+                return Err(err(line_no, t!("engine.parse_extract_only", other = other)));
+            }
+        }
+        *extract_buf = Some(b);
+        return Ok(());
+    }
+    if *in_extract {
+        // 提取项的续行（from: / as:），或退出提取回到步骤选项
+        if let Some(b) = extract_buf.as_mut() {
+            let (key, val) = split_kv(trimmed, line_no)?;
+            match key.as_str() {
+                "from" => {
+                    b.from = Some(parse_from(val, line_no)?);
+                    return Ok(());
+                }
+                "as" => {
+                    b.as_ = ExtractAs::parse(val, line_no)?;
+                    b.as_given = true;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        // 非提取续行 → 提交当前提取项，回到步骤选项处理
+        *in_extract = false;
+        if let Some(b) = extract_buf.take() {
+            step.extract.push(b.finish()?);
+        }
+    }
+    // 步骤选项行
+    let (key, val) = split_kv(trimmed, line_no)?;
+    match key.as_str() {
+        "wait" => {
+            // 与 CLI `--wait` 同语义：无值或负数 = 无限等待（无值时本步不发送，
+            // 用 .pkt 的 sniffer 匹配外部到达的包，命中后配方继续触发后续步骤
+            // 发包）；非负秒数 = 发送后等一个匹配应答
+            let mode = match val.trim() {
+                "" => crate::engine::pkg::WaitMode::Continuous,
+                other => {
+                    let secs: f64 = other
+                        .parse()
+                        .map_err(|_| err(line_no, t!("engine.parse_wait_value", val = val)))?;
+                    // NaN/±inf/过大值会使 Duration::from_secs_f64 panic，先拒绝
+                    if !secs.is_finite() || secs > crate::MAX_DURATION_SECS {
+                        return Err(err(line_no, t!("engine.parse_wait_finite", val = val)));
+                    }
+                    if secs < 0.0 {
+                        crate::engine::pkg::WaitMode::Continuous
+                    } else {
+                        crate::engine::pkg::WaitMode::OneShot(secs)
+                    }
+                }
+            };
+            step.wait = Some(mode);
+        }
+        "delay" => {
+            let secs: f64 = val
+                .parse()
+                .map_err(|_| err(line_no, t!("engine.parse_delay_value", val = val)))?;
+            // NaN/±inf/过大值会使 Duration::from_secs_f64 panic，先拒绝
+            if !secs.is_finite() || secs > crate::MAX_DURATION_SECS {
+                return Err(err(line_no, t!("engine.parse_delay_finite", val = val)));
+            }
+            if secs < 0.0 {
+                return Err(err(line_no, t!("engine.parse_delay_negative")));
+            }
+            step.delay = Some(secs);
+        }
+        "params" => {
+            let pairs = parse_params_list(val, line_no)?;
+            for (k, v) in pairs {
+                if let Some(existing) = step.params.iter_mut().find(|(ek, _)| *ek == k) {
+                    existing.1 = v;
+                } else {
+                    step.params.push((k, v));
+                }
+            }
+        }
+        "raw" => {
+            step.raw = Some(parse_step_raw(val, line_no)?);
+        }
+        "on_timeout" => {
+            let v = val.trim();
+            let on_timeout = if let Some(rest) = v.strip_prefix("retry") {
+                // `retry` / `retry N`：重发当前步骤的包（次数默认 1）
+                let rest = rest.trim();
+                let n = if rest.is_empty() {
+                    1
+                } else {
+                    rest.parse::<usize>()
+                        .map_err(|_| err(line_no, t!("engine.parse_retry_count", n = rest)))?
+                };
+                if n == 0 {
+                    return Err(err(line_no, t!("engine.parse_retry_zero")));
+                }
+                OnTimeout::Retry(n)
+            } else {
+                if v.is_empty() {
+                    return Err(err(line_no, t!("engine.parse_on_timeout_path")));
+                }
+                OnTimeout::Packet(resolve_rel(path, v))
+            };
+            step.on_timeout = Some(on_timeout);
+        }
+        "count" => {
+            let n: usize = val
+                .trim()
+                .parse()
+                .map_err(|_| err(line_no, t!("engine.parse_count_value", val = val)))?;
+            if n == 0 {
+                return Err(err(line_no, t!("engine.parse_count_zero")));
+            }
+            step.count = Some(n);
+        }
+        "on_error" => {
+            step.on_error = match val {
+                "stop" => OnError::Stop,
+                "continue" => OnError::Continue,
+                other => {
+                    return Err(err(
+                        line_no,
+                        t!("engine.parse_on_error_value", other = other),
+                    ));
+                }
+            };
+        }
+        "extract" => {
+            // 进入提取子列表（extract: 独占一行，后跟 - 项）
+            *in_extract = true;
+        }
+        // until/steps 仅属于 loop 块（`- loop:` 项的选项），普通步骤报专门错误
+        "until" | "steps" => {
+            return Err(err(line_no, t!("engine.parse_loop_only_key", key = key)));
+        }
+        other => {
+            return Err(err(
+                line_no,
+                t!("engine.parse_unknown_option", other = other),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 收尾当前 loop 块：冲刷嵌套步骤 → 附加 [`LoopCtx`]（块内步骤平铺）→ 并入
+/// `steps_out`。loop 项后未写 `steps:`（无嵌套步骤）在此报错；非 loop 上下文
+/// 调用为空操作。
+fn finish_loop(
+    cur_loop: &mut Option<LoopBuf>,
+    nested_step: &mut Option<StepBuf>,
+    extract_buf: &mut Option<ExtractBuf>,
+    in_until: &mut bool,
+    in_loop_steps: &mut bool,
+    loop_id: &mut usize,
+    steps_out: &mut Vec<Step>,
+) -> anyhow::Result<()> {
+    if let Some(lb) = cur_loop.take() {
+        flush_extract(nested_step, extract_buf)?;
+        let mut buf = lb;
+        if let Some(s) = nested_step.take() {
+            buf.steps.push(s);
+        }
+        steps_out.extend(buf.finish(*loop_id)?);
+        *loop_id += 1;
+    }
+    *in_until = false;
+    *in_loop_steps = false;
+    Ok(())
+}
+
+/// loop 块解析中间态（`- loop:` 项）。
+struct LoopBuf {
+    /// `loop: N` 次数（None = 无限，直到 until/Ctrl+C）。
+    count: Option<usize>,
+    /// 轮间延迟秒数（第 2 轮起生效）。
+    delay: Option<f64>,
+    /// `until:` 谓词文本 + 行号（执行期构建 Matcher）。
+    until: Vec<(String, usize)>,
+    /// 嵌套步骤（`steps:` 模式下收集）。
+    steps: Vec<StepBuf>,
+    /// loop 项行号（报错定位）。
+    line: usize,
+}
+
+impl LoopBuf {
+    /// 块收尾：校验（非空 steps、until 谓词语法预检——层/字段名语义在执行期
+    /// `Matcher::build`，允许引用步骤 .pkt 的值函数）+ 附加 [`LoopCtx`] 平铺。
+    fn finish(self, id: usize) -> anyhow::Result<Vec<Step>> {
+        if self.steps.is_empty() {
+            return Err(err(self.line, t!("engine.parse_loop_no_steps")));
+        }
+        for (pred, line) in &self.until {
+            crate::engine::recipe::parse_until_pred(pred).map_err(|e| {
+                err(
+                    *line,
+                    t!("engine.parse_until_pred_fail", pred = pred, err = e),
+                )
+            })?;
+        }
+        let n = self.steps.len();
+        let until = if self.until.is_empty() {
+            None
+        } else {
+            Some(
+                self.until
+                    .iter()
+                    .map(|(p, _)| p.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut out = Vec::with_capacity(n);
+        for (i, s) in self.steps.into_iter().enumerate() {
+            let mut step = s.finish()?;
+            step.loop_ctx = Some(LoopCtx {
+                id,
+                count: self.count,
+                until: until.clone(),
+                delay: self.delay,
+                first: i == 0,
+                last: i == n - 1,
+                line: self.line,
+            });
+            out.push(step);
+        }
+        Ok(out)
+    }
+}
+
+/// 步骤项（`- ` 后内容）→ .pkt 路径：`packet: 文件` 或裸文件名（相对 .pktl 所在
+/// 步骤项（`- ` 后内容）→ .pkt 路径：`packet: 文件` 或裸文件名（相对 .pktl 所在
+/// 目录解析）；`pkg:` 报改名提示，含冒号的裸名报语法错误。顶层与 loop 嵌套共用。
+fn parse_step_item(rest: &str, line_no: usize, path: &Path) -> anyhow::Result<PathBuf> {
+    let pkg_str = match rest.strip_prefix("packet:") {
+        Some(p) => p.trim().to_string(),
+        None => {
+            if rest.starts_with("pkg:") {
+                return Err(err(line_no, t!("engine.parse_pkg_renamed")));
+            }
+            if rest.contains(':') {
+                return Err(err(line_no, t!("engine.parse_step_syntax", rest = rest)));
+            }
+            rest.to_string()
+        }
+    };
+    if pkg_str.is_empty() {
+        return Err(err(line_no, t!("engine.parse_step_no_path")));
+    }
+    Ok(resolve_rel(path, &pkg_str))
+}
+
+/// `until:` 单条谓词语法解析（sniffer 同款：`match 层(条件, ...)` / and/or/not）。
+/// 合成只含 `sniffer:` 段的源文本复用 packet-dsl 解析器——仅语法校验；执行期
+/// `Matcher::build`（pkg/recipe.rs）做层/字段名与值语义检查。
+pub fn parse_until_pred(pred: &str) -> Result<packet_dsl::ast::SnifferPred, String> {
+    let text = format!("sniffer:\n- {pred}\n");
+    let ast = packet_dsl::parser::parse_ast(&text).map_err(|d| d.to_string())?;
+    ast.stmts
+        .into_iter()
+        .find_map(|s| match s {
+            packet_dsl::ast::Stmt::Sniffer(spec) => Some(spec),
+            _ => None,
+        })
+        .and_then(|spec| spec.clauses.into_iter().next())
+        .ok_or_else(|| "no predicate parsed".to_string())
+}
 /// 相对 .pktl 所在目录解析路径（绝对路径原样）。
 fn resolve_rel(recipe: &Path, p: &str) -> PathBuf {
     let p = Path::new(p);
@@ -921,4 +1270,162 @@ fn resolve_rel(recipe: &Path, p: &str) -> PathBuf {
 /// 行号化错误。
 fn err(line: usize, msg: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("{}", t!("engine.parse_err_prefix", line = line, msg = msg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `until:` 谓词独立语法解析（合成 `sniffer:` 源文本复用 packet-dsl 解析器）。
+    #[test]
+    fn until_pred_parses_standalone() {
+        // 单条 match 子句
+        let p = parse_until_pred("match icmp(type=8)").expect("match 子句可解析");
+        assert!(matches!(p, packet_dsl::ast::SnifferPred::Clause(_)));
+        // 组合谓词 and/not
+        let p = parse_until_pred("and(match icmp(type=0), not(match udp(dport=9)))")
+            .expect("组合谓词可解析");
+        assert!(matches!(p, packet_dsl::ast::SnifferPred::And(_)));
+        // 语法错误报错
+        assert!(parse_until_pred("match icmp(== 8)").is_err());
+        assert!(parse_until_pred("icmp.type == 0").is_err());
+    }
+
+    /// loop 块解析：`loop: N` + `delay:` + `until:` 谓词 + 嵌套步骤 → 平铺 steps
+    /// 并附加 LoopCtx（块内共享 id/count/until/delay，first/last 标记边界）。
+    #[test]
+    fn recipe_parse_loop_block() {
+        let src = r#"
+global:
+- tid
+
+recipe:
+- loop: 3
+  delay: 0.5
+  until:
+  - match icmp(type=0)
+  - match udp(dport=9)
+  steps:
+  - packet: listen.pkt
+    wait:
+    extract:
+    - name: tid
+      from: reply.icmp.id
+  - packet: reply.pkt
+    raw: true
+- packet: tail.pkt
+"#;
+        let dir = std::env::temp_dir().join(format!("prping-loop-parse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("flow.pktl");
+        std::fs::write(&path, src).unwrap();
+        let r = parse(&path).expect("loop 配方解析成功");
+        assert_eq!(r.steps.len(), 3, "块内 2 步平铺 + 块后 1 步");
+        let ctx0 = r.steps[0].loop_ctx.as_ref().expect("首步带 LoopCtx");
+        assert_eq!(ctx0.id, 0);
+        assert_eq!(ctx0.count, Some(3));
+        assert_eq!(
+            ctx0.until.as_deref(),
+            Some(
+                &[
+                    "match icmp(type=0)".to_string(),
+                    "match udp(dport=9)".to_string()
+                ][..]
+            )
+        );
+        assert_eq!(ctx0.delay, Some(0.5));
+        assert!(ctx0.first, "块首步");
+        assert!(!ctx0.last);
+        let ctx1 = r.steps[1].loop_ctx.as_ref().expect("次步带 LoopCtx");
+        assert!(!ctx1.first);
+        assert!(ctx1.last, "块末步");
+        assert_eq!(ctx1.id, 0, "同块同 id");
+        assert!(r.steps[2].loop_ctx.is_none(), "块外步骤无 LoopCtx");
+        assert_eq!(
+            r.steps[0].wait,
+            Some(crate::engine::pkg::WaitMode::Continuous)
+        );
+        assert_eq!(
+            r.steps[1].raw,
+            Some(StepRaw::On { iface: None }),
+            "嵌套步骤选项完整解析"
+        );
+        assert_eq!(r.steps[0].extract.len(), 1, "嵌套步骤 extract 完整解析");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `loop:` 无值或负数 = 无限循环（count None；与 CLI `--wait` 同语义）。
+    #[test]
+    fn recipe_parse_loop_infinite() {
+        for (tag, body) in [
+            ("none", "recipe:\n- loop:\n  steps:\n  - a.pkt\n"),
+            ("neg1", "recipe:\n- loop: -1\n  steps:\n  - a.pkt\n"),
+            ("neg5", "recipe:\n- loop: -5\n  steps:\n  - a.pkt\n"),
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("prping-loop-inf-{}-{tag}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("flow.pktl");
+            std::fs::write(&path, body).unwrap();
+            let r = parse(&path).unwrap_or_else(|e| panic!("{tag}: 无限 loop 解析成功: {e}"));
+            assert_eq!(r.steps.len(), 1);
+            assert_eq!(
+                r.steps[0].loop_ctx.as_ref().unwrap().count,
+                None,
+                "{tag}: 无值或负数 = 无限"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// loop 块解析错误路径：次数 0/非法、缺 steps、until 内联、until 后置、
+    /// 普通步骤写 until/steps、未知 loop 选项、until 谓词语法错误。
+    #[test]
+    fn recipe_parse_loop_errors() {
+        let dir = std::env::temp_dir().join(format!("prping-loop-err-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let parse = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            parse(&path).expect_err("预期解析失败").to_string()
+        };
+        // 次数 0 / 非法
+        let e = parse("zero.pktl", "recipe:\n- loop: 0\n  steps:\n  - a.pkt\n");
+        assert!(e.contains("loop"), "{e}");
+        let e = parse("bad.pktl", "recipe:\n- loop: abc\n  steps:\n  - a.pkt\n");
+        assert!(e.contains("loop"), "{e}");
+        // 缺 steps（下一个顶层项直接收尾 loop）
+        let e = parse("nosteps.pktl", "recipe:\n- loop: 2\n- packet: a.pkt\n");
+        assert!(e.contains("steps"), "{e}");
+        // until 内联值不接受
+        let e = parse(
+            "untilinline.pktl",
+            "recipe:\n- loop:\n  until: match icmp(type=0)\n  steps:\n  - a.pkt\n",
+        );
+        assert!(e.contains("until"), "{e}");
+        // until 写在 steps: 之后（进入嵌套步骤模式后报 loop 选项专用错误）
+        let e = parse(
+            "untillate.pktl",
+            "recipe:\n- loop:\n  steps:\n  - a.pkt\n  until:\n",
+        );
+        assert!(e.contains("loop") && e.contains("steps"), "{e}");
+        // 普通步骤写 until / steps
+        let e = parse("untiltop.pktl", "recipe:\n- packet: a.pkt\n  until:\n");
+        assert!(e.contains("loop"), "{e}");
+        let e = parse("stepstop.pktl", "recipe:\n- packet: a.pkt\n  steps:\n");
+        assert!(e.contains("loop"), "{e}");
+        // 未知 loop 选项
+        let e = parse(
+            "loopopt.pktl",
+            "recipe:\n- loop:\n  wait: 1\n  steps:\n  - a.pkt\n",
+        );
+        assert!(e.contains("loop"), "{e}");
+        // until 谓词语法错误（解析期预检）
+        let e = parse(
+            "badpred.pktl",
+            "recipe:\n- loop:\n  until:\n  - icmp.type == 0\n  steps:\n  - a.pkt\n",
+        );
+        assert!(e.contains("until") || e.contains("match"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

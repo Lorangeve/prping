@@ -1,0 +1,13 @@
+# client 配方 · 步骤 2：发第三次握手 ACK（seq=0x1001=cseq+1，ack=global("sseq")+1）。
+# 握手在协议上到此完成——第三次 ACK 本来就没有应答，故 wait: 0（发送后立即继续）；
+# server.pktl 也刻意不监听纯 ACK（第 2 组只匹配 http GET）——两个配方对"第三次握手
+# 无应答"的理解一致，这本身就是教学内容。
+#
+# ack = sseq + 1：sseq 是步骤 1 从 SYN-ACK **动态提取**的服务端 ISN——确认号 =
+# 对方 seq + 1，与 server 的 synack.pkt（ack=r_seq+1）完全镜像，对照读最直观
+# （tcp_handshake 静态版硬编码 ack=0x2001；本目录 0x2001 是算出来的）。
+# 载荷为空（raw(bytes="")）：纯 ACK 无数据，只有 20B TCP 头 + 20B IP 头。
+# sseq 缺省 0x2000 仅用于独立解析/展示（单跑展示 ack=0x2001，即服务端固定 ISN+1）；
+# 配方运行时由 client 步骤 1 extract 注入从 SYN-ACK 动态提取的真实 ISN。
+payload = raw(bytes="")
+use(payload) |> tcp(sport=40000, dport=params("port", 80), seq=0x1001, ack=global("sseq", 0x2000) + 1, flags=ack(), window=65535) |> ipv4(src=params("sip", "127.0.0.1"), dst=params("ip", "127.0.0.1"))

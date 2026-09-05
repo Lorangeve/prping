@@ -1,0 +1,557 @@
+# eng_lib/headers.pkt —— pkglang 标准库：层头构建函数（由 hex/raw + 字节原语拼出）
+#
+# 引擎只留 hex/raw（数据原语）与字节原语（concat/u8/be16/tpl/sum/...）；
+# eth/ipv4/... 层头由这里用 func + 原语构建。这些函数与引擎内置同名，
+# 库导出优先（作用域遮蔽内置）。
+#
+# 地址字节（ip4/ip6/mac）来自 eng_lib/bytes.pkt 的 tpl 值函数；src/dst 可域名——
+# 值位置经 dns() 显式解析（IP 字面量短路，无需解析器），layer 的 src/dst 字段
+# 位置仍由引擎自动域名回退（伪头部校验和元数据）。
+#
+# 自动字段：total_length / header checksum / TCP·UDP checksum 依赖载荷长度与伪头部，
+# 函数内无法算——序列化时引擎按层类型自动补（`layer` 层标注原语，见 bytes.pkt）。
+#
+# 参数约定与内置一致：未给默认值 = 自动值（引擎补）；这里给出合理的默认。
+#
+# doc 注释约定同 net.pkt：摘要 + `@param`/`@auto` 标签行，`--eng --ls` 展示。
+#
+# 学习注释
+# 本文件定义了 OSI 模型各层的协议头结构，用于学习网络协议：
+# 1. 链路层（Layer 2）：以太网帧、ARP 地址解析
+# 2. 网络层（Layer 3）：IPv4/IPv6 数据包、ICMP 控制报文
+# 3. 传输层（Layer 4）：TCP 可靠流、UDP 数据报
+# 4. 应用层（Layer 7）：HTTP 文本协议、DNS 域名解析
+# 每个 proto 函数都对应一个 RFC 标准协议的头部结构。
+
+# 链路层（Layer 2）
+# 链路层负责在**同一物理网络**内的节点之间传输数据帧。
+# 以太网是最常见的链路层协议，使用 MAC 地址（48位）标识设备。
+# ARP 协议用于将网络层地址（IP）解析为链路层地址（MAC）。
+
+# 14B 以太网帧头（自表示协议 proto）
+# 以太网帧结构（IEEE 802.3）
+# 以太网帧是链路层的基本传输单元，包含：
+#   - 目标 MAC（6B）：接收方的硬件地址（广播=ff:ff:ff:ff:ff:ff）
+#   - 源 MAC（6B）：发送方的硬件地址
+#   - 类型（2B）：上层协议类型（0x0800=IPv4, 0x0806=ARP, 0x86DD=IPv6）
+# @param dst_mac: 目标 MAC 地址（6字节，十六进制冒号分隔）
+#                 默认值 "ff:ff:ff:ff:ff:ff" 表示广播（所有设备都接收）
+#                 单播时填写具体设备的 MAC 地址
+# @param src_mac: 源 MAC 地址（6字节，十六进制冒号分隔）
+#                 默认值 "00:00:00:00:00:00" 是占位符（raw 发送时网关不认，建议显式指定或随机）
+#                 实际使用时应填写本机网卡的 MAC 地址
+# @param ethertype: 以太网类型字段（2字节，大端序）
+#                   标识上层协议类型，常见值：
+#                   - 0x0800: IPv4（互联网协议版本4）
+#                   - 0x0806: ARP（地址解析协议）
+#                   - 0x86DD: IPv6（互联网协议版本6）
+#                   默认 0x0800（IPv4），内层是 ARP/IPv6 时自动推导
+# @auto: ethertype 默认占位 0x0800，当内层是 ARP/IPv6 时按内层推导（0x0806/0x86dd）
+#[proto(kind="eth")]
+func eth(dst_mac="ff:ff:ff:ff:ff:ff", src_mac="00:00:00:00:00:00", ethertype=0x0800) -> bytes {
+    # 组合三个字段：目标MAC + 源MAC + 以太网类型
+    concat(mac(dst_mac), mac(src_mac), be16(ethertype))
+}
+
+# 28B ARP 地址解析协议头（自表示协议 proto）
+# ARP 协议结构（RFC 826）
+# ARP 用于将网络层地址（IPv4）解析为链路层地址（MAC）。
+# 工作流程：
+#   1. 发送方广播 ARP Request："谁拥有 IP 地址 X？请告诉 Y"
+#   2. 目标单播 ARP Reply："我是 X，我的 MAC 是 Z"
+# @param htype: 硬件类型（2字节，大端序）
+#               1 = 以太网（最常见的链路层类型）
+# @param ptype: 协议类型（2字节，大端序）
+#               0x0800 = IPv4（ARP 要解析的网络层协议）
+# @param hlen: 硬件地址长度（1字节）
+#              6 = MAC 地址长度（48位 = 6字节）
+# @param plen: 协议地址长度（1字节）
+#              4 = IPv4 地址长度（32位 = 4字节）
+# @param op: 操作码（2字节，大端序）
+#            request() = 1（ARP 请求：询问目标 MAC）
+#            reply() = 2（ARP 应答：告知自己的 MAC）
+# @param sha: 发送方硬件地址（源 MAC，6字节）
+#             请求时填写本机 MAC，应答时填写本机 MAC
+# @param spa: 发送方协议地址（源 IPv4，4字节）
+#             请求时填写本机 IP，应答时填写本机 IP
+#             支持域名（自动解析为 IPv4 地址）
+# @param tha: 目标硬件地址（目标 MAC，6字节）
+#             请求时填写 00:00:00:00:00:00（未知，待解析）
+#             应答时填写请求方的 MAC 地址
+# @param tpa: 目标协议地址（目标 IPv4，4字节）
+#             请求时填写要解析的 IP 地址
+#             应答时填写请求方的 IP 地址
+#             支持域名（自动解析为 IPv4 地址）
+# @auto: 无自动字段（ARP 协议无校验和）
+#[proto(kind="arp")]
+func arp(htype=1, ptype=0x0800, hlen=6, plen=4, op=request(), sha="00:00:00:00:00:00", spa="0.0.0.0", tha="00:00:00:00:00:00", tpa="0.0.0.0") -> bytes {
+    # 组合 ARP 头的各个字段
+    concat(
+        be16(htype),   # 硬件类型：以太网=1
+        be16(ptype),   # 协议类型：IPv4=0x0800
+        u8(hlen),      # 硬件地址长度：MAC=6字节
+        u8(plen),      # 协议地址长度：IPv4=4字节
+        be16(op),      # 操作码：request=1, reply=2
+        mac(sha),      # 发送方 MAC 地址
+        ip4(spa),      # 发送方 IPv4 地址
+        mac(tha),      # 目标 MAC 地址
+        ip4(tpa)       # 目标 IPv4 地址
+    )
+}
+
+# 网络层（Layer 3）
+# 网络层负责在**不同网络**之间路由数据包，实现端到端通信。
+# IPv4/IPv6 是网络层的主要协议，使用 IP 地址标识主机。
+# ICMP 用于网络诊断和错误报告（如 ping、traceroute）。
+
+# 20B IPv4 头（+变长 options）；total_length 与 header checksum 由引擎自动补
+# IPv4 数据包结构（RFC 791）
+# IPv4 是互联网的基础协议，每个数据包包含：
+#   - 版本和头长（1B）：版本号（4位）+ 头长度（4位，单位4字节）
+#   - 服务类型（1B）：QoS 优先级和拥塞控制
+#   - 总长度（2B）：整个数据包的长度（头+数据）
+#   - 标识/标志/片偏移（4B）：分片重组用
+#   - TTL（1B）：生存时间，每经过一个路由器减1，防止环路
+#   - 协议号（1B）：上层协议（1=ICMP, 6=TCP, 17=UDP）
+#   - 头校验和（2B）：头部完整性校验
+#   - 源/目标 IP（各4B）：发送方和接收方的 IP 地址
+# version/ihl 是同一字节的两个 4 位字段（bit 原语 `#[meta(bits=4)]`：声明顺序高位→低位，
+# version(4)+ihl(4) = 首字节 0x45）——ihl 是独立可引用字段，options 宽度
+# `bytes="sub(mul(ihl, 4), 20)"` 按它回算（带选项的头注册表也能解析）
+# @param src: 源 IPv4 地址（4字节，点分十进制）
+#             默认 0.0.0.0（raw 发送时自动填本地地址）
+#             支持域名（自动解析为 IPv4 地址）
+# @param dst: 目标 IPv4 地址（4字节，点分十进制）
+#             默认广播地址 255.255.255.255
+#             支持域名（自动解析为 IPv4 地址）
+# @param version: IP 版本号（4位，高4位字节）
+#                 4 = IPv4（固定值，不可修改）
+# @param ihl: 头部长度（4位，低4位字节，单位4字节）
+#             5 = 20字节（无选项的最小头）
+#             6+ = 24字节以上（含选项）
+#             计算公式：ihl = 5 + options/4
+# @param ttl: 生存时间（1字节，Time To Live）
+#             默认 64（Linux 默认值）
+#             每经过一个路由器减1，减到0时丢弃并发送 ICMP Time Exceeded
+#             防止数据包在网络中无限循环
+# @param proto: 上层协议号（1字节）
+#               标识数据部分使用的协议：
+#               1 = ICMP（互联网控制消息协议）
+#               6 = TCP（传输控制协议）
+#               17 = UDP（用户数据报协议）
+#               默认 0（占位，内层是 TCP/UDP/ICMP 时自动推导）
+# @param tos: 服务类型（1字节，Type of Service）
+#             用于 QoS（服务质量）控制：
+#             - 优先级（3位）：0=普通，7=网络控制
+#             - 延迟/吞吐量/可靠性标志（各1位）
+#             默认 0（尽力而为服务）
+# @param id: IP 标识（2字节，大端序）
+#            用于分片重组：同一数据包的所有分片具有相同的 id
+#            默认 0（可随机化以增强安全性）
+# @param flags: IP 标志（2字节，大端序）
+#               控制分片行为：
+#               df() = 0x4000（Don't Fragment，禁止分片）
+#               mf() = 0x2000（More Fragments，还有更多分片）
+#               默认 0（允许分片，无更多分片）
+# @param options: IP 选项（变长，长度 = ihl*4 - 20 字节）
+#                 常见选项：记录路由、时间戳、源路由等
+#                 默认 ""（无选项，ihl=5）
+#                 长度必须与 ihl 字段匹配，否则校验和错误
+# @auto: 自动补 total_length（整个数据包长度）与 header checksum（头部校验和）；
+#        proto 占位 0 且内层 TCP/UDP/ICMP 时自动推导协议号
+#[proto(kind="ipv4")]
+func ipv4(ihl=5, tos=0, proto=0, ttl=64, id=0, flags=0, options="", src="0.0.0.0", dst="255.255.255.255") -> bytes {
+    # 组合 IPv4 头的各个字段
+    concat(
+        #[meta(name="version", bits=4)] u8(4),      # 版本号：4位，固定值4
+        #[meta(name="ihl", bits=4)] u8(ihl),          # 头长度：4位，单位4字节
+        u8(tos),                                        # 服务类型：1字节
+        #[meta(len="auto")] be16(total),                # 总长度：2字节（自动计算）
+        be16(id),                                       # IP标识：2字节
+        be16(flags),                                    # 标志：2字节（分片控制）
+        u8(ttl),                                        # 生存时间：1字节
+        u8(proto),                                      # 协议号：1字节（上层协议）
+        #[meta(len="auto")] be16(checksum),             # 头校验和：2字节（自动计算）
+        ip4(src),                                       # 源IP地址：4字节
+        ip4(dst),                                       # 目标IP地址：4字节
+        #[meta(bytes="sub(mul(ihl, 4), 20)")] options   # IP选项：变长（根据ihl计算）
+    )
+}
+
+# 40B IPv6 头；payload_length 由引擎自动补（len="auto"，序列化器覆盖）
+# IPv6 数据包结构（RFC 2460）
+# IPv6 是 IPv4 的下一代协议，主要改进：
+#   - 地址空间：128位（IPv4 32位），解决地址耗尽问题
+#   - 简化头部：固定40字节，无校验和（由链路层和传输层保证）
+#   - 流标签：支持 QoS 和实时应用
+#   - 扩展头：灵活的选项机制（与 IPv4 的选项字段不同）
+# @param src: 源 IPv6 地址（16字节，冒号十六进制分组）
+#             默认 ::（未指定地址，raw 发送时自动填本地地址）
+#             支持域名（自动解析为 IPv6 地址）
+# @param dst: 目标 IPv6 地址（16字节，冒号十六进制分组）
+#             默认 ::（未指定地址）
+#             支持域名（自动解析为 IPv6 地址）
+# @param hop_limit: 跳数限制（1字节）
+#                   默认 64（Linux 默认值）
+#                   等同于 IPv4 的 TTL：每经过一个路由器减1
+#                   减到0时丢弃并发送 ICMPv6 Time Exceeded
+# @param next_header: 下一个头部类型（1字节）
+#                     标识紧跟 IPv6 头的扩展头或上层协议：
+#                     6 = TCP（传输控制协议）
+#                     17 = UDP（用户数据报协议）
+#                     58 = ICMPv6（IPv6 控制消息协议）
+#                     59 = 无下一个头部（默认占位，内层是 TCP/UDP/ICMPv6 时自动推导）
+# @auto: 自动补 payload_length（载荷长度，不含 IPv6 头本身）；
+#        next_header 占位 59 时按内层推导协议号
+#[proto(kind="ipv6")]
+func ipv6(src="::", dst="::", hop_limit=64, next_header=59) -> bytes {
+    # 组合 IPv6 头的各个字段
+    concat(
+        #[meta(name="first4")] hex("60000000"),    # 版本(6) + 流量类(0) + 流标签(0)
+        #[meta(len="auto")] be16(plen),             # 载荷长度：2字节（自动计算）
+        u8(next_header),                             # 下一个头部：1字节
+        u8(hop_limit),                               # 跳数限制：1字节
+        ip6(src),                                    # 源IPv6地址：16字节
+        ip6(dst)                                     # 目标IPv6地址：16字节
+    )
+}
+
+# ICMP 互联网控制消息协议头（+可选载荷）；checksum（offset 2-3）由引擎自动补（覆盖头+载荷；自表示 proto）
+# ICMP 协议结构（RFC 792）
+# ICMP 用于网络诊断和错误报告，是 ping 和 traceroute 的基础。
+# 常见类型：
+#   - Echo Request/Reply（8/0）：ping 命令使用
+#   - Destination Unreachable（3）：目标不可达
+#   - Time Exceeded（11）：TTL 超时（traceroute 使用）
+#   - Redirect（5）：重定向路由
+# @param type: ICMP 类型（1字节）
+#              常见类型：
+#              0 = Echo Reply（ping 应答）
+#              3 = Destination Unreachable（目标不可达）
+#              8 = Echo Request（ping 请求，默认值）
+#              11 = Time Exceeded（TTL 超时）
+# @param code: ICMP 代码（1字节）
+#              进一步细分类型含义，例如：
+#              - 类型3时：0=网络不可达, 1=主机不可达, 2=协议不可达, 3=端口不可达
+#              - 类型11时：0=TTL超时, 1=分片重组超时
+# @param id: 标识符（2字节，大端序）
+#            用于匹配请求和应答（ping 命令使用）
+#            默认 0（可使用 rand16() 随机生成）
+#            应答时会回显相同的 id 值
+# @param seq: 序列号（2字节，大端序）
+#             用于匹配请求和应答的顺序
+#             默认 0（可使用 rand16() 随机生成）
+#             每次 ping 请求递增，应答时回显相同的 seq 值
+# @param payload: 载荷数据（变长）
+#                 ping 命令通常填充时间戳和序号
+#                 默认 ""（空载荷）
+#                 可以是字符串或字节列表
+# @auto: 自动补 checksum（校验和，覆盖 ICMP 头+载荷，16位反码求和）
+#[proto(kind="icmp")]
+func icmp(type=8, code=0, id=0, seq=0, payload="") -> bytes {
+    # 组合 ICMP 头的各个字段
+    concat(
+        u8(type),                           # ICMP类型：1字节
+        u8(code),                           # ICMP代码：1字节
+        #[meta(len="auto")] be16(checksum), # 校验和：2字节（自动计算）
+        be16(id),                           # 标识符：2字节（匹配请求/应答）
+        be16(seq),                          # 序列号：2字节（匹配请求/应答）
+        #[meta(rest)] payload               # 载荷数据：变长
+    )
+}
+
+# 传输层（Layer 4）
+# 传输层负责在**进程之间**提供端到端通信服务。
+# TCP 提供可靠的、面向连接的字节流服务。
+# UDP 提供简单的、无连接的数据报服务。
+
+# TCP 传输控制协议头（20B 定长 + 变长 options；自表示协议 proto）
+# TCP 协议结构（RFC 793）
+# TCP 是可靠的传输层协议，特点：
+#   - 面向连接：三次握手建立连接，四次挥手断开
+#   - 可靠传输：序列号、确认号、重传机制
+#   - 流量控制：滑动窗口机制
+#   - 拥塞控制：慢启动、拥塞避免、快速重传、快速恢复
+# data_offset（byte 12 高 4 位）自动 = 5 + options/4（len="auto" + expr 变换，
+# `len` = 后续字段字节数，含 options 自身——表达式按头长 20 折算）
+# options 宽度 = (data_offset>>4)*4 - 20（解析侧按前序字段回算）
+# checksum（offset 16-17，含外层 IP 伪头部）由引擎自动补（len="auto"，序列化器覆盖）
+# @param sport: 源端口（2字节，大端序）
+#               标识发送方进程
+#               默认 rand16()（随机端口，1024-65535 范围）
+# @param dport: 目标端口（2字节，大端序）
+#               标识接收方进程，常见端口：
+#               80=HTTP, 443=HTTPS, 22=SSH, 53=DNS
+#               默认 0（占位，通常由调用方指定）
+# @param seq: 序列号（4字节，大端序）
+#             标识发送方数据的字节流位置
+#             初始序列号（ISN）在连接建立时随机选择
+#             用于可靠传输和数据重组
+# @param ack: 确认号（4字节，大端序）
+#             标识期望接收的下一个字节的序列号
+#             仅当 ACK 标志位有效时有意义
+#             用于确认已正确接收的数据
+# @param flags: TCP 标志位（1字节）
+#               控制连接状态和数据传输：
+#               syn() = 0x02（同步序列号，连接建立）
+#               ack() = 0x10（确认号有效）
+#               fin() = 0x01（结束连接）
+#               rst() = 0x04（重置连接）
+#               psh() = 0x08（推送数据）
+#               urg() = 0x20（紧急指针有效）
+#               默认 syn()（连接建立请求）
+#               可组合：bor(syn(), ack()) = 三次握手的第二步
+# @param window: 窗口大小（2字节，大端序）
+#                接收方的接收窗口大小（字节数）
+#                用于流量控制：发送方不能发送超过窗口大小的数据
+#                默认 65535（最大窗口）
+# @param urg: 紧急指针（2字节，大端序）
+#             紧急数据的末尾位置（相对于序列号的偏移）
+#             仅当 URG 标志位有效时有意义
+#             默认 0（通常不使用紧急数据）
+# @param options: TCP 选项（变长，长度需 4 的倍数）
+#                 常见选项：
+#                 - MSS（最大分段大小）：协商每个 TCP 段的最大数据长度
+#                 - Window Scale：窗口缩放因子
+#                 - SACK（选择性确认）：允许确认不连续的数据块
+#                 - Timestamp：时间戳（用于计算 RTT）
+#                 默认 ""（无选项，data_offset=5，20字节头）
+# @auto: 自动补 data_offset（数据偏移，5 + options/4，高4位）与 checksum（校验和，含外层 IP 伪头部）
+#[proto(kind="tcp")]
+func tcp(sport=rand16(), dport=0, seq=0, ack=0, flags=syn(), window=65535, urg=0, options="") -> bytes {
+    # 组合 TCP 头的各个字段
+    concat(
+        be16(sport),    # 源端口：2字节
+        be16(dport),    # 目标端口：2字节
+        be32(seq),      # 序列号：4字节
+        be32(ack),      # 确认号：4字节
+        #[meta(name="data_offset", len="auto", expr="shl(div(len + 13, 4), 4)")] u8(bor(0x50, 0)),  # 数据偏移(4位) + 保留(4位)
+        u8(flags),      # 标志位：1字节
+        be16(window),   # 窗口大小：2字节
+        #[meta(len="auto")] be16(checksum),    # 校验和：2字节（自动计算，含伪头部）
+        #[meta(name="urg")] be16(urg),          # 紧急指针：2字节
+        #[meta(bytes="sub(mul(shr(data_offset, 4), 4), 20)")] options  # TCP选项：变长
+    )
+}
+
+# 8B UDP 用户数据报协议头；length 与 checksum 引擎自动补（len="auto"，序列化器覆盖；自表示 proto）
+# UDP 协议结构（RFC 768）
+# UDP 是简单的传输层协议，特点：
+#   - 无连接：不需要建立/断开连接
+#   - 不可靠：不保证数据到达、顺序、不重复
+#   - 轻量级：头部开销小（8字节 vs TCP 20字节）
+#   - 适合实时应用：DNS、视频流、游戏、VoIP
+# @param sport: 源端口（2字节，大端序）
+#               标识发送方进程
+#               默认 rand16()（随机端口，1024-65535 范围）
+#               可选字段，不需要时设为 0
+# @param dport: 目标端口（2字节，大端序）
+#               标识接收方进程，常见端口：
+#               53=DNS, 67/68=DHCP, 69=TFTP, 123=NTP, 161=SNMP
+#               默认 0（占位，通常由调用方指定）
+# @auto: 自动补 length（UDP 数据报总长度，头+数据）与 checksum（校验和，含外层 IP 伪头部）
+#        checksum 为 0 表示未计算校验和（IPv4 可选，IPv6 必须）
+#[proto(kind="udp")]
+func udp(sport=rand16(), dport=0) -> bytes {
+    # 组合 UDP 头的各个字段
+    concat(
+        be16(sport),                        # 源端口：2字节
+        be16(dport),                        # 目标端口：2字节
+        #[meta(len="auto")] be16(length),   # 长度：2字节（头+数据，自动计算）
+        #[meta(len="auto")] be16(checksum)  # 校验和：2字节（自动计算，含伪头部）
+    )
+}
+
+# 应用层（Layer 7）
+# 应用层直接为用户应用程序提供网络服务。
+# HTTP 是最常用的 Web 协议，DNS 是域名解析的基础协议。
+
+# HTTP/1.1 头行（rest(子proto) 重复区元素子 proto）：line 字段读一行到 \r\n；
+# 解析侧空行（\r\n 开头）→ 解析失败 → 重复区停止（headers 区结束，body 由下一字段接）
+# HTTP 头行结构
+# HTTP 头部由多个头行组成，每行格式：字段名: 值\r\n
+# 常见头字段：
+#   - Host: 目标主机名（必需）
+#   - Content-Length: 请求/响应体长度
+#   - Content-Type: 内容类型（如 text/html, application/json）
+#   - Authorization: 认证凭据
+# @param text: 一行文本（如 "Host: example.com", "Content-Type: text/html"）
+#              格式：字段名: 值（不含 \r\n，自动添加）
+#[proto]
+func hdr_line(text="") -> bytes {
+    concat(line(text))
+}
+
+# HTTP/1.1 文本报文（自表示协议 proto）：start_line + headers（rest(hdr_line)
+# 重复解析到空行）+ 空行（hex("0d0a") 常量校验）+ body（rest）；rule tcp 80/8080
+# 分派（快速路径）+ start_line 字段内容魔数（协议识别以内容为准，端口只是提示）
+# HTTP 协议结构（RFC 2616）
+# HTTP 是无状态的应用层协议，请求/响应模式：
+#   请求格式：方法 路径 HTTP版本\r\n 头部\r\n\r\n 体
+#   响应格式：HTTP版本 状态码 原因\r\n 头部\r\n\r\n 体
+# 常见方法：GET, POST, PUT, DELETE, HEAD
+# @param start_line: 请求行或状态行（第一行）
+#                    请求示例："GET /index.html HTTP/1.1", "POST /login HTTP/1.1"
+#                    响应示例："HTTP/1.1 200 OK", "HTTP/1.1 404 Not Found"
+#                    默认 "GET / HTTP/1.1"（最简单的 GET 请求）
+# @param headers: 头部行列表
+#                 格式：["字段名: 值", "字段名: 值", ...]
+#                 示例：["Host: example.com", "Content-Length: 0"]
+#                 默认 []（空列表，无头部）
+# @param body: 请求/响应体（变长）
+#              POST/PUT 请求的数据，或响应的内容
+#              默认 ""（空体）
+#              可以是字符串或字节列表
+# @auto: 原样字节，无自动字段（HTTP 无校验和，由 TCP 保证完整性）
+#[proto(kind="http")]
+#[rule(or(tcp(dport=80), tcp(dport=8080)))]
+#[rule(contains("HTTP/", in=start_line))]
+func http(start_line="GET / HTTP/1.1", headers=[], body="") -> bytes {
+    # 组合 HTTP 报文的各个部分
+    concat(
+        line(start_line),                           # 请求/状态行 + \r\n
+        #[meta(rest="hdr_line")] headers,           # 头部行列表（重复解析到空行）
+        hex("0d0a"),                                # 空行（头部结束标志）\r\n
+        #[meta(rest)] body                          # 请求/响应体
+    )
+}
+
+# DNS 查询记录（list 元素子 proto）：name（DNS 名字，DnsName 字段）+ qtype/qclass 定宽
+# DNS 查询记录结构
+# 查询记录指定要查询的域名和记录类型：
+#   - name: 要查询的域名（如 "www.example.com"）
+#   - qtype: 查询的记录类型（A, AAAA, MX, CNAME 等）
+#   - qclass: 查询的类（几乎总是 IN = Internet）
+# @param name: 查询域名（DNS 线格式编码）
+#              示例："www.baidu.com", "mail.example.com"
+#              默认 ""（空域名）
+# @param qtype: 查询类型（2字节，大端序）
+#               常见类型：
+#               1 = A（IPv4 地址）
+#               28 = AAAA（IPv6 地址）
+#               15 = MX（邮件交换）
+#               5 = CNAME（别名）
+#               16 = TXT（文本记录）
+#               默认 1（A 记录，查询 IPv4 地址）
+# @param qclass: 查询类（2字节，大端序）
+#                1 = IN（Internet，几乎总是使用这个）
+#                默认 1（IN 类）
+#[proto]
+func dns_question(name="", qtype=1, qclass=1) -> bytes {
+    concat(
+        dns_name(name),         # 域名（DNS 线格式：长度前缀+标签+0终止）
+        be16(qtype),            # 查询类型：2字节
+        be16(qclass)            # 查询类：2字节
+    )
+}
+
+# DNS 应答记录（list 元素子 proto）：name（压缩指针追跳还原）+ 定宽 +
+# rdlen（count(rdata) 算）+ rdata（宽度按前序字段 rdlen 回算）
+# DNS 应答记录结构
+# 应答记录包含查询结果：
+#   - name: 资源域名（可能是压缩指针，节省空间）
+#   - rtype/class: 记录类型和类（与查询对应）
+#   - ttl: 缓存时间（秒），0 表示不缓存
+#   - rdata: 记录数据（格式取决于类型）
+# @param name: 资源域名（DNS 线格式，可能包含压缩指针 0xC0xx）
+#              压缩指针指向报文中前面出现过的域名，追跳还原为完整域名
+#              默认 ""（空域名）
+# @param rtype: 记录类型（2字节，大端序）
+#               与 qtype 对应：1=A, 28=AAAA, 15=MX, 5=CNAME 等
+#               默认 1（A 记录）
+# @param class: 记录类（2字节，大端序）
+#               几乎总是 1 = IN（Internet）
+#               默认 1（IN 类）
+# @param ttl: 缓存时间（4字节，大端序，单位秒）
+#             DNS 缓存服务器保存记录的时间
+#             0 表示不缓存（每次都查询权威服务器）
+#             常见值：300（5分钟）, 3600（1小时）, 86400（1天）
+# @param rdata: 记录数据（变长）
+#               格式取决于记录类型：
+#               - A 记录：4字节 IPv4 地址（如 [192,168,1,1]）
+#               - AAAA 记录：16字节 IPv6 地址
+#               - CNAME 记录：域名（DNS 线格式）
+#               - MX 记录：优先级(2B) + 邮件服务器域名
+#               默认 ""（空数据）
+#[proto]
+func dns_answer(name="", rtype=1, class=1, ttl=0, rdata="") -> bytes {
+    concat(
+        dns_name(name),                         # 资源域名（可能含压缩指针）
+        be16(rtype),                            # 记录类型：2字节
+        be16(class),                            # 记录类：2字节
+        be32(ttl),                              # 缓存时间：4字节
+        #[meta(name="rdlen")] be16(count(rdata)),  # 数据长度：2字节（自动计算）
+        #[meta(bytes="rdlen")] rdata            # 记录数据：变长
+    )
+}
+
+# DNS 报文（头 12B + 问题区 + 应答/授权/附加区；自表示协议 proto，可构造可解析）
+# questions/answers/authority/additional 为 list 重复字段（计数 = 各区 count）
+# DNS 协议结构（RFC 1035）
+# DNS 是域名解析协议，将域名转换为 IP 地址。
+# 报文结构：
+#   - 头部（12B）：事务ID、标志、四区计数
+#   - 问题区：查询的域名和类型
+#   - 应答区：查询结果（资源记录）
+#   - 授权区：权威域名服务器信息
+#   - 附加区：额外有用信息
+# @param id: 事务 ID（2字节，大端序）
+#            用于匹配请求和应答（应答时回显相同的 id）
+#            默认 0（可使用 rand16() 随机生成）
+# @param flags: 标志位（2字节，大端序）
+#               控制 DNS 报文的行为：
+#               - QR（1位）：0=查询, 1=应答
+#               - Opcode（4位）：0=标准查询, 1=反向查询, 2=服务器状态
+#               - AA（1位）：权威应答
+#               - TC（1位）：报文被截断
+#               - RD（1位）：期望递归查询（默认开启）
+#               - RA（1位）：支持递归查询
+#               - Rcode（4位）：应答码（0=无错误）
+#               默认 0x0100（RD=1，期望递归查询）
+# @param questions: 查询记录列表
+#                   每个元素是一个 dns_question 记录
+#                   示例：["www.baidu.com", "mail.example.com"]
+#                   默认 []（空列表，无查询）
+# @param answers: 应答记录列表
+#                 包含查询结果（A/AAAA/CNAME 等记录）
+#                 仅应答报文有值，查询报文通常为空
+#                 默认 []（空列表）
+# @param authority: 授权记录列表
+#                   包含权威域名服务器信息（NS 记录）
+#                   用于指示哪个服务器是该域名的权威来源
+#                   默认 []（空列表）
+# @param additional: 附加记录列表
+#                    包含有用的额外信息（如 A 记录对应的 IP）
+#                    减少后续查询次数
+#                    默认 []（空列表）
+# @auto: 原样字节，无自动字段（DNS 头部无校验和，由 UDP/TCP 保证完整性）
+#[proto(kind="dns")]
+#[rule(udp(dport=53))]
+#[rule(tcp(dport=53))]
+#[rule(or(ne(qdcount, 0), ne(ancount, 0), ne(nscount, 0), ne(arcount, 0)))]
+func dns(id=0, flags=0x0100, questions=[], answers=[], authority=[], additional=[]) -> bytes {
+    # 组合 DNS 报文的各个部分
+    concat(
+        be16(id),                                                   # 事务ID：2字节
+        be16(flags),                                                # 标志位：2字节
+        #[meta(name="qdcount")] be16(count(questions)),             # 查询记录数：2字节
+        #[meta(name="ancount")] be16(count(answers)),               # 应答记录数：2字节
+        #[meta(name="nscount")] be16(count(authority)),             # 授权记录数：2字节
+        #[meta(name="arcount")] be16(count(additional)),            # 附加记录数：2字节
+        #[meta(list="qdcount", item="dns_question")] questions,     # 查询记录区
+        #[meta(list="ancount", item="dns_answer")] answers,         # 应答记录区
+        #[meta(list="nscount", item="dns_answer")] authority,       # 授权记录区
+        #[meta(list="arcount", item="dns_answer")] additional       # 附加记录区
+    )
+}
+
+export:
+- eth
+- arp
+- ipv4
+- ipv6
+- icmp
+- tcp
+- udp
+- http
+- dns

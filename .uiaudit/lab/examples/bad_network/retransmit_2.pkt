@@ -1,0 +1,13 @@
+# bad_network 步骤 5：TCP Retransmission #2（指数退避）
+# 第二次重传，间隔约 2s（指数退避：1s → 2s → 4s → 8s）
+# seq/ack 号与原始包完全一致
+http_req = http(start_line="GET / HTTP/1.1")
+retransmit_2 = use(http_req)
+             |> tcp(sport=params("sport", 40000), dport=params("port", 80),
+                    seq=global("cseq", 0x1000) + 1, ack=global("sseq", 0x2000) + 1,
+                    flags=bor(psh(), ack()))
+             |> ipv4(dst=params("ip", "127.0.0.1"))
+             |> eth()
+
+export:
+- retransmit_2

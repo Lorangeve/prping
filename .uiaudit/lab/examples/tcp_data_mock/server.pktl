@@ -1,0 +1,72 @@
+# TCP 数据传输 mock · 服务端配方（server.pktl）：一个 pktl 就是一个「数据确认服务」。
+#
+# 配方显式列出**多组**监听+应答步骤（pktl 可包含任意多包）：每组 = 一次
+# listen 命中（持续监听直到匹配 PSH|ACK 数据段）→ extract 写 global → 触发发包
+# 纯 ACK 确认段。这里两组对应 client.pktl 的两步数据发送；要服务更多次就再写几组。
+#
+# 每组步骤：
+#   步骤 1：wait:（无值 = 持续监听）——listen.pkt 只有 ipv4（无传输层）→ 链路层
+#           监听完整帧，sniffer 匹配 PSH|ACK（数据段；纯 ACK/RST 不误命中，
+#           见 listen.pkt 注释），命中后 extract 匹配帧字段写 global：请求方
+#           端口/序列号（确认号推导用）+ 双向 IP。
+#   步骤 2：触发发包——tcp_ack.pkt 用 global 构造纯 ACK（seq=0x2000 固定，
+#           ack = 本轮 r_seq + 45 = 数据段 seq + 载荷字节数）发回请求方
+#           （raw: true：有 tcp 传输层，必须显式 raw 才不会走 TCP 载荷建连）。
+#
+# 数值对照（client 两步，载荷均 45 字节，见 tcp_ack.pkt 的逐字计算）：
+#   第 1 轮：收到 seq=0x1000 的数据段 → 回 ack=0x1000+45=0x102D 的纯 ACK
+#   第 2 轮：收到 seq=0x102D 的数据段 → 回 ack=0x102D+45=0x105A 的纯 ACK
+# 两轮用同一份 listen.pkt/tcp_ack.pkt：extract 每轮重写同一组 global（后写覆盖
+# 先写），tcp_ack.pkt 的 ack=global("r_seq")+45 自动适配每轮的 seq——配方复用
+# 的典型形态（与 icmp_mock 的 reply.pkt 同思路）。
+#
+# 注意：client 步骤 2 带 delay: 0.5，给本配方下一轮监听（重新打开抓包）留出时间
+# ——回环上 client 亚毫秒跑完两步，不加 delay 会在 server 下一轮监听就绪前错过
+# 第二个数据段（经验见 icmp_mock README「为什么 seq 是 1001/1002」）。
+#
+# 运行（需 root；Linux AF_PACKET / macOS·Win libpcap 链路层抓帧）：
+#   sudo prping packet examples/tcp_data_mock/server.pktl
+# 客户端（另一终端，见 client.pktl 注释）：
+#   sudo prping packet examples/tcp_data_mock/client.pktl
+global:
+- r_sport
+- r_seq
+- r_src_ip
+- r_dst_ip
+
+recipe:
+- packet: listen.pkt
+  wait:
+  extract:
+  - name: r_sport
+    from: reply.tcp.sport
+    as: int
+  - name: r_seq
+    from: reply.tcp.seq
+    as: int
+  - name: r_src_ip
+    from: reply.ipv4.src
+    as: str
+  - name: r_dst_ip
+    from: reply.ipv4.dst
+    as: str
+- packet: tcp_ack.pkt
+  raw: true
+# ── 第 2 轮：继续监听第二个数据段 → extract → 触发发包（client 步骤 2）──
+- packet: listen.pkt
+  wait:
+  extract:
+  - name: r_sport
+    from: reply.tcp.sport
+    as: int
+  - name: r_seq
+    from: reply.tcp.seq
+    as: int
+  - name: r_src_ip
+    from: reply.ipv4.src
+    as: str
+  - name: r_dst_ip
+    from: reply.ipv4.dst
+    as: str
+- packet: tcp_ack.pkt
+  raw: true

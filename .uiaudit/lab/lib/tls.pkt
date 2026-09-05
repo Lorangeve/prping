@@ -1,0 +1,196 @@
+# eng_lib/tls.pkt —— TLS/SSL 协议定义（RFC 8446 TLS 1.3 / RFC 5246 TLS 1.2）
+#
+# TLS (Transport Layer Security) 是安全通信协议，为 HTTP、邮件等提供加密保护。
+# 本文件定义 TLS 握手消息的结构，用于学习和调试 TLS 连接。
+#
+# TLS 1.3 主要改进：
+#   - 握手减少到 1-RTT（甚至 0-RTT）
+#   - 移除不安全的加密套件
+#   - 前向保密成为默认
+#   - 加密握手消息
+#
+# 注意：本定义仅用于协议学习和调试，不实现完整的 TLS 栈。
+# 实际的 TLS 实现需要密码学库（如 OpenSSL、ring）。
+
+# TLS 记录层头部（5字节）
+# TLS 记录结构
+# TLS 记录是 TLS 协议的基本传输单元，包含：
+#   - 内容类型（1B）：握手(22)、告警(21)、应用数据(23)等
+#   - 版本（2B）：TLS 版本号（0x0301=TLS 1.0, 0x0303=TLS 1.2）
+#   - 长度（2B）：后续数据的长度
+# @param content_type: 内容类型（1字节）
+#                      20 = ChangeCipherSpec（更改密码规范）
+#                      21 = Alert（告警消息）
+#                      22 = Handshake（握手消息）
+#                      23 = ApplicationData（应用数据）
+# @param version: TLS 版本（2字节，大端序）
+#                 0x0301 = TLS 1.0
+#                 0x0302 = TLS 1.1
+#                 0x0303 = TLS 1.2
+#                 0x0304 = TLS 1.3
+# @param length: 数据长度（2字节，大端序）
+#                后续数据的字节数（最大 16384）
+# @param data: 记录数据（变长）
+#              根据 content_type 解析为握手消息、告警等
+# @auto: 无自动字段
+#[proto]
+func tls_record(content_type=22, version=0x0303, data="") -> bytes {
+    concat(
+        u8(content_type),           # 内容类型：1字节
+        be16(version),              # TLS版本：2字节
+        be16(count(data)),          # 数据长度：2字节（自动计算）
+        #[meta(rest)]
+        data                        # 记录数据：变长
+    )
+}
+
+# TLS 握手消息头部（4字节）
+# TLS 握手消息结构
+# 握手消息用于 TLS 连接建立，包含：
+#   - 消息类型（1B）：ClientHello(1), ServerHello(2), Certificate(11)等
+#   - 长度（3B）：后续数据的长度
+# @param msg_type: 握手消息类型（1字节）
+#                  0 = HelloRequest（已废弃）
+#                  1 = ClientHello（客户端问候）
+#                  2 = ServerHello（服务端问候）
+#                  4 = NewSessionTicket（新会话票据）
+#                  8 = EncryptedExtensions（加密扩展）
+#                  11 = Certificate（证书）
+#                  12 = ServerKeyExchange（服务端密钥交换）
+#                  13 = CertificateRequest（证书请求）
+#                  14 = ServerHelloDone（服务端问候完成）
+#                  15 = CertificateVerify（证书验证）
+#                  16 = ClientKeyExchange（客户端密钥交换）
+#                  20 = Finished（完成）
+# @param length: 消息长度（3字节，大端序）
+#                后续数据的字节数
+# @param data: 握手数据（变长）
+#              根据 msg_type 解析为 ClientHello、Certificate 等
+# @auto: length 自动计算
+#[proto]
+func tls_handshake(msg_type=1, data="") -> bytes {
+    concat(
+        u8(msg_type),               # 消息类型：1字节
+        #[meta(len="data", expr="band(len, 0xffffff)")] be32(length),  # 消息长度：3字节（低24位有效）
+        #[meta(rest="data")] data           # 握手数据：变长
+    )
+}
+
+# TLS ClientHello 消息
+# ClientHello 结构
+# ClientHello 是 TLS 握手的第一个消息，客户端发送支持的参数：
+#   - 版本：客户端支持的最高 TLS 版本
+#   - 随机数：32 字节随机数（用于密钥生成）
+#   - 会话 ID：用于会话恢复
+#   - 密码套件：客户端支持的加密算法列表
+#   - 压缩方法：客户端支持的压缩算法（TLS 1.3 已移除）
+#   - 扩展：各种扩展参数（SNI、签名算法等）
+# @param version: 客户端支持的最高版本（2字节）
+#                 0x0303 = TLS 1.2（TLS 1.3 使用此值，实际版本在扩展中协商）
+# @param random: 客户端随机数（32字节）
+#                用于密钥生成和防止重放攻击
+#                前 4 字节通常是时间戳
+# @param session_id: 会话 ID（变长，0-32字节）
+#                    用于会话恢复，空表示新会话
+# @param cipher_suites: 密码套件列表（变长，每项2字节）
+#                       客户端支持的加密算法，按优先级排序
+#                       常见套件：
+#                       0x1301 = TLS_AES_128_GCM_SHA256 (TLS 1.3)
+#                       0x1302 = TLS_AES_256_GCM_SHA384 (TLS 1.3)
+#                       0x002f = TLS_RSA_WITH_AES_128_CBC_SHA (TLS 1.2)
+# @param compression_methods: 压缩方法列表（变长，每项1字节）
+#                             TLS 1.3 必须为 [0]（无压缩）
+#                             0 = 无压缩（唯一推荐值）
+# @param extensions: 扩展列表（变长）
+#                    常见扩展：
+#                    - server_name (0): SNI，指定目标主机名
+#                    - supported_versions (43): 支持的 TLS 版本
+#                    - key_share (51): 密钥交换参数
+#                    - signature_algorithms (13): 支持的签名算法
+# @auto: 无自动字段
+#[proto]
+func tls_client_hello(version=0x0303, random="", session_id="", cipher_suites="", compression_methods="", extensions="") -> bytes {
+    concat(
+        be16(version),              # 版本：2字节
+        #[meta(bytes="32")] random, # 随机数：32字节
+        #[meta(len="session_id")] u8(session_id_len),  # 会话ID长度：1字节
+        #[meta(rest="session_id")] session_id,  # 会话ID：变长
+        #[meta(len="cipher_suites")] be16(cipher_suites_len),  # 密码套件长度：2字节
+        #[meta(rest="cipher_suites")] cipher_suites,  # 密码套件列表：变长
+        #[meta(len="compression_methods")] u8(compression_methods_len),  # 压缩方法长度：1字节
+        #[meta(rest="compression_methods")] compression_methods,  # 压缩方法列表：变长
+        #[meta(len="extensions")] be16(extensions_len),  # 扩展长度：2字节
+        #[meta(rest="extensions")] extensions  # 扩展列表：变长
+    )
+}
+
+# TLS ServerHello 消息
+# ServerHello 结构
+# ServerHello 是服务端对 ClientHello 的响应，选定的参数：
+#   - 版本：协商后的 TLS 版本
+#   - 随机数：32 字节服务端随机数
+#   - 会话 ID：用于会话恢复
+#   - 密码套件：选定的加密算法
+#   - 压缩方法：选定的压缩算法
+#   - 扩展：选定的扩展参数
+# @param version: 协商的 TLS 版本（2字节）
+#                 TLS 1.3 中此字段仍为 0x0303，实际版本在扩展中
+# @param random: 服务端随机数（32字节）
+#                用于密钥生成和防止重放攻击
+# @param session_id: 会话 ID（变长，0-32字节）
+#                    用于会话恢复
+# @param cipher_suite: 选定的密码套件（2字节）
+#                      从客户端列表中选择的加密算法
+# @param compression_method: 选定的压缩方法（1字节）
+#                           TLS 1.3 必须为 0（无压缩）
+# @param extensions: 扩展列表（变长）
+#                    选定的扩展参数
+# @auto: 无自动字段
+#[proto]
+func tls_server_hello(version=0x0303, random="", session_id="", cipher_suite=0x1301, compression_method=0, extensions="") -> bytes {
+    concat(
+        be16(version),              # 版本：2字节
+        #[meta(bytes="32")] random, # 随机数：32字节
+        #[meta(len="session_id")] u8(session_id_len),  # 会话ID长度：1字节
+        #[meta(bytes="session_id_len")] session_id, # 会话ID：变长
+        be16(cipher_suite),         # 密码套件：2字节
+        u8(compression_method),     # 压缩方法：1字节
+        #[meta(len="extensions")] be16(extensions_len),  # 扩展长度：2字节
+        #[meta(rest="extensions")] extensions  # 扩展列表：变长
+    )
+}
+
+# TLS 告警消息
+# TLS 告警结构
+# 告警消息用于通知错误或连接关闭：
+#   - 级别：warning(1) 或 fatal(2)
+#   - 描述：具体的告警类型
+# @param level: 告警级别（1字节）
+#               1 = Warning（警告，连接可继续）
+#               2 = Fatal（致命，连接必须关闭）
+# @param description: 告警描述（1字节）
+#                     常见告警：
+#                     0 = CloseNotify（关闭通知）
+#                     10 = UnexpectedMessage（意外消息）
+#                     20 = BadRecordMAC（错误的记录 MAC）
+#                     40 = HandshakeFailure（握手失败）
+#                     42 = BadCertificate（错误证书）
+#                     70 = ProtocolVersion（协议版本错误）
+#                     71 = InsufficientSecurity（安全性不足）
+#                     80 = InternalError（内部错误）
+#                     112 = UnrecognizedName（无法识别的名称）
+# @auto: 无自动字段
+#[proto]
+func tls_alert(level=2, description=0) -> bytes {
+    concat(
+        u8(level),                  # 告警级别：1字节
+        u8(description)             # 告警描述：1字节
+    )
+}
+
+export:
+- tls_record
+- tls_handshake
+- tls_client_hello
+- tls_server_hello
+- tls_alert

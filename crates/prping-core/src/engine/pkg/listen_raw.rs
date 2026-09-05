@@ -124,14 +124,25 @@ pub fn listen_raw_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> 
     result
 }
 
+/// 配方监听步骤（链路层）的单次收帧结果。
+pub(crate) enum RawListen {
+    /// sniffer 命中帧；`until_matched` = 同时满足 loop 块的 `until:` 谓词。
+    Hit { data: Vec<u8>, until_matched: bool },
+    /// `until:` 命中但 sniffer 未命中：循环立即收工。
+    Until,
+}
+
 /// 配方 `wait:` 无值（持续监听）步骤（raw 链路层）：抓包循环，sniffer 匹配
 /// **第一个命中帧**即返回（命中后由配方 extract 取值、后续步骤发包回应）。
-/// `None` = Ctrl+C 中断。匹配器用 Arc（pcap 多设备多线程）。
+/// `None` = Ctrl+C 中断。匹配器用 Arc（pcap 多设备多线程）。`until` 非 None 时
+/// （loop 块上下文）额外检查每帧：sniffer 命中附带 `until_matched`；仅 until
+/// 命中 → [`RawListen::Until`]。
 pub(crate) fn listen_raw_once(
     matcher: Arc<packet_dsl::Matcher>,
+    until: Option<Arc<packet_dsl::Matcher>>,
     iface: Option<&str>,
     timeout: Option<Duration>,
-) -> anyhow::Result<Option<Vec<u8>>> {
+) -> anyhow::Result<Option<RawListen>> {
     let deadline = timeout.map(|d| std::time::Instant::now() + d);
     let expired = |deadline: Option<std::time::Instant>| {
         deadline.is_some_and(|dl| std::time::Instant::now() >= dl)
@@ -183,7 +194,19 @@ pub(crate) fn listen_raw_once(
             }
             let frame = buf[..n as usize].to_vec();
             if matcher.matches(&frame, None).is_some() {
-                break Some(frame);
+                let until_matched = until
+                    .as_ref()
+                    .is_some_and(|m| m.matches(&frame, None).is_some());
+                break Some(RawListen::Hit {
+                    data: frame,
+                    until_matched,
+                });
+            }
+            // 非命中帧也参与 until 检查（如"收到停服包即收工"）
+            if let Some(m) = until.as_ref()
+                && m.matches(&frame, None).is_some()
+            {
+                break Some(RawListen::Until);
             }
         };
         unsafe { libc::close(fd) };
@@ -213,13 +236,14 @@ pub(crate) fn listen_raw_once(
                 iface = iface.unwrap_or("")
             ));
         }
-        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let captured: Arc<Mutex<Option<RawListen>>> = Arc::new(Mutex::new(None));
         let mut handles = Vec::new();
         for idx in wanted {
             let dev = devs[idx].name.clone();
             if let Ok(mut cap) = crate::engine::rawpcap::open_capture_listen(&dev) {
                 let dlt = cap.get_datalink();
                 let matcher = Arc::clone(&matcher);
+                let until = until.clone();
                 let captured = Arc::clone(&captured);
                 handles.push(std::thread::spawn(move || {
                     loop {
@@ -241,7 +265,22 @@ pub(crate) fn listen_raw_once(
                                         p.data
                                     };
                                 if matcher.matches(data, None).is_some() {
-                                    *captured.lock().expect("captured lock") = Some(data.to_vec());
+                                    let until_matched = until
+                                        .as_ref()
+                                        .is_some_and(|m| m.matches(data, None).is_some());
+                                    *captured.lock().expect("captured lock") =
+                                        Some(RawListen::Hit {
+                                            data: data.to_vec(),
+                                            until_matched,
+                                        });
+                                    break;
+                                }
+                                // 非命中帧也参与 until 检查（如"收到停服包即收工"）
+                                if let Some(m) = until.as_ref()
+                                    && m.matches(data, None).is_some()
+                                {
+                                    *captured.lock().expect("captured lock") =
+                                        Some(RawListen::Until);
                                     break;
                                 }
                             }

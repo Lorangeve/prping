@@ -1,0 +1,26 @@
+# server 配方 · 步骤 1：链路层持续监听（wait: 无值 + raw: true）——匹配「携带数据的 TCP 段」。
+#
+# 监听方式选择：包体只有 ipv4（无 udp/tcp 传输层）→ 自动选**链路层监听**完整帧
+# （帧内 ipv4/tcp 字段齐全，sniffer 可直接匹配 tcp.* 字段；需 root/管理员抓包）。
+# 包定义仅用于选监听方式/文档占位，实际匹配完全由 sniffer 规则决定。
+#
+# 监听规则：match tcp(flags=bor(psh(), ack()))——bor(psh(), ack()) = 0x08|0x10
+# = 0x18（位常量来自 eng_lib/bytes.pkt：fin=0x01/syn=0x02/rst=0x04/psh=0x08/
+# ack=0x10/urg=0x20/...）。sniffer 对回包 flags 做**字节级**比较（表达式求值成
+# 1 字节再与帧内 flags 字节相等比较），只有 PSH|ACK（数据段）命中：
+#   - 纯 ACK（0x10，本配方刚回的无载荷确认段）≠ 0x18 → 不会被当成新数据，
+#     避免「互相确认」死循环——这正是 mock 服务端必须区分数据段/确认段的原因；
+#   - 内核 RST（0x04，见 tcp_data.pkt 注释）≠ 0x18 → 对未监听端口的内核反应
+#     也不会误触发配方；
+#   - 若写成 flags=ack() 会把纯 ACK 也匹配进来（把自己刚发的确认当新数据）；
+#     若写成 flags="psh,ack"（字符串形式）也能精确匹配，但字节表达式与发包侧
+#     构造（bor(psh(), ack())）同形，教学上更直观。
+#
+# 注意：元件/变量名勿用 psh/ack/syn/fin 等命名——会遮蔽 eng_lib 的位常量值函数。
+# 监听模式没有「发包」可引用：sniffer 规则只能用字面量/值表达式（引用发包字段
+# 的裸 Ident 在监听模式构建期直接报错）。
+p = raw(bytes="")
+use(p) |> ipv4()
+
+sniffer:
+  - match tcp(flags=bor(psh(), ack()))

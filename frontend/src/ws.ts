@@ -12,7 +12,6 @@ export type Status = "connected" | "connecting" | "closed";
 /** run 信封参数：工作区内 .pkt/.pktl + packet 子命令选项（未给的字段不发）。 */
 export interface RunOpts {
   name: string;
-  target?: string;
   params?: Record<string, string>;
   globals?: Record<string, string>;
   count?: number;

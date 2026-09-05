@@ -1,0 +1,40 @@
+# UDP 门禁 mock · 服务端配方（server.pktl）：一个「只认固定 PIN」的 DNS 门禁。
+#
+# 爆破演示的安全形态：靶标和攻击方都是本配方家族，回环闭环、免 root。
+#   终端 1（门禁）：prping packet examples/brute_pin/server.pktl
+#   终端 2（爆破）：prping packet examples/brute_pin/client.pktl 127.0.0.1:55353
+#
+# 服务端只有两步：
+#   步骤 1  listen.pkt  wait:（无值 = 无限监听）——DNS 查询里 qname 不带正确 PIN
+#                       的候选不匹配 sniffer、被静默忽略，服务端继续等；正确候选
+#                       命中后 extract 写 global：事务 ID（reply.dns.id）+ 对端
+#                       地址（reply.peer.ip/port）。
+#   步骤 2  grant.pkt   触发发包——flags=0x8180、qname "GRANT.pin.lab" 的应答回给
+#                       命中方。配方到此结束（门禁开一次即完成使命；要再来一轮就
+#                       重启本配方）。
+#
+# 教学点（对着 client.pktl 的 ✗/✓ 看）：
+#   - 爆破的「成功判定」在服务端匹配规则：contains("PIN-4242") 就是口令校验；
+#   - 错误尝试在服务端侧是「不存在」的（不回包），客户端只能靠超时感知——
+#     真实服务也常这样（或回统一拒绝），爆破方只能靠响应差异侧信道猜；
+#   - 防御视角：这一步在实际系统里应配限速/锁定/告警（连续失败即断开），
+#     本 mock 故意什么都不做，正是「不设防的门禁」。
+global:
+- tid       # 命中查询的事务 ID（reply.dns.id → grant.pkt 应答回填）
+- cip       # 命中方 IP（reply.peer.ip → grant.pkt 的 dst）
+- cport     # 命中方端口（reply.peer.port → grant.pkt 的 dport）
+
+recipe:
+- packet: listen.pkt
+  wait:
+  extract:
+  - name: tid
+    from: reply.dns.id
+    as: int
+  - name: cip
+    from: reply.peer.ip
+    as: str
+  - name: cport
+    from: reply.peer.port
+    as: int
+- packet: grant.pkt

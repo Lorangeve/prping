@@ -1,0 +1,14 @@
+# server 配方 · 第 2 组步骤 1：链路层持续监听（wait: 无值），匹配 HTTP POST 请求帧。
+# 结构与 listen_get.pkt 完全同构，只有两处不同：
+#   1. sniffer 匹配 method="POST"（请求行 "POST /login HTTP/1.1" 拆出 method）；
+#   2. extract 目标相同（r_sport/r_seq/r_src_ip/r_dst_ip），但本次命中的是
+#      POST 帧——ack 推进 136 字节（见 resp_post.pkt / http_post.pkt 的字节计算）。
+#
+# 同样的注意点：包定义无 udp/tcp 层 → 自动选链路层监听（需 root）；抓包设备重启
+# （重新开 AF_PACKET）需要时间，client 步骤 2 的 delay: 0.5 就是给这留的窗口
+# （同 icmp_mock「为什么 seq 是 1001/1002」的经验）。
+p = raw(bytes="")
+use(p) |> ipv4() |> eth()
+
+sniffer:
+  - match http(method="POST")

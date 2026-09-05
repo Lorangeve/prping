@@ -27,6 +27,7 @@ sniffer 匹配 + `extract` 写 global + 触发发包步骤）与 `client.pktl`�
 | `icmp_echo_server/` | **配方服务端入门样板**：单组 listen+reply 的 ICMP echo | 链路层（root） |
 | `dns_echo_listen/` | **DNS mock**：查询 → 带 A 记录应答；客户端两步 extract 复用 tid | UDP :53（root 绑定） |
 | `dns_trigger/` | **配方监听触发最小样例**：`wait:` 无值命中后触发发包 | UDP 55353（免 root） |
+| `dns_loop_server/` | **循环监听服务**：`loop:` 无限包 listen+reply 连续服务多请求，`until:` 停服包收工（Ctrl+C 亦优雅） | UDP 55354（免 root） |
 | `tcp_handshake_listen/` | **TCP 握手 mock**：listen 纯 SYN → SYN-ACK（ack=seq+1），客户端 extract 服务端 ISN | 链路层（root） |
 | `sniffer_chat/` | **双进程对话模拟**：`sent.`/`reply.` 两种 extract 来源 + and/not sniffer 组合 | UDP 55353（免 root） |
 
@@ -41,6 +42,17 @@ sniffer 匹配 + `extract` 写 global + 触发发包步骤）与 `client.pktl`�
   DSL 范围），无应答语义可模拟。
 - `icmp_ping/` — 对**真实目标**发 1～10 次 ICMP ping 的实用配方（`icmp_ping_real_N`）。
 - `pcaps/` — pcap 素材文件。
+
+## 爆破演示（仅限授权环境 / 本机靶场）
+
+在线口令爆破的教学示例：看清爆破流量的报文形态、服务端「口令校验点」与响应侧
+信道（✗/✓、401/403 vs 200），以及为什么真实服务需要限速/锁定/告警。
+**全部默认打本机回环，请勿对未授权目标使用。**
+
+| 目录 | 场景 | 形态 | 监听方式 |
+| --- | --- | --- | --- |
+| `brute_pin/` | DNS 门禁 PIN 爆破（候选藏 qname，字节谓词校验） | mock server/client 闭环（免 root） | UDP 55353 |
+| `brute_http/` | HTTP 表单 / Basic 认证爆破 | 配方 + Python 本机靶场 `lab_server.py`（免 root） | TCP 8000（payload 模式） |
 
 ## 使用方法
 
@@ -62,7 +74,7 @@ sudo prping packet examples/icmp_mock/server.pktl
 sudo prping packet examples/icmp_mock/client.pktl 127.0.0.1
 ```
 
-免 root 的组合：`dns_trigger/`、`sniffer_chat/`（UDP 55353）、
+免 root 的组合：`dns_trigger/`、`dns_loop_server/`（UDP 55353/55354）、`sniffer_chat/`（UDP 55353）、
 `udp_mock/` 的 VNC 步骤（高位端口）、`dns_echo_listen/` 的客户端（payload 模式）。
 
 ### 参数注入

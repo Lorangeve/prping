@@ -6,8 +6,9 @@
 # 步骤 2：触发发包——reply.pkt 用 global 构造 echo reply 发回请求方（raw: true，
 #         裸 IP 外层走内核 IP 栈路由）。
 #
-# 一个 wait 步骤服务一个请求：要连续服务更多请求就多写几组 listen+reply 步骤
-# （见 examples/icmp_mock/server.pktl 的两组写法）。
+# 一个 wait 步骤服务一个请求：要连续服务更多请求，把 listen+reply 步骤包进
+# `loop:` 块（见 examples/dns_loop_server/ 的无限循环写法），或像
+# examples/icmp_mock/server.pktl 那样手写多组。
 #
 # 运行（需 root/管理员；Linux AF_PACKET / macOS·Windows libpcap·Npcap）：
 #   sudo prping packet examples/icmp_echo_server/server.pktl

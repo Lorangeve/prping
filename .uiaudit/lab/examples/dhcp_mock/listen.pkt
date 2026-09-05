@@ -1,0 +1,47 @@
+# dhcp_mock · server 配方 · 监听步骤（listen.pkt）：链路层持续监听 BOOTREQUEST。
+#
+# ── 为什么必须链路层监听（server.pktl 里显式 raw: true），而不是 UDP 数据报监听 ──
+# 引擎按「listen 包内有无 udp/tcp 传输层」自动选监听方式：本包有 udp → 自动选
+# UDP 数据报监听（bind :67，recvfrom 收到的只是 DHCP 载荷本身）。但本轮改造实测：
+# **裸 DHCP 载荷反解不出任何层**——dissect 双路径逐一失败：
+#   · 以太网路径：字节 12-13（ciaddr 前两字节 0x0000）被当作 ethertype，
+#     0x0000 < 0x0600 判「非以太网 II 帧」→ 拒绝；
+#   · 裸 IP 路径：首 nibble 是 0x0（op=1），不是 4/6 → 拒绝；
+#   · 应用层内容回退只试 dns/http 规则（DHCP 无 proto 声明）→ 不命中。
+# 层栈为空 ⇒ 任何 sniffer 谓词（包括 match raw(...)）都匹配不到——UDP 数据报
+# 监听模式下 DHCP 永远被忽略（实测探针：packet --wait 监听收到 58 B Discover
+# 数据报，打印 "- ignored 58 B"，mask 谓词未命中）。
+# 因此 server.pktl 的监听步骤显式 raw: true 强制**链路层监听**：抓完整帧，
+# 帧内 ipv4+udp 反解成功，DHCP 载荷成为 raw 层（首字节 = op），字节谓词才能
+# 命中；且帧内字段齐全——extract 可直接取 reply.ipv4.src/dst 与 reply.udp.sport
+# （比 UDP 数据报模式的 reply.peer.*——对端地址来自 socket——信息更完整）。
+#
+# 包体仅占位/文档（配方的 listen 步骤不发送本包；直接 packet --wait --raw 单跑
+# 本文件时"发送段先行"会先发一个占位空包，无碍），实际匹配完全由 sniffer 决定。
+p = raw(bytes="")
+use(p) |> udp(sport=68, dport=67) |> ipv4(dst="127.0.0.1")
+
+sniffer:
+  # 三重跨层 AND（and() 的子项是完整的 match 子句。谓词语法在 parser.rs 验证：
+  # and/or/not 是与 match 平级的顶层谓词，写作 and(match 层(...), ...)——
+  # 不能写成 match and(...)，那样 and 会被当作层名解析报错）。
+  #   ① ipv4.proto=17——IP 载荷是 UDP；排除内核 ICMP port-unreachable 等杂帧
+  #     （回环上无人 bind :67/:68，每个 DHCP 数据报都会触发一个 ICMP 差错；
+  #      ICMP 差错帧的嵌入原包不会递归反解——dissect.rs ICMP 分支只把嵌入字节
+  #      存进 icmp.payload，不产出 udp/raw 层——udp/raw 两个条件本身已挡住它，
+  #      这里按 proto 过滤是双保险兼教学：展示完整协议链）。
+  #   ② udp 68→67——BOOTREQUEST 只从客户端 :68 发往服务端 :67（RFC 951/2131）。
+  #   ③ raw 首字节 mask(0x01)——(op & 0x01)==0x01 即 op=1（BOOTREQUEST）。
+  # mask 语义（matchpred.rs 验证）：只取该层原始字节的**首字节**，判定式是
+  # (首字节 & mask) == mask——0x01&0x01=0x01 ✓（Discover/Request，op=1）；
+  # 0x02&0x01=0 ✗（Offer/Ack 等 BOOTREPLY，op=2，被排除）。
+  #
+  # 为什么不进一步区分 Discover/Request（两者 op 都是 1）：严格区分要匹配
+  # option 53 的字节模式 35 01 01（Discover）vs 35 01 03（Request），但 sniffer
+  # 字节谓词里 startswith/endswith/contains 只接受**字符串**参数（parser.rs
+  # pat_item：Tok::Str → UTF-8 字节），而 DSL 字符串转义只有 \n \r \t \\ \"
+  # （lexer.rs 验证），表达不了 0x01/0x03 这类控制字节；mask 又只看首字节。
+  # 即：现有谓词无法表达 option 53 的字节模式。因此两组监听复用本文件同一条
+  # 规则、按组配对——第 1 组命中 = Discover → 回 Offer；第 2 组命中 = Request
+  # → 回 Ack（与 icmp_mock 两组 listen 用同一规则、按位置配对同款思路）。
+  - and(match ipv4(proto=17), match udp(sport=68, dport=67), match raw(mask(0x01)))

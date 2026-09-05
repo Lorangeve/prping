@@ -1,0 +1,20 @@
+# ICMP echo 客户端配方（client.pktl）：发 echo request → wait 校验 → extract 回包 id。
+#
+# 与 icmp_mock/client.pktl 的区别：本配方是**单步最小客户端**（配一次请求），
+# 且 reply 是纯回显（seq 不偏移）——回环上内核会替答 ICMP echo（比配方回包更快），
+# 本示例适合对**另一台机器**的请求做应答；回环上可验证的 mock 见 ../icmp_mock/。
+#
+# 运行（需 root；与 server.pktl 同机两个终端）：
+#   sudo prping packet examples/icmp_echo_server/client.pktl 127.0.0.1
+#   （ip 可注入：-p ip=192.168.1.1）
+global:
+- cid
+
+recipe:
+- packet: client.pkt
+  raw: true
+  wait: 2
+  extract:
+  - name: cid
+    from: reply.icmp.id
+    as: int

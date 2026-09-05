@@ -58,7 +58,6 @@ pub(crate) struct RunSpec {
     pub cwd: PathBuf,
     /// 生效库目录（`--lib` 透传，保持与页面分析一致的库解析顺序）。
     pub libs: Vec<PathBuf>,
-    pub target: Option<String>,
     pub params: Vec<(String, String)>,
     pub globals: Vec<(String, String)>,
     pub count: Option<usize>,
@@ -149,7 +148,9 @@ pub(crate) fn spec_from_envelope(
         file,
         cwd: root.to_path_buf(),
         libs,
-        target: opt_str("target"),
+        // 不收 target：发包地址属于包字段（params 注入 IP 层 dst / 传输层 dport），
+        // socket 目标由引擎从包内推导（resolve_send_target）；显式覆盖通道只留 CLI
+        // 位置参数（prping packet FILE HOST:PORT），webui 不再开这条旁路。
         params,
         globals,
         count,
@@ -309,7 +310,7 @@ fn spawn_child(spec: &RunSpec) -> anyhow::Result<Child> {
 }
 
 /// 组装 `packet` 子命令 argv（不含程序名；不含 --json——页面要人读输出）。
-/// 位置参数顺序固定：FILE.pkt[l] 在前、可选 HOST[:PORT] 在后（bpaf 语义）。
+/// 不传位置 HOST[:PORT]：地址一律由包字段（params）承载、引擎从包内推导。
 fn build_args(spec: &RunSpec) -> Vec<String> {
     let mut args: Vec<String> = vec!["packet".into()];
     // 库目录透传：子进程自身会默认发现「exe 目录 lib/」与「cwd lib/」（cwd =
@@ -378,9 +379,6 @@ fn build_args(spec: &RunSpec) -> Vec<String> {
         args.push("--json".into());
     }
     args.push(display_clean(&spec.file));
-    if let Some(t) = &spec.target {
-        args.push(t.clone());
-    }
     args
 }
 
@@ -567,7 +565,6 @@ mod tests {
             file: PathBuf::from("/ws/a.pkt"),
             cwd: PathBuf::from("/ws"),
             libs: vec![PathBuf::from("/lib")],
-            target: None,
             params: Vec::new(),
             globals: Vec::new(),
             count: None,
@@ -588,7 +585,6 @@ mod tests {
             ["packet", "--lib", "/lib", "/ws/a.pkt"]
         );
         let mut s = spec();
-        s.target = Some("127.0.0.1:8080".into());
         s.params = vec![("ip".into(), "1.2.3.4".into())];
         s.globals = vec![("g".into(), "7".into())];
         s.count = Some(3);
@@ -620,7 +616,6 @@ mod tests {
                 "run.pcap",
                 "--json",
                 "/ws/a.pkt",
-                "127.0.0.1:8080",
             ]
         );
         // 裸 --wait（持续监听）

@@ -1,0 +1,10 @@
+# server 配方 · 步骤 1：链路层持续监听（wait: 无值）——匹配 ICMP echo request（type=8）。
+# 监听打开全接口（--iface 可指定网卡）；命中后配方继续（触发步骤 2 发包）。
+#
+# 这里不需要包定义推导监听端口（链路层监听无端口），包体仅用于占位/文档；
+# 实际匹配完全由 sniffer 规则决定。
+p = raw(bytes="")
+use(p) |> icmp(type=8) |> ipv4()
+
+sniffer:
+  - match icmp(type=8)

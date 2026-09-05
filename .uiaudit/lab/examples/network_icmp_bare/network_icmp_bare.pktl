@@ -1,0 +1,29 @@
+# 配方 demo：两步 ICMP echo 流程（裸 IP 版，走内核路由 —— 代理/Clash fake-ip 环境可用）
+#
+# 运行（在 examples/ 目录下，无扩展名参数自动定位到本目录同名 pktl）：
+#   prping engine network_icmp_bare               # 概览
+#   sudo prping packet network_icmp_bare 127.0.0.1 --raw --wait 2
+#     （--raw 发原始 ICMP 包需 root/cap_net_raw；ICMP 无端口，用裸 HOST 即可；
+#       目标默认 127.0.0.1 本机内核直接回 echo reply；可注入 -p ip=www.baidu.com）
+#
+# 演示点：
+#   - 与 icmp_echo_flow 同款 extract 流程，但最外层是 ipv4/ipv6（裸 IP，无 eth 层）
+#     → 走 IPPROTO_RAW / IPV6_HDRINCL，包经内核路由表（代理环境经 TUN），
+#     src=0.0.0.0/:: 由内核按路由填源地址；回包经内核 ICMP 套接字收到
+#   - 步骤 1：id=rand16() 随机，从 echo reply 提取 id/seq 进 global
+#   - 步骤 2：复用提取值（seq 再 +1）
+global:
+- name: rid
+- name: rseq
+
+recipe:
+- packet: icmp_bare1.pkt
+  wait: 2
+  extract:
+  - name: rid
+    from: reply.icmp.id
+    as: int
+  - name: rseq
+    from: reply.icmp.seq
+    as: int
+- packet: icmp_bare2.pkt

@@ -262,7 +262,8 @@ impl LspServer {
                         })
                         .collect();
                 }
-                "wait" | "delay" | "count" | "params" | "init" | "name" => return vec![],
+                "wait" | "delay" | "count" | "params" | "init" | "name" | "loop" | "steps"
+                | "until" => return vec![],
                 _ => {}
             }
         }
@@ -295,6 +296,32 @@ impl LspServer {
             }
         }
 
+        // loop 块上下文：最近的列 0 配方项是否 `- loop:`（其后无其他列 0 项），
+        // 以及当前处于 until 谓词列表还是 steps: 嵌套步骤
+        let mut in_loop_item = false;
+        let mut in_until_list = false;
+        let mut in_loop_steps = false;
+        for i in (0..line_no).rev() {
+            let raw = lines.get(i).copied().unwrap_or("");
+            let t = raw.trim();
+            if t.starts_with('#') || t.is_empty() {
+                continue;
+            }
+            let indent_i = raw.len() - raw.trim_start().len();
+            if indent_i == 0 {
+                if t.starts_with("- loop:") {
+                    in_loop_item = true;
+                }
+                break;
+            }
+            if t == "until:" {
+                in_until_list = true;
+            }
+            if t == "steps:" {
+                in_loop_steps = true;
+            }
+        }
+
         // 项形态（`- ` 起头）：提取子项 → name:；配方顶层步骤 → packet:；global 项 → name:
         if let Some(item) = trimmed.strip_prefix("- ") {
             let _ = item;
@@ -302,7 +329,20 @@ impl LspServer {
                 return str_items(&["name: "], "提取项（from: 取回包字段）");
             }
             if section == "recipe" && indent == 0 {
-                return str_items(&["packet: "], "步骤 .pkt 文件");
+                return str_items(&["packet: ", "loop: "], "步骤 .pkt 文件 / loop 块");
+            }
+            // loop 项内的 `- ` 行：until 谓词 / 嵌套步骤
+            if in_loop_item && indent > 0 {
+                if in_until_list {
+                    return str_items(
+                        &["match "],
+                        "until 谓词（sniffer 同款：match 层(条件, ...)）",
+                    );
+                }
+                if in_loop_steps {
+                    return str_items(&["packet: "], "loop 嵌套步骤 .pkt 文件");
+                }
+                return str_items(&["until:", "steps:"], "loop 项选项");
             }
             if section == "global" {
                 return str_items(&["name: "], "全局变量（init: 可选初始化）");
@@ -319,6 +359,10 @@ impl LspServer {
                 return str_items(&["init: "], "global 选项");
             }
             if section == "recipe" {
+                // loop 项内、steps: 之前 → loop 项选项；其余（含嵌套步骤内）为常规步骤选项
+                if in_loop_item && !in_loop_steps {
+                    return str_items(&["until:", "steps:", "delay: "], "loop 项选项");
+                }
                 return str_items(
                     &[
                         "wait: ",
@@ -3074,8 +3118,11 @@ mod tests {
         );
         // global 项 → name:
         assert_eq!(ask(1, 2), vec!["name: ".to_string()]);
-        // 步骤项 → packet:
-        assert_eq!(ask(4, 2), vec!["packet: ".to_string()]);
+        // 步骤项 → packet: / loop:
+        assert_eq!(
+            ask(4, 2),
+            vec!["packet: ".to_string(), "loop: ".to_string()]
+        );
         // 提取子项 → name:；提取续行 → from:/as:
         assert_eq!(ask(7, 4), vec!["name: ".to_string()]);
         assert_eq!(ask(9, 4), vec!["from: ".to_string(), "as: ".to_string()]);

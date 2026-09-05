@@ -1124,6 +1124,30 @@ recipe:
   该 .pkt**（发其它包），步骤继续——超时重试/回退/降级通知等场景
   （demo → `examples/wait_timeout/`）。备选包注入当前 global/params；其发送失败走
   `on_error`。`wait:` 无值 / 负数（无限等待）无超时概念。
+- **循环块（`loop:`）**：`- loop: N`（N 可省或负数 = 无限，与 CLI `--wait` 同语义）
+  包裹一组**嵌套步骤**（`steps:` 后跟缩进 `- ` 步骤项），每轮**完整执行块内步骤**
+  ——服务端"监听→extract→回应"的循环编排：
+  
+  ```yaml
+  recipe:
+  - loop:                # 无值/负数 = 无限（until: 命中或 Ctrl+C 收工）
+    until:               # 可选：sniffer 同款谓词，任一命中 → 本轮结束后收工
+    - match dns(flags=0x8180)
+    steps:
+    - packet: listen.pkt
+      wait:
+      extract:
+      - name: tid
+        from: reply.dns.id
+    - packet: reply.pkt
+  ```
+  
+  `loop: N` 按次数收工（与 `until:` 先到先退）；`delay: 秒` 轮间延迟（第 2 轮起，
+  响应 Ctrl+C 提前收工）；`until:` 谓词可引用 `global(...)`（每轮重建 Matcher，取
+  上一轮 extract 最新值），命中**非 sniffer 包**（如停服包）时该包不回应、整块立即
+  收工。块内 Ctrl+C **优雅收工**（打印统计、退出码 0——非 loop 的监听步骤被 Ctrl+C
+  记为失败）。demo → `examples/dns_loop_server/`（无限循环服务 DNS 查询，收到
+  `flags=0x8180` 停服包收工）。
 - **容错**：步骤失败（发送失败 / extract 无回包或字段缺失）默认 **stop** 整个
   配方（退出码 1）；`on_error: continue` 记录失败继续，最后仍汇总报错。
 - **发送次数（`count:`）**：步骤 `count: N` 让该步骤的**每个包重复发送 N 次**
@@ -1159,6 +1183,8 @@ recipe:
   复用 tid）、
   `examples/dns_trigger/`（**监听触发最小样例**：配方 `wait:` 无值匹配查询 →
   extract → 触发步骤发包应答）、
+  `examples/dns_loop_server/`（**循环监听服务**：`loop:` 无限包 listen+reply，
+  连续服务多个请求，`until:` 收到停服包收工）、
   `examples/icmp_echo_server/`（**配方服务端入门样板**：单组 listen+reply）、
   `examples/tcp_handshake_listen/`（**TCP 握手 mock**：listen 纯 SYN → SYN-ACK）、
   `examples/sniffer_chat/`（**双进程对话模拟**：sent/reply 两种 extract 来源）。机制/

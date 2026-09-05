@@ -2132,3 +2132,273 @@ fn recipe_on_error_continue_sends_rest() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── 配方 loop 块 ────────────────────────────────────────────
+
+/// loop 系列测试串行化：这些测试依赖「探针 bind :0 → drop → 端口烘进 listen.pkt
+/// → 配方绑定」的交接窗口，并行运行会互抢临时端口导致查询打到别人 socket 上。
+static LOOP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 手工构造 DNS 消息（与 packet-dsl 构造的字节布局一致：12 字节头 + qname）。
+fn dns_msg(id: u16, flags: u16) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend(id.to_be_bytes());
+    b.extend(flags.to_be_bytes());
+    b.extend([0, 1, 0, 0, 0, 0, 0, 0]); // qdcount=1
+    b.extend([
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+    ]);
+    b.extend([0, 1, 0, 1]); // qtype=A qclass=IN
+    b
+}
+
+/// loop 讈次：`loop: 3` 包一个发后等应答步骤 → 每轮发送一次，共 3 轮后收工。
+#[test]
+fn recipe_loop_count_sends_n_iterations() {
+    let _loop_guard = LOOP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_registry();
+    let dir = temp_recipe_dir("loop-count");
+    std::fs::write(
+        dir.join("q.pkt"),
+        "p = raw(bytes=\"hi\")\nuse(p) |> udp(dport=9) |> ipv4(dst=\"127.0.0.1\") |> eth()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("flow.pktl"),
+        "recipe:\n- loop: 3\n  steps:\n  - packet: q.pkt\n    wait: 1\n",
+    )
+    .unwrap();
+
+    // UDP 回显服务器：收 3 个数据报并回显
+    let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+    let target = sock.local_addr().unwrap();
+    let sock2 = Arc::clone(&sock);
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        for _ in 0..3 {
+            let (n, peer) = sock2.recv_from(&mut buf).unwrap();
+            let _ = sock2.send_to(&buf[..n], peer);
+        }
+        tx.send(()).unwrap();
+    });
+
+    send_recipe(
+        &dir.join("flow.pktl"),
+        &PkgOptions {
+            target: Some(target),
+            mode: SendMode::Payload,
+            ..Default::default()
+        },
+    )
+    .expect("loop 配方执行成功");
+    server.join().unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 循环监听服务：`loop: 2` 包 listen（wait: 无值 + extract）+ reply——
+/// 每轮服务一个请求（dns_trigger 的 loop 化），客户端收到 2 个应答。
+#[test]
+fn recipe_loop_listen_serves_two() {
+    let _loop_guard = LOOP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_registry();
+    let dir = temp_recipe_dir("loop-serve");
+    // 随机空闲端口烘进 listen.pkt（监听地址由包内 dport 推导）
+    let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let listen_pkt = format!(
+        "p = raw(bytes=\"\")\nuse(p) |> udp(dport={port}) |> ipv4(dst=\"127.0.0.1\") |> eth()\n\nsniffer:\n  - match dns(flags=0x0100)\n"
+    );
+    std::fs::write(dir.join("listen.pkt"), listen_pkt).unwrap();
+    std::fs::write(
+        dir.join("reply.pkt"),
+        "q = dns(id=global(\"tid\"), flags=0x8180, questions=[\"example.com\"])\nfull = use(q) |> udp(sport=53, dport=global(\"cport\")) |> ipv4(dst=\"127.0.0.1\") |> eth()\n\nexport:\n- full\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("server.pktl"),
+        "global:\n- tid\n- cport\n\nrecipe:\n- loop: 2\n  steps:\n  - packet: listen.pkt\n    wait:\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
+    )
+    .unwrap();
+
+    // 客户端：重复发送同一查询（id=0x1111）直到收满 2 个应答——loop: 2 服务两轮。
+    // 注意：不用 connect()——回包源端口是配方回包 socket 的临时端口（载荷 udp 头
+    // 的 sport=53 不等于内核源端口），connected socket 会按源过滤导致收不到。
+    // 每轮之间 UDP 回包路径有 ~1s 回读窗口，轮次切换期间查询会被丢弃——重发
+    // 是真实客户端的正常行为；重发包落在后一轮也不会多消耗轮次（每轮只服务
+    // 一个命中，count=2 收满 2 个应答即配方收工）。
+    let client = std::thread::spawn(move || {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        // 接收窗口 1.5s：必须覆盖监听循环的 200ms 轮询延迟 + 回包发送耗时，
+        // 否则应答会落在窗口外，而对应轮次已被消耗（count 测试就会随机缺应答）
+        sock.set_read_timeout(Some(std::time::Duration::from_millis(1500)))
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let mut replies = Vec::new();
+        for _ in 0..20 {
+            sock.send_to(&dns_msg(0x1111, 0x0100), ("127.0.0.1", port))
+                .unwrap();
+            if let Ok((n, _)) = sock.recv_from(&mut buf) {
+                assert!(n >= 12, "应答过短");
+                replies.push(u16::from_be_bytes([buf[0], buf[1]]));
+                if replies.len() == 2 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            replies,
+            vec![0x1111, 0x1111],
+            "两轮各应答一次（id 回显查询 id）"
+        );
+    });
+
+    // send_recipe 放线程 + 超时护栏（listen 若永不匹配不能拖死测试进程）
+    let (tx, rx) = mpsc::channel();
+    let server_file = dir.join("server.pktl");
+    let server = std::thread::spawn(move || {
+        let r = send_recipe(&server_file, &PkgOptions::default());
+        tx.send(r.is_ok()).unwrap();
+    });
+    client.join().unwrap();
+    let ok = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("循环服务配方应在 2 轮后收工（防挂死超时）");
+    assert!(ok, "循环服务配方应整体成功");
+    server.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// loop 无限 + until：until 谓词命中（非 sniffer 命中的停服包）→ 循环收工，
+/// 不回应停服包，配方整体成功退出。
+#[test]
+fn recipe_loop_until_ends_on_condition() {
+    let _loop_guard = LOOP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_registry();
+    let dir = temp_recipe_dir("loop-until");
+    let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let listen_pkt = format!(
+        "p = raw(bytes=\"\")\nuse(p) |> udp(dport={port}) |> ipv4(dst=\"127.0.0.1\") |> eth()\n\nsniffer:\n  - match dns(flags=0x0100)\n"
+    );
+    std::fs::write(dir.join("listen.pkt"), listen_pkt).unwrap();
+    std::fs::write(
+        dir.join("reply.pkt"),
+        "q = dns(id=global(\"tid\"), flags=0x8180, questions=[\"example.com\"])\nfull = use(q) |> udp(sport=53, dport=global(\"cport\")) |> ipv4(dst=\"127.0.0.1\") |> eth()\n\nexport:\n- full\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("server.pktl"),
+        "global:\n- tid\n- cport\n\nrecipe:\n- loop:\n  until:\n  - match dns(flags=0x8180)\n  steps:\n  - packet: listen.pkt\n    wait:\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
+    )
+    .unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let server_file = dir.join("server.pktl");
+    let server = std::thread::spawn(move || {
+        let r = send_recipe(&server_file, &PkgOptions::default());
+        tx.send(r.is_ok()).unwrap();
+    });
+
+    let client = std::thread::spawn(move || {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 512];
+        // 第 1 个查询：正常服务
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        sock.send_to(&dns_msg(0x0001, 0x0100), ("127.0.0.1", port))
+            .unwrap();
+        sock.recv_from(&mut buf).expect("应答超时");
+        assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 0x0001);
+        // 第 2 个包：flags=0x8180（sniffer 不匹配、until 匹配）→ 收工，不回应。
+        // 重复发送直到配方收工（对端退出后 send_to 仍会成功，靠 rx 侧判定收工）
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let t0 = std::time::Instant::now();
+        for i in 0..40 {
+            sock.send_to(&dns_msg(0xdead, 0x8180), ("127.0.0.1", port))
+                .unwrap();
+            eprintln!("[client] shutdown #{i} at {:?}", t0.elapsed());
+            sock.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
+            if sock.recv_from(&mut buf).is_ok() {
+                panic!("停服包不应收到回应");
+            }
+        }
+        eprintln!("[client] done at {:?}", t0.elapsed());
+    });
+
+    client.join().unwrap();
+    let ok = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("配方应在 until 命中后收工（防挂死超时）");
+    assert!(ok, "until 收工后配方应整体成功");
+    server.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// loop 无限 + Ctrl+C：监听期间注入中断标志 → 循环优雅收工，配方整体成功
+/// （旧行为：非 loop 监听步骤被 Ctrl+C 记为失败）。
+#[test]
+fn recipe_loop_interrupt_graceful() {
+    let _loop_guard = LOOP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_registry();
+    prping_core::reset_interrupt();
+    let dir = temp_recipe_dir("loop-int");
+    let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let listen_pkt = format!(
+        "p = raw(bytes=\"\")\nuse(p) |> udp(dport={port}) |> ipv4(dst=\"127.0.0.1\") |> eth()\n\nsniffer:\n  - match dns(flags=0x0100)\n"
+    );
+    std::fs::write(dir.join("listen.pkt"), listen_pkt).unwrap();
+    std::fs::write(
+        dir.join("reply.pkt"),
+        "q = dns(id=global(\"tid\"), flags=0x8180, questions=[\"example.com\"])\nfull = use(q) |> udp(sport=53, dport=global(\"cport\")) |> ipv4(dst=\"127.0.0.1\") |> eth()\n\nexport:\n- full\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("server.pktl"),
+        "global:\n- tid\n- cport\n\nrecipe:\n- loop:\n  steps:\n  - packet: listen.pkt\n    wait:\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
+    )
+    .unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let server_file = dir.join("server.pktl");
+    let server = std::thread::spawn(move || {
+        let r = send_recipe(&server_file, &PkgOptions::default());
+        tx.send(r.is_ok()).unwrap();
+    });
+
+    let client = std::thread::spawn(move || {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let mut buf = [0u8; 512];
+        // 查询重发直到应答（同 serve 测试：轮次/绑定窗口内可能丢包）
+        let mut got = None;
+        for _ in 0..60 {
+            sock.send_to(&dns_msg(0x0007, 0x0100), ("127.0.0.1", port))
+                .unwrap();
+            if sock.recv_from(&mut buf).is_ok() {
+                got = Some(0x0007);
+                break;
+            }
+        }
+        assert_eq!(got, Some(0x0007), "应答 id 应回显查询 id（重发 60 次内）");
+        // 收到应答后注入 Ctrl+C → 循环优雅收工
+        prping_core::set_interrupted(true);
+    });
+
+    client.join().unwrap();
+    let ok = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("配方应在 Ctrl+C 后优雅收工（防挂死超时）");
+    assert!(ok, "loop 内 Ctrl+C 应优雅收工（配方成功退出）");
+    server.join().unwrap();
+    prping_core::reset_interrupt();
+    let _ = std::fs::remove_dir_all(&dir);
+}

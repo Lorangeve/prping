@@ -1,0 +1,11 @@
+# 门禁 mock · 步骤 2（触发发包）：只有正确 PIN 命中监听、extract 写完 global
+# 才会执行到本步。构造 DNS 应答回给命中方：
+#   global.tid   = 命中查询的事务 ID（reply.dns.id——应答必须同 id，客户端靠它配对）
+#   global.cip   = 命中方 IP（reply.peer.ip——UDP 监听载荷里没有 IP 头，对端地址
+#                  来自 socket peer）
+#   global.cport = 命中方端口（reply.peer.port）
+# 应答 flags=0x8180（QR|RD|RA，标准应答位），qname "GRANT.pin.lab"——命中标记
+# 写在应答域名里，客户端一眼可辨。
+rep = dns(id=global("tid", 0), flags=0x8180, questions=["GRANT.pin.lab"])
+use(rep) |> udp(sport=55353, dport=global("cport", 40000))
+       |> ipv4(dst=global("cip", "127.0.0.1")) |> eth()

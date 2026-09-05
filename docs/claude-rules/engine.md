@@ -235,6 +235,14 @@
   `as:` 可选，缺省 = 自然类型值；`reply` 原语仅在 extract 求值上下文生效，其余回退
   用户函数，eng_lib 的 ARP 位常量 `reply()` 撞名不受影响），多回包依次应用后写覆盖
   先写）/`on_error: stop|continue`（默认 stop，失败中止配方退出码 1）；
+  **loop 块**（`- loop: N`，N 可省或负数 = 无限，与 CLI `--wait` 同语义；`recipe::LoopCtx`）：
+  包裹嵌套步骤组（`steps:` 后缩进 `- ` 项；`until:` 谓词列表须在 `steps:` 前，
+  sniffer 同款语法、可 `global(...)`，`pkg.rs::build_until_matcher` 每轮重建），
+  每轮完整执行块内步骤；解析后**平铺**进 `Recipe.steps`（块内每步带同一 `LoopCtx`，
+  `first`/`last` 定位块边界），执行器 while 回跳（`pkg.rs::send_recipe`：块首迭代
+  闸门 = until 命中 / Ctrl+C 优雅收工（打印统计、退出码 0）/ 次数，先到先退；
+  `delay:` 轮间延迟第 2 轮起；`listen_*_once` 带 until 匹配器，until 命中非
+  sniffer 包 → 不回应整块立即收工）；
   写入 global 的途径：`init` 初始值（global 项三形态：`- name: X` + 缩进 `init:` /
   裸 `- X` / `- X=v` 一行内联；值 = 字符串/十进制/0x/字节列表字面量）→ CLI
   `-g k=v`（`--global`，覆盖 init）→ 步骤 `extract`（覆盖前两者）；`.pkt` 侧读取用
@@ -260,6 +268,8 @@
     gratuitous ARP 演示）
   / `examples/udp_mock/`（**UDP mock**：同一服务端按端口分派 DNS 应答与 VNC 横幅）
   / `examples/dns_echo_listen/`（**DNS mock**：UDP :53 监听查询 → A 记录应答；客户端
+  / `examples/dns_loop_server/`（**循环监听服务**：`loop:` 无限包 listen+reply，
+    `until:` 停服包收工——loop 块样例）
     两步 extract 复用 tid——原 dns_recipe 的 extract 教学点并入）
   / `examples/dns_trigger/`（**配方监听触发最小样例**：`wait:` 无值步骤匹配 DNS 查询
     → extract id/`reply.peer.port` 对端 → 触发步骤发包应答）

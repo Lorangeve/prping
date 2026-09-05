@@ -1,0 +1,18 @@
+# 爆破客户端 · 尝试包：候选经 params 注入（client.pktl 每步 params: code=PIN-XXXX
+# 逐次覆盖），DNS 查询的 qname 标签携带候选，经 UDP 发给门禁（载荷模式：提取
+# 最外层 udp 的应用层载荷经普通 socket 发送，免 root）。
+#
+# ⚠ 候选要带 "PIN-" 前缀整行注入：步骤 params 的纯数字串会被自动转成整数
+# （code=4242 → Int 4242），而 questions 列表要的是字符串——带前缀的候选保持
+# 字符串类型，这也是本示例顺手演示的一条引擎类型规则。
+#
+# sniffer：只有 flags=0x8180（应答位）且 id 与本方查询一致（0x1337，门禁按
+# extract 的 tid 原样回填）的应答才算命中——错误候选门禁根本不应答，本步 wait
+# 超时失败（client.pktl 用 on_error: continue 兜住继续下一候选），正确候选收到
+# qname 为 "GRANT.pin.lab" 的应答 → ✓ reply matched。✗/✓ 的对比就是爆破的
+# 「试到命中」过程。
+q = dns(id=0x1337, flags=0x0100, questions=[params("code", "PIN-????")])
+use(q) |> udp(dport=params("port", 55353)) |> ipv4(dst=params("ip", "127.0.0.1")) |> eth()
+
+sniffer:
+  - match dns(id=0x1337, flags=0x8180)

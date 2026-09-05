@@ -51,9 +51,9 @@ export type Panel =
   | "outline"
   | "run";
 
-/** Run 面板的选项快照（kv 持久化；count/wait 以字符串承载输入框原文）。 */
+/** Run 面板的选项快照（kv 持久化；count/wait 以字符串承载输入框原文）。
+ *  无 target：发包地址属于包字段（params 注入），引擎从包内推导 socket 目标。 */
 export interface RunSettings {
-  target: string;
   count: string;
   wait: string;
   /** 裸 --wait：持续监听（覆盖 wait 数值） */
@@ -106,6 +106,9 @@ export interface RunExitState {
 export interface RecipeDoc {
   globals: { name: string; init: string | null; line: number }[];
   params: { key: string; value: string; step: number }[];
+  /** 聚合步骤 .pkt 的运行参数声明（overridden = 步骤 params: 覆盖同名）；
+   *  Run 面板输入行数据源（params 是步骤键值表，别灌进输入行） */
+  decl?: { name: string; default: string | null; overridden: boolean }[];
   steps: {
     idx: number;
     pkg: string;
@@ -591,7 +594,54 @@ export function parseRunLine(text: string, stripRoot?: string | null): RunLineVi
       title: text,
     };
   }
-  return null; // 其它 JSONL 类型：原样文本
+  // ── 配方执行的事件行（listen 命中 / extract / 超时重试 / 错误）──
+  // 文案对齐 CLI 人读输出（recipe.rs listen_matched / print_extract_pairs 等）
+  if (o.type === "matched") {
+    const fields =
+      o.fields && typeof o.fields === "object"
+        ? Object.entries(o.fields)
+            .map(([k, v]) => k + "=" + v)
+            .join(" ")
+        : "";
+    return {
+      cls: "run-line-ok",
+      text:
+        "✓ matched " + (o.bytes != null ? o.bytes + " B " : "") +
+        (o.peer ? "from " + o.peer : ""),
+      title: fields ? text + "\nsniffer fields: " + fields : text,
+    };
+  }
+  if (o.type === "extract") {
+    return {
+      cls: "run-line-ok",
+      text: "✓ global." + o.name + " = " + o.value,
+      title: text,
+    };
+  }
+  if (o.type === "error") {
+    return {
+      cls: "run-line-err",
+      text: "✗ " + (o.step != null ? "step " + o.step + ": " : "") + (o.message ?? ""),
+      title: text,
+    };
+  }
+  if (o.type === "retry") {
+    return {
+      cls: "run-line-warn",
+      text:
+        "⏱ step " + o.step + ": wait timeout — retrying " + o.attempt + "/" + o.total +
+        " (resend this step)",
+      title: text,
+    };
+  }
+  if (o.type === "timeout") {
+    return {
+      cls: "run-line-warn",
+      text: "⚠ step " + o.step + ": wait timeout (" + o.secs + "s) — sending " + o.send,
+      title: text,
+    };
+  }
+  return null; // 其它 JSONL 类型：原样文本（title 标注 raw）
 }
 
 /** 耗时格式（chip 用）：62s → 1m02s。 */
@@ -602,17 +652,65 @@ function fmtDuration(ms: number): string {
   return `${m}m${String(s % 60).padStart(2, "0")}s`;
 }
 
+/** 单行运行参数输入（Run 面板与 Layers 页签共用同一声明形状）：必填/选填徽标
+ *  —— req 未填 = 警示色、已填 = 确认色、opt = 默认淡色；.pktl 聚合声明带
+ *  overridden = 步骤 params: 覆盖同名（整行淡化 + title 说明，输入不生效）。 */
+export function ParamRow(props: {
+  decl: { name: string; default: string | null; overridden?: boolean };
+  value: string;
+  onInput: (v: string) => void;
+}) {
+  const required = () => props.decl.default == null;
+  // 覆盖行不算缺失警示（输入本就不生效，整行淡化已表达）
+  const missing = () => required() && !props.value && !props.decl.overridden;
+  return (
+    <label
+      class="param-item"
+      classList={{ "param-overridden": !!props.decl.overridden }}
+      title={
+        (props.decl.overridden ? "overridden by step params: — run inputs won't apply\n" : "") +
+        (required() ? "required — no default" : "default " + (props.decl.default ?? ""))
+      }
+    >
+      <span class="badge">param</span>
+      <span
+        class="badge param-kind"
+        classList={{
+          "param-req-missing": missing(),
+          "param-req-filled": required() && !missing(),
+        }}
+        title={required() ? "required" : "optional — empty uses the default"}
+      >
+        {required() ? "req" : "opt"}
+      </span>
+      <span class="param-name" classList={{ "param-missing": missing() }}>
+        {props.decl.name}
+      </span>
+      <input
+        class="param-input"
+        placeholder={props.decl.default ?? "required"}
+        value={props.value}
+        onInput={(e) => props.onInput(e.currentTarget.value)}
+      />
+    </label>
+  );
+}
+
 /** Run 面板：packet 选项 + 执行控制台（服务端 spawn 自身 CLI，见 web/run.rs）。 */
 export function RunPanel(props: {
-  /** 全部任务卡（运行中 + 已结束）；chip 即任务管理 */
+  /** 本文件标签的任务卡（按 fileKey 过滤；chip 即任务管理） */
   tasks: RunTask[];
+  /** 全连接不过滤的任务卡（Stop all 悬浮清单数据源——本标签任务列表
+   *  按 fileKey 过滤，别的标签在跑什么这里看不见） */
+  allTasks: RunTask[];
   /** 当前查看的任务 id */
   activeId: string | null;
   setActive: (id: string) => void;
   settings: RunSettings;
   setSettings: (s: RunSettings) => void;
-  /** 文件声明的运行参数（params("名", 默认)）；与 Layers 页签共用同一份输入值 */
-  declParams: { name: string; default: string | null }[];
+  /** 文件声明的运行参数（params("名", 默认)）；与 Layers 页签共用同一份输入值。
+   *  .pktl = 聚合步骤 .pkt 声明（overridden = 步骤 params: 覆盖同名） */
+  declParams: { name: string; default: string | null; overridden?: boolean }[];
   runValues: Record<string, string>;
   setRunValues: (v: Record<string, string>) => void;
   canRun: boolean;
@@ -624,6 +722,8 @@ export function RunPanel(props: {
 }) {
   let consoleHost: HTMLDivElement | undefined;
   const active = () => props.tasks.find((t) => t.id === props.activeId) ?? null;
+  // 全连接运行中的任务（不过滤 fileKey）——Stop all 的作用范围与悬浮清单数据源
+  const runningAll = () => props.allTasks.filter((t) => t.running);
   // 跟随滚动只在「用户本就在底部附近（≤40px）」时进行——上翻阅读历史输出时不拽走
   let stickBottom = true;
   let lastActiveId: string | null | undefined;
@@ -700,14 +800,41 @@ export function RunPanel(props: {
             ▶ Run
           </button>
         </Show>
-        <Show when={props.tasks.some((tk) => tk.running)}>
-          <button
-            class="run-stop-btn"
-            onClick={() => props.onStopAll()}
-            title="stop all running tasks (run_stop without id stops every task on this connection)"
-          >
-            ■ Stop all
-          </button>
+        <Show when={runningAll().length > 0}>
+          {/* 悬浮清单：任务列表按 fileKey 过滤，别的标签在跑什么这里看不到——
+              Stop all 又是全连接清场，先让用户看清要杀什么（行内 ■ 可单停） */}
+          <div class="stopall-wrap">
+            <button
+              class="run-stop-btn"
+              onClick={() => props.onStopAll()}
+              title={`stop all ${runningAll().length} running task(s) on this connection (run_stop without id)`}
+            >
+              ■ Stop all
+            </button>
+            <div class="stopall-pop">
+              <div class="stopall-head">running on this connection: {runningAll().length}</div>
+              <For each={runningAll()}>
+                {(t) => (
+                  <div class="stopall-row" title={t.file}>
+                    <span class="run-task-state running">●</span>
+                    <span class="stopall-file">{t.file.split("/").pop()}</span>
+                    <span class="run-task-id">#{t.id.replace("run-", "")}</span>
+                    <span class="run-task-dur">{taskDuration(t)}</span>
+                    <span
+                      class="stopall-kill"
+                      title="stop this task"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onStopTask(t.id);
+                      }}
+                    >
+                      ■
+                    </span>
+                  </div>
+                )}
+              </For>
+            </div>
+          </div>
         </Show>
         <span class="run-status" classList={{ running: !!active()?.running }}>
           <Show when={active()} fallback={null}>
@@ -797,14 +924,8 @@ export function RunPanel(props: {
           </For>
         </div>
       </Show>
-      <label class="run-field">
-        <span>target</span>
-        <input
-          value={props.settings.target}
-          placeholder="HOST[:PORT]"
-          onInput={(e) => set({ target: e.currentTarget.value })}
-        />
-      </label>
+      {/* 无 target 输入：地址由包字段（params ip/port…）承载，引擎从包内推导
+          socket 目标并在控制台显示「target: … (derived from packet)」 */}
       <div class="run-row">
         <label class="run-mini">
           count
@@ -873,32 +994,13 @@ export function RunPanel(props: {
         <div class="run-params">
           <Index each={props.declParams}>
             {(p) => (
-              <label
-                class="param-item"
-                title={
-                  p().default == null
-                    ? "required — no default"
-                    : "default " + (p().default ?? "")
+              <ParamRow
+                decl={p()}
+                value={props.runValues[p().name] ?? ""}
+                onInput={(v) =>
+                  props.setRunValues({ ...props.runValues, [p().name]: v })
                 }
-              >
-                <span class="badge">param</span>
-                <span
-                  class="param-name"
-                  classList={{
-                    "param-missing": p().default == null && !props.runValues[p().name],
-                  }}
-                >
-                  {p().name}
-                </span>
-                <input
-                  class="param-input"
-                  placeholder={p().default ?? "required"}
-                  value={props.runValues[p().name] ?? ""}
-                  onInput={(e) =>
-                    props.setRunValues({ ...props.runValues, [p().name]: e.currentTarget.value })
-                  }
-                />
-              </label>
+              />
             )}
           </Index>
         </div>
@@ -935,7 +1037,7 @@ export function RunPanel(props: {
               fallback={
                 <>
                   Run starts a task (multiple runs run in parallel — switch via
-                  the task chips); set target/count/wait above.
+                  the task chips); set count/wait above.
                 </>
               }
             >

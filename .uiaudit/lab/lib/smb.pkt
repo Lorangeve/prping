@@ -1,0 +1,530 @@
+# eng_lib/smb.pkt —— SMB/CIFS 文件共享协议（MS-SMB2）
+#
+# SMB (Server Message Block) 是微软开发的网络文件共享协议，
+# 用于在网络上共享文件、打印机和其他资源。
+#
+# SMB 特点：
+#   - 文件共享：网络文件系统访问
+#   - 打印机共享：网络打印服务
+#   - 进程间通信：命名管道和邮件槽
+#   - 跨平台：Samba 实现了 Linux/Unix 兼容
+#
+# SMB 版本：
+#   - SMB1：原始版本（已弃用，存在安全问题）
+#   - SMB2：Windows Vista 引入（2006）
+#   - SMB2.1：Windows 7 引入
+#   - SMB3.0：Windows 8 引入（多通道、加密）
+#   - SMB3.0.2：Windows 8.1 引入
+#   - SMB3.1.1：Windows 10 引入（预认证完整性）
+#
+# SMB 工作流程（基于 TCP 端口 445）：
+#   1. 协议协商：客户端和服务器协商 SMB 版本和能力
+#   2. 会话建立：身份验证（NTLM 或 Kerberos）
+#   3. 树连接：连接到共享资源（文件夹、打印机等）
+#   4. 文件操作：打开、读取、写入、关闭文件
+#   5. 会话断开：断开树连接和会话
+
+# SMB2 协议头（MS-SMB2 §2.2）
+# SMB2 协议头是所有 SMB2 消息的固定头部：
+#   - 协议签名：固定的魔数 "\xFE SMB"
+#   - 结构大小：头部固定长度（64 字节）
+#   - 信用计数：流控机制
+#   - 状态码：操作结果
+#   - 命令：操作类型
+#   - 信用请求/响应：流控
+#   - 标志：消息标志
+#   - 下一个命令：复合请求偏移
+#   - 消息 ID：请求/响应匹配
+#   - 保留：对齐填充
+#   - 树 ID：连接标识
+#   - 会话 ID：会话标识
+#   - 签名：消息签名（16 字节）
+# @param protocol: 协议签名（4字节）
+#                  固定为 "\xFE SMB"（0xFF, 0x53, 0x4D, 0x42）
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 64（SMB2 头部长度）
+# @param credit_charge: 信用计数（2字节，大端序）
+#                       本次操作消耗的信用数
+#                       用于流控机制
+# @param status: 状态码（4字节，大端序）
+#                0 = 成功
+#                其他值 = 错误码
+# @param command: 命令类型（2字节，大端序）
+#                 0x0000 = NEGOTIATE（协商）
+#                 0x0001 = SESSION_SETUP（会话建立）
+#                 0x0002 = LOGOFF（注销）
+#                 0x0003 = TREE_CONNECT（树连接）
+#                 0x0004 = TREE_DISCONNECT（树断开）
+#                 0x0005 = CREATE（创建文件）
+#                 0x0006 = CLOSE（关闭文件）
+#                 0x0007 = FLUSH（刷新）
+#                 0x0008 = READ（读取）
+#                 0x0009 = WRITE（写入）
+#                 0x000A = LOCK（锁定）
+#                 0x000B = IOCTL（IO 控制）
+#                 0x000C = CANCEL（取消）
+#                 0x000D = ECHO（回显）
+#                 0x000E = QUERY_DIRECTORY（查询目录）
+#                 0x000F = CHANGE_NOTIFY（变更通知）
+#                 0x0010 = QUERY_INFO（查询信息）
+#                 0x0011 = SET_INFO（设置信息）
+#                 0x0012 = OPLOCK_BREAK（机会锁中断）
+# @param credit_request_response: 信用请求/响应（2字节，大端序）
+#                                 请求时：请求的信用数
+#                                 响应时：授予的信用数
+# @param flags: 标志（4字节，大端序）
+#               0x00000001 = SMB2_FLAGS_SERVER_TO_REDIR
+#               0x00000002 = SMB2_FLAGS_ASYNC_COMMAND
+#               0x00000004 = SMB2_FLAGS_RELATED_OPERATIONS
+#               0x00000008 = SMB2_FLAGS_SIGNED
+#               0x00000010 = SMB2_FLAGS_PRIORITY_MASK
+#               0x00000020 = SMB2_FLAGS_DFS_OPERATIONS
+#               0x00000040 = SMB2_FLAGS_REPLAY_OPERATION
+# @param next_command: 下一个命令偏移（4字节，大端序）
+#                      复合请求中下一个命令的偏移量
+#                      0 = 最后一个命令
+# @param message_id: 消息 ID（8字节，大端序）
+#                    用于匹配请求和响应
+# @param reserved: 保留（4字节）
+#                  必须为 0
+# @param tree_id: 树 ID（2字节，大端序）
+#                 连接到共享资源的标识符
+#                 由 TREE_CONNECT 响应返回
+# @param session_id: 会话 ID（8字节，大端序）
+#                    会话标识符
+#                    由 SESSION_SETUP 响应返回
+# @param signature: 消息签名（16字节）
+#                   用于验证消息完整性
+#                   仅在 SMB2_FLAGS_SIGNED 标志设置时有效
+# @param data: 消息数据（变长）
+#              命令特定的数据
+# @auto: structure_size 固定为 64
+#[proto]
+func smb2_header(protocol=hex("fe534d42"), structure_size=64, credit_charge=1, status=0, command=0, credit_request_response=1, flags=0, next_command=0, message_id=0, reserved=0, tree_id=0, session_id=0, signature=pad(16), data="") -> bytes {
+    concat(
+        #[meta(bytes="4")] protocol,        # 协议签名：4字节（"\xFE SMB"）
+        be16(structure_size),               # 结构大小：2字节
+        be16(credit_charge),                # 信用计数：2字节
+        be32(status),                       # 状态码：4字节
+        be16(command),                      # 命令类型：2字节
+        be16(credit_request_response),      # 信用请求/响应：2字节
+        be32(flags),                        # 标志：4字节
+        be32(next_command),                 # 下一个命令偏移：4字节
+        be64(message_id),                   # 消息 ID：8字节
+        be32(reserved),                     # 保留：4字节
+        be16(tree_id),                      # 树 ID：2字节
+        be64(session_id),                   # 会话 ID：8字节
+        #[meta(bytes="16")] signature,      # 消息签名：16字节
+        #[meta(rest="data")] data           # 消息数据：变长
+    )
+}
+
+# SMB2 协商请求（NEGOTIATE）
+# 客户端发送协商请求，告知支持的 SMB 版本和能力：
+#   - 结构大小：固定 36 字节
+#   - 方言数：支持的 SMB 版本数量
+#   - 安全模式：签名要求
+#   - 能力：客户端支持的功能
+#   - 客户端 GUID：客户端唯一标识
+#   - 方言列表：支持的 SMB 版本
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 36
+# @param dialect_count: 方言数（2字节，大端序）
+#                       支持的 SMB 版本数量
+# @param security_mode: 安全模式（2字节，大端序）
+#                       0x0001 = SMB2_NEGOTIATE_SIGNING_ENABLED
+#                       0x0002 = SMB2_NEGOTIATE_SIGNING_REQUIRED
+# @param capabilities: 能力（4字节，大端序）
+#                      0x00000001 = SMB2_GLOBAL_CAP_DFS
+#                      0x00000002 = SMB2_GLOBAL_CAP_LEASING
+#                      0x00000004 = SMB2_GLOBAL_CAP_LARGE_MTU
+#                      0x00000008 = SMB2_GLOBAL_CAP_MULTI_CHANNEL
+#                      0x00000010 = SMB2_GLOBAL_CAP_PERSISTENT_HANDLES
+#                      0x00000020 = SMB2_GLOBAL_CAP_DIRECTORY_LEASING
+#                      0x00000040 = SMB2_GLOBAL_CAP_ENCRYPTION
+# @param client_guid: 客户端 GUID（16字节）
+#                     客户端唯一标识符
+# @param dialects: 方言列表（变长，每项2字节）
+#                  支持的 SMB 版本：
+#                  0x0202 = SMB 2.0.2
+#                  0x0210 = SMB 2.1
+#                  0x0300 = SMB 3.0
+#                  0x0302 = SMB 3.0.2
+#                  0x0311 = SMB 3.1.1
+# @auto: structure_size 固定为 36
+#[proto]
+func smb2_negotiate_request(structure_size=36, dialect_count=1, security_mode=1, capabilities=0, client_guid=pad(16), dialects="") -> bytes {
+    concat(
+        be16(structure_size),               # 结构大小：2字节
+        be16(dialect_count),                # 方言数：2字节
+        be16(security_mode),                # 安全模式：2字节
+        be32(capabilities),                 # 能力：4字节
+        #[meta(bytes="16")] client_guid,    # 客户端 GUID：16字节
+        #[meta(rest="dialects")] dialects   # 方言列表：变长
+    )
+}
+
+# SMB2 协商响应（NEGOTIATE Response）
+# 服务器回复协商结果：
+#   - 结构大小：固定 64 字节
+#   - 安全模式：签名要求
+#   - 选定方言：协商确定的 SMB 版本
+#   - 服务器 GUID：服务器唯一标识
+#   - 能力：服务器支持的功能
+#   - 系统时间：服务器时间
+#   - 服务器启动时间：服务器启动时间
+#   - 安全缓冲区：认证数据
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 64
+# @param security_mode: 安全模式（2字节，大端序）
+#                       协商结果
+# @param dialect: 选定方言（2字节，大端序）
+#                 协商确定的 SMB 版本
+# @param reserved: 保留（2字节）
+#                  必须为 0
+# @param server_guid: 服务器 GUID（16字节）
+#                     服务器唯一标识符
+# @param capabilities: 能力（4字节，大端序）
+#                      服务器支持的功能
+# @param max_transact_size: 最大事务大小（4字节，大端序）
+#                           单个事务的最大字节数
+# @param max_read_size: 最大读取大小（4字节，大端序）
+#                       单个读取操作的最大字节数
+# @param max_write_size: 最大写入大小（4字节，大端序）
+#                        单个写入操作的最大字节数
+# @param system_time: 系统时间（8字节，大端序）
+#                     服务器当前时间（100 纳秒间隔，从 1601-01-01）
+# @param server_start_time: 服务器启动时间（8字节，大端序）
+#                           服务器启动时间
+# @param security_buffer_offset: 安全缓冲区偏移（2字节，大端序）
+#                                从头部开始的偏移量
+# @param security_buffer_length: 安全缓冲区长度（2字节，大端序）
+#                                安全缓冲区的字节数
+# @param security_buffer: 安全缓冲区（变长）
+#                         认证数据（NTLM 或 Kerberos）
+# @auto: structure_size 固定为 64
+#[proto]
+func smb2_negotiate_response(structure_size=64, security_mode=1, dialect=0x0202, reserved=0, server_guid=pad(16), capabilities=0, max_transact_size=0, max_read_size=0, max_write_size=0, system_time=0, server_start_time=0, security_buffer_offset=0, security_buffer_length=0, security_buffer="") -> bytes {
+    concat(
+        be16(structure_size),               # 结构大小：2字节
+        be16(security_mode),                # 安全模式：2字节
+        be16(dialect),                      # 选定方言：2字节
+        be16(reserved),                     # 保留：2字节
+        #[meta(bytes="16")] server_guid,    # 服务器 GUID：16字节
+        be32(capabilities),                 # 能力：4字节
+        be32(max_transact_size),            # 最大事务大小：4字节
+        be32(max_read_size),                # 最大读取大小：4字节
+        be32(max_write_size),               # 最大写入大小：4字节
+        be64(system_time),                  # 系统时间：8字节
+        be64(server_start_time),            # 服务器启动时间：8字节
+        be16(security_buffer_offset),       # 安全缓冲区偏移：2字节
+        be16(security_buffer_length),       # 安全缓冲区长度：2字节
+        #[meta(rest="security_buffer")] security_buffer # 安全缓冲区：变长
+    )
+}
+
+# SMB2 会话建立请求（SESSION_SETUP）
+# 客户端发送会话建立请求，进行身份验证：
+#   - 结构大小：固定 24 字节
+#   - 标志：会话标志
+#   - 安全模式：签名要求
+#   - 能力：客户端能力
+#   - 安全缓冲区：认证数据
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 24
+# @param flags: 标志（1字节）
+#               0x01 = SMB2_SESSION_FLAG_BINDING
+# @param security_mode: 安全模式（1字节）
+#                       0x01 = SMB2_NEGOTIATE_SIGNING_ENABLED
+#                       0x02 = SMB2_NEGOTIATE_SIGNING_REQUIRED
+# @param capabilities: 能力（4字节，大端序）
+#                      客户端支持的功能
+# @param channel: 通道（4字节，大端序）
+#                 通道标识符
+# @param security_buffer_offset: 安全缓冲区偏移（2字节，大端序）
+# @param security_buffer_length: 安全缓冲区长度（2字节，大端序）
+# @param previous_session_id: 前一个会话 ID（8字节，大端序）
+#                             用于会话重连
+# @param security_buffer: 安全缓冲区（变长）
+#                         NTLM 或 Kerberos 认证数据
+# @auto: structure_size 固定为 24
+#[proto]
+func smb2_session_setup_request(structure_size=24, flags=0, security_mode=1, capabilities=0, channel=0, security_buffer_offset=0, security_buffer_length=0, previous_session_id=0, security_buffer="") -> bytes {
+    concat(
+        be16(structure_size),               # 结构大小：2字节
+        u8(flags),                          # 标志：1字节
+        u8(security_mode),                  # 安全模式：1字节
+        be32(capabilities),                 # 能力：4字节
+        be32(channel),                      # 通道：4字节
+        be16(security_buffer_offset),       # 安全缓冲区偏移：2字节
+        be16(security_buffer_length),       # 安全缓冲区长度：2字节
+        be64(previous_session_id),          # 前一个会话 ID：8字节
+        #[meta(rest="security_buffer")] security_buffer # 安全缓冲区：变长
+    )
+}
+
+# SMB2 树连接请求（TREE_CONNECT）
+# 客户端发送树连接请求，连接到共享资源：
+#   - 结构大小：固定 8 字节
+#   - 标志：连接标志
+#   - 路径偏移：共享路径偏移
+#   - 路径长度：共享路径长度
+#   - 路径：共享路径（UNC 格式）
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 8
+# @param flags: 标志（2字节，大端序）
+#               0x0001 = SMB2_TREE_CONNECT_FLAG_CLUSTER_RECONNECT
+#               0x0002 = SMB2_TREE_CONNECT_FLAG_REDIRECT_TO_OWNER
+#               0x0004 = SMB2_TREE_CONNECT_FLAG_EXTENSION_PRESENT
+# @param path_offset: 路径偏移（2字节，大端序）
+#                     从头部开始的偏移量
+# @param path_length: 路径长度（2字节，大端序）
+#                     路径的字节数
+# @param path: 共享路径（变长，Unicode 编码）
+#              UNC 格式：\\server\share
+# @auto: structure_size 固定为 8
+#[proto]
+func smb2_tree_connect_request(structure_size=8, flags=0, path_offset=0, path_length=0, path="") -> bytes {
+    concat(
+        be16(structure_size),               # 结构大小：2字节
+        be16(flags),                        # 标志：2字节
+        be16(path_offset),                  # 路径偏移：2字节
+        be16(path_length),                  # 路径长度：2字节
+        #[meta(rest="path")] path           # 共享路径：变长
+    )
+}
+
+# SMB2 文件创建请求（CREATE）
+# 客户端发送文件创建请求，打开或创建文件：
+#   - 结构大小：固定 56 字节
+#   - 安全标志：安全相关标志
+#   - 请求 Oplock 级别：机会锁级别
+#   - 请求影响：文件影响方式
+#   - 文件属性：文件属性
+#   - 共享访问：共享模式
+#   - 分散/聚集：分散/聚集标志
+#   - 创建选项：创建选项
+#   - 模拟级别：模拟级别
+#   - SMB 创建标志：SMB 创建标志
+#   - 访问掩码：访问权限
+#   - 文件名偏移：文件名偏移
+#   - 文件名长度：文件名长度
+#   - 创建上下文偏移：创建上下文偏移
+#   - 创建上下文长度：创建上下文长度
+#   - 文件名：文件名（Unicode 编码）
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 56
+# @param security_flags: 安全标志（1字节）
+#                        0x01 = SMB2_SECURITY_CLIENT_IMPERSONATION
+#                        0x02 = SMB2_SECURITY_CLIENT_CONTEXT_TRACKING
+# @param requested_oplock_level: 请求 Oplock 级别（1字节）
+#                                0x00 = SMB2_OPLOCK_LEVEL_NONE
+#                                0x01 = SMB2_OPLOCK_LEVEL_II
+#                                0x08 = SMB2_OPLOCK_LEVEL_EXCLUSIVE
+#                                0x09 = SMB2_OPLOCK_LEVEL_BATCH
+#                                0x0A = SMB2_OPLOCK_LEVEL_LEASE
+# @param impersonation_level: 模拟级别（4字节，大端序）
+#                             0x00000000 = SecurityAnonymous
+#                             0x00000001 = SecurityIdentification
+#                             0x00000002 = SecurityImpersonation
+#                             0x00000003 = SecurityDelegation
+# @param smb_create_flags: SMB 创建标志（8字节，大端序）
+#                          创建操作的标志
+# @param reserved: 保留（8字节）
+#                  必须为 0
+# @param desired_access: 期望访问权限（4字节，大端序）
+#                        0x00120089 = FILE_GENERIC_READ
+#                        0x00120116 = FILE_GENERIC_WRITE
+#                        0x001200A0 = FILE_GENERIC_EXECUTE
+#                        0x001F01FF = FILE_ALL_ACCESS
+# @param file_attributes: 文件属性（4字节，大端序）
+#                         0x00000001 = FILE_ATTRIBUTE_READONLY
+#                         0x00000002 = FILE_ATTRIBUTE_HIDDEN
+#                         0x00000004 = FILE_ATTRIBUTE_SYSTEM
+#                         0x00000010 = FILE_ATTRIBUTE_DIRECTORY
+#                         0x00000020 = FILE_ATTRIBUTE_ARCHIVE
+#                         0x00000080 = FILE_ATTRIBUTE_NORMAL
+# @param share_access: 共享访问（4字节，大端序）
+#                      0x00000000 = FILE_SHARE_READ
+#                      0x00000001 = FILE_SHARE_WRITE
+#                      0x00000002 = FILE_SHARE_DELETE
+# @param create_disposition: 创建处置（4字节，大端序）
+#                            0x00000000 = FILE_SUPERSEDE
+#                            0x00000001 = FILE_OPEN
+#                            0x00000002 = FILE_CREATE
+#                            0x00000003 = FILE_OPEN_IF
+#                            0x00000004 = FILE_OVERWRITE
+#                            0x00000005 = FILE_OVERWRITE_IF
+# @param create_options: 创建选项（4字节，大端序）
+#                        0x00000001 = FILE_DIRECTORY_FILE
+#                        0x00000002 = FILE_WRITE_THROUGH
+#                        0x00000004 = FILE_SEQUENTIAL_ONLY
+#                        0x00000008 = FILE_NO_INTERMEDIATE_BUFFERING
+# @param name_offset: 文件名偏移（2字节，大端序）
+#                     从头部开始的偏移量
+# @param name_length: 文件名长度（2字节，大端序）
+#                     文件名的字节数
+# @param create_context_offset: 创建上下文偏移（4字节，大端序）
+#                               从头部开始的偏移量
+# @param create_context_length: 创建上下文长度（4字节，大端序）
+#                               创建上下文的字节数
+# @param name: 文件名（变长，Unicode 编码）
+#              文件或目录的路径
+# @auto: structure_size 固定为 56
+#[proto]
+func smb2_create_request(structure_size=56, security_flags=0, requested_oplock_level=0, impersonation_level=2, smb_create_flags=0, reserved=0, desired_access=0x00120089, file_attributes=0x00000080, share_access=0x00000007, create_disposition=1, create_options=0, name_offset=0, name_length=0, create_context_offset=0, create_context_length=0, name="") -> bytes {
+    concat(
+        be16(structure_size),               # 结构大小：2字节
+        u8(security_flags),                 # 安全标志：1字节
+        u8(requested_oplock_level),         # 请求 Oplock 级别：1字节
+        be32(impersonation_level),          # 模拟级别：4字节
+        be64(smb_create_flags),             # SMB 创建标志：8字节
+        be64(reserved),                     # 保留：8字节
+        be32(desired_access),               # 期望访问权限：4字节
+        be32(file_attributes),              # 文件属性：4字节
+        be32(share_access),                 # 共享访问：4字节
+        be32(create_disposition),           # 创建处置：4字节
+        be32(create_options),               # 创建选项：4字节
+        be16(name_offset),                  # 文件名偏移：2字节
+        be16(name_length),                  # 文件名长度：2字节
+        be32(create_context_offset),        # 创建上下文偏移：4字节
+        be32(create_context_length),        # 创建上下文长度：4字节
+        #[meta(rest="name")] name           # 文件名：变长
+    )
+}
+
+# SMB2 读取请求（READ）
+# 客户端发送读取请求，读取文件数据：
+#   - 结构大小：固定 48 字节
+#   - 读取长度：请求读取的字节数
+#   - 文件偏移：读取的起始位置
+#   - 文件 ID：打开的文件标识
+#   - 最小计数：最小读取字节数
+#   - 通道：数据通道
+#   - 剩余字节：剩余字节数
+#   - 读取标志：读取标志
+#   - 数据缓冲区：读取的数据
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 48
+# @param padding: 填充（1字节）
+#                 必须为 0x50
+# @param flags: 标志（1字节）
+#               0x01 = SMB2_READFLAG_READ_UNBUFFERED
+#               0x02 = SMB2_READFLAG_REQUEST_COMPRESSED
+# @param length: 读取长度（4字节，大端序）
+#                请求读取的字节数
+# @param offset: 文件偏移（8字节，大端序）
+#                读取的起始位置
+# @param file_id: 文件 ID（16字节）
+#                 打开的文件标识符（由 CREATE 返回）
+# @param minimum_count: 最小计数（4字节，大端序）
+#                       最小读取字节数
+#                       如果无法读取这么多字节，操作失败
+# @param channel: 通道（4字节，大端序）
+#                 0x00000000 = SMB2_CHANNEL_NONE
+#                 0x00000001 = SMB2_CHANNEL_RDMA_V1
+#                 0x00000002 = SMB2_CHANNEL_RDMA_V1_INVALIDATE
+# @param remaining_bytes: 剩余字节（4字节，大端序）
+#                         剩余的字节数
+# @param read_flag: 读取标志（2字节，大端序）
+#                   0x0001 = SMB2_READFLAG_READ_UNBUFFERED
+#                   0x0002 = SMB2_READFLAG_REQUEST_COMPRESSED
+# @auto: structure_size 固定为 48
+#[proto]
+func smb2_read_request(structure_size=48, padding=0x50, flags=0, length=0, offset=0, file_id=pad(16), minimum_count=0, channel=0, remaining_bytes=0, read_flag=0) -> bytes {
+    concat(
+        be16(structure_size),               # 结构大小：2字节
+        u8(padding),                        # 填充：1字节
+        u8(flags),                          # 标志：1字节
+        be32(length),                       # 读取长度：4字节
+        be64(offset),                       # 文件偏移：8字节
+        #[meta(bytes="16")] file_id,        # 文件 ID：16字节
+        be32(minimum_count),                # 最小计数：4字节
+        be32(channel),                      # 通道：4字节
+        be32(remaining_bytes),              # 剩余字节：4字节
+        be16(read_flag)                     # 读取标志：2字节
+    )
+}
+
+# SMB2 写入请求（WRITE）
+# 客户端发送写入请求，写入文件数据：
+#   - 结构大小：固定 48 字节
+#   - 写入长度：写入的字节数
+#   - 文件偏移：写入的起始位置
+#   - 文件 ID：打开的文件标识
+#   - 通道：数据通道
+#   - 剩余字节：剩余字节数
+#   - 写入标志：写入标志
+#   - 数据缓冲区：写入的数据
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 48
+# @param data_offset: 数据偏移（2字节，大端序）
+#                     从头部开始的偏移量
+# @param length: 写入长度（4字节，大端序）
+#                写入的字节数
+# @param offset: 文件偏移（8字节，大端序）
+#                写入的起始位置
+# @param file_id: 文件 ID（16字节）
+#                 打开的文件标识符（由 CREATE 返回）
+# @param channel: 通道（4字节，大端序）
+#                 0x00000000 = SMB2_CHANNEL_NONE
+#                 0x00000001 = SMB2_CHANNEL_RDMA_V1
+#                 0x00000002 = SMB2_CHANNEL_RDMA_V1_INVALIDATE
+# @param remaining_bytes: 剩余字节（4字节，大端序）
+#                         剩余的字节数
+# @param write_flag: 写入标志（2字节，大端序）
+#                    0x00000002 = SMB2_WRITEFLAG_WRITE_THROUGH
+#                    0x00000004 = SMB2_WRITEFLAG_WRITE_UNBUFFERED
+# @param data: 写入数据（变长）
+#              要写入文件的数据
+# @auto: structure_size 固定为 48
+#[proto]
+func smb2_write_request(structure_size=48, data_offset=0, length=0, offset=0, file_id=pad(16), channel=0, remaining_bytes=0, write_flag=0, data="") -> bytes {
+    concat(
+        be16(structure_size),               # 结构大小：2字节
+        be16(data_offset),                  # 数据偏移：2字节
+        be32(length),                       # 写入长度：4字节
+        be64(offset),                       # 文件偏移：8字节
+        #[meta(bytes="16")] file_id,        # 文件 ID：16字节
+        be32(channel),                      # 通道：4字节
+        be32(remaining_bytes),              # 剩余字节：4字节
+        be16(write_flag),                   # 写入标志：2字节
+        #[meta(rest="data")] data           # 写入数据：变长
+    )
+}
+
+# SMB2 关闭请求（CLOSE）
+# 客户端发送关闭请求，关闭打开的文件：
+#   - 结构大小：固定 24 字节
+#   - 关闭标志：关闭相关标志
+#   - 文件 ID：打开的文件标识
+# @param structure_size: 结构大小（2字节，大端序）
+#                        固定为 24
+# @param flags: 标志（2字节，大端序）
+#               0x0001 = SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB
+#               0x0002 = SMB2_CLOSE_FLAG_RESTART_SCANS
+# @param reserved: 保留（4字节）
+#                  必须为 0
+# @param file_id: 文件 ID（16字节）
+#                 打开的文件标识符（由 CREATE 返回）
+# @auto: structure_size 固定为 24
+#[proto]
+func smb2_close_request(structure_size=24, flags=0, reserved=0, file_id=pad(16)) -> bytes {
+    concat(
+        be16(structure_size),               # 结构大小：2字节
+        be16(flags),                        # 标志：2字节
+        be32(reserved),                     # 保留：4字节
+        #[meta(bytes="16")] file_id         # 文件 ID：16字节
+    )
+}
+
+export:
+- smb2_header
+- smb2_negotiate_request
+- smb2_negotiate_response
+- smb2_session_setup_request
+- smb2_tree_connect_request
+- smb2_create_request
+- smb2_read_request
+- smb2_write_request
+- smb2_close_request

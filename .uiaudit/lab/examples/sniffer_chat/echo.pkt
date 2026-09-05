@@ -1,0 +1,11 @@
+# server 配方 · 步骤 2（触发发包）：回显——按 extract 到的 global **重建**查询发回
+# 查询方（同 id 同 flags；回答内容原样重建 questions）。对端地址来自 socket peer：
+#   global.tid   = 查询的 dns.id（reply.dns.id 来源）
+#   global.cip   = 查询方 IP（reply.peer.ip 来源）
+#   global.cport = 查询方 UDP 源端口（reply.peer.port 来源——UDP 监听载荷里没有
+#                  udp 头，对端地址来自 socket peer）
+q = dns(id=global("tid"), flags=0x0100, questions=["example.com"])
+full = use(q) |> udp(sport=55353, dport=global("cport")) |> ipv4(dst=global("cip")) |> eth()
+
+export:
+- full

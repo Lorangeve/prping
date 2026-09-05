@@ -4,10 +4,12 @@
 
 import { For, Index, createEffect, createMemo, onCleanup, onMount, createSignal, Show } from "solid-js";
 
-/** analyze 应答带的运行参数声明（params("名", 默认)）。 */
+/** analyze 应答带的运行参数声明（params("名", 默认)）；.pktl 聚合声明带
+ *  overridden = 任一步骤 params: 覆盖同名（Run 面板输入对它无效，行上标注）。 */
 interface DeclParam {
   name: string;
   default: string | null;
+  overridden?: boolean;
 }
 
 /** 导航历史条目：文件 + 落点行（null = 文件级打开，离开时回填光标行）。 */
@@ -41,6 +43,7 @@ import {
   LayersPanel,
   OutlinePanel,
   PanelTabs,
+  ParamRow,
   RecipePanel,
   RunPanel,
   parseRunLine,
@@ -93,14 +96,26 @@ export function App() {
   const [runValues, setRunValues] = createSignal<Record<string, string>>({});
   const [declParams, setDeclParams] = createSignal<DeclParam[]>([]);
 
-  const [panel, setPanel] = createSignal<Panel>("layers");
+  // 右侧面板页签是全局的用户选择：切/开任何文件都不重置——a.pktl 停在 Run，
+  // 打开 b.pktl 右栏仍是 Run。仅当所选页签在当前文件类型不存在时读侧就地
+  // 矫正（配方无 Layers/Hex/Outline → Recipe；普通文件无 Recipe/Globals →
+  // Layers；md 无侧栏）。
+  const [panelSel, setPanelSel] = createSignal<Panel>("layers");
+  function coercePanel(p: Panel): Panel {
+    if (isPktl()) return p === "layers" || p === "hex" || p === "outline" ? "recipe" : p;
+    if (isMd()) return p === "recipe" || p === "globals" ? "diagnostics" : p;
+    return p === "recipe" || p === "globals" ? "layers" : p;
+  }
+  const panel = () => coercePanel(panelSel());
+  function setPanel(p: Panel) {
+    setPanelSel(p);
+  }
   const [version, setVersion] = createSignal("");
 
   // ── 执行（Run 页签）────────────────────────────────────
   // 服务端 spawn 自身 CLI 的 packet 子命令（web/run.rs）；run_id 关联流式输出。
   // 多标签并行运行：每个 run 一个任务卡（任务管理），chip 切换控制台。
   const [runSettings, setRunSettings] = createSignal<RunSettings>({
-    target: "",
     count: "1",
     wait: "",
     listen: false,
@@ -340,15 +355,33 @@ export function App() {
       const res = await client.analyze(uri, text(), buildRunParams());
       if (seq !== analyzeSeq || uri !== lsp.documentUri) return; // 过期应答：文件已切换或有新请求
       if (isMd()) return; // 已切到 Markdown：面板已停用，不接收 analyze 结果
-      // 声明的运行参数成功/失败应答都带：结构化输入行的数据源。
-      // 声明未变（打参数值时最常见的情形）不替换——新数组会触发下游重建
-      const decl = (res.data as { params?: DeclParam[] } | undefined)?.params;
-      if (decl) {
+      // 声明的运行参数成功/失败应答都带：结构化输入行的数据源。按请求时文件
+      // 类型分流：.pkt 用 analyze 带回的 params("名",默认) 声明；.pktl 用配方
+      // 概览聚合的 decl（步骤 .pkt 声明 + 步骤 params: 覆盖标记）——概览的
+      // params 是步骤键值表，形状不同，灌进输入行会渲染成空名行（历史 bug）。
+      // 声明未变（打参数值时最常见的情形）不替换——新数组会触发下游重建。
+      const data = res.data as { params?: DeclParam[]; decl?: DeclParam[] } | undefined;
+      if (uri.toLowerCase().endsWith(".pktl")) {
+        const decl = res.ok ? (data?.decl ?? []) : []; // 配方解析失败：步骤文件不可知，清空
         const prev = declParams();
         const same =
           prev.length === decl.length &&
-          prev.every((p, i) => p.name === decl[i].name && p.default === decl[i].default);
+          prev.every(
+            (p, i) =>
+              p.name === decl[i].name &&
+              p.default === decl[i].default &&
+              p.overridden === decl[i].overridden,
+          );
         if (!same) setDeclParams(decl);
+      } else {
+        const decl = data?.params;
+        if (decl) {
+          const prev = declParams();
+          const same =
+            prev.length === decl.length &&
+            prev.every((p, i) => p.name === decl[i].name && p.default === decl[i].default);
+          if (!same) setDeclParams(decl);
+        }
       }
       if (!res.ok) {
         // 构建失败（如 params('ip') 未提供）：LSP 不报这类错误——进 Diagnostics 页签。
@@ -543,7 +576,8 @@ export function App() {
       s.count.trim() === "" || Number(s.count) === 1 ? undefined : Number(s.count);
     return {
       name,
-      target: s.target.trim() || undefined,
+      // 不发 target：发包地址属于包字段（params 注入），引擎从包内推导 socket
+      // 目标；CLI 位置 HOST:PORT 的显式覆盖旁路不进 webui。
       params: buildRunParams(),
       count: Number.isFinite(count) ? count : undefined,
       wait: typeof wait === "number" && !Number.isFinite(wait) ? undefined : wait,
@@ -714,20 +748,8 @@ export function App() {
       setRecipeDoc(null);
       setSymbols([]);
       setMdMode("render");
-      // 从配方切来时页签组没有 recipe/globals，落回诊断
-      if (panel() === "recipe" || panel() === "globals") setPanel("diagnostics");
       if (view) applyDiagnostics(view, []);
       return;
-    }
-    if (isPktl()) {
-      // 配方文档：侧栏切 Recipe 页签，清层栈残留
-      setAnalyzeDoc(null);
-      setRecipeDoc(null);
-      setPanel("recipe");
-    } else if (panel() === "recipe" || panel() === "globals") {
-      // 配方 → 普通文档：页签组已换回 Layers/Hex，面板停在 recipe/globals
-      // 会落在无内容页签上（侧栏空白），回 Layers 立即显示层栈
-      setPanel("layers");
     }
     lsp.openDoc(uri, useContent);
     refreshAnalyze();
@@ -1326,9 +1348,13 @@ export function App() {
     window.addEventListener("keydown", onKeydown);
     window.addEventListener("resize", onResize);
 
-    // 恢复持久化的面板选择（IndexedDB 不可用时静默跳过）
-    void kvGet<Panel>(Keys.panel).then((p) => {
-      if (p === "diagnostics" || p === "layers" || p === "hex" || p === "outline" || p === "run") setPanel(p);
+    // 恢复持久化的面板页签（IndexedDB 不可用时静默跳过）；非法值忽略。
+    // 上一版曾存按标签的 map（对象）——无法还原单值语义，直接忽略
+    const PANELS_ALL: Panel[] = [
+      "diagnostics", "layers", "hex", "outline", "run", "recipe", "globals",
+    ];
+    void kvGet<Panel | Record<string, Panel>>(Keys.panel).then((p) => {
+      if (typeof p === "string" && PANELS_ALL.includes(p)) setPanelSel(p);
     });
     // 恢复 Run 选项快照（旧条目缺字段时并入当前默认，避免半快照）
     void kvGet<RunSettings>(Keys.runSettings).then((s) => {
@@ -1615,29 +1641,14 @@ export function App() {
                     都带新数组的参数声明，For 会整表销毁重建 → 每键失焦 */}
                 <Index each={declParams()}>
                   {(p) => (
-                    <label
-                      class="param-item"
-                      title={p().default == null ? "required — no default" : `default ${p().default}`}
-                    >
-                      <span class="badge">param</span>
-                      <span
-                        class="param-name"
-                        classList={{
-                          "param-missing": p().default == null && !runValues()[p().name],
-                        }}
-                      >
-                        {p().name}
-                      </span>
-                      <input
-                        class="param-input"
-                        placeholder={p().default ?? "required"}
-                        value={runValues()[p().name] ?? ""}
-                        onInput={(e) => {
-                          setRunValues({ ...runValues(), [p().name]: e.currentTarget.value });
-                          refreshAnalyze();
-                        }}
-                      />
-                    </label>
+                    <ParamRow
+                      decl={p()}
+                      value={runValues()[p().name] ?? ""}
+                      onInput={(v) => {
+                        setRunValues({ ...runValues(), [p().name]: v });
+                        refreshAnalyze();
+                      }}
+                    />
                   )}
                 </Index>
               </Show>
@@ -1670,6 +1681,7 @@ export function App() {
           </Show>
           <Show when={panel() === "run"}>
             <RunPanel
+              allTasks={runTasks()}
               tasks={runTasks().filter((t) => t.fileKey === activeKey())}
               activeId={activeTask()?.id ?? null}
               setActive={setActiveRunId}

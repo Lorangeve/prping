@@ -1,0 +1,18 @@
+# 循环监听服务（packet .pktl，loop 块）：sniffer 匹配结果触发发包
+#
+# 服务端配方（server.pktl）的监听步骤包在 `loop:` 块里，每轮：
+#   步骤 1 `wait:`（无值）——不发送，用本文件的 sniffer 匹配外部到达的 DNS 查询，
+#             命中后 extract 匹配包字段（dns.id / 对端端口 peer.port）写 global；
+#   步骤 2 —— 触发发包：用 global 构造 DNS 应答发回查询方；然后回到步骤 1 继续服务
+#             下一个请求（不再需要像 dns_trigger 那样每组请求写一对步骤）。
+# 收到 `flags=0x8180` 的停服包（server.pktl 的 until: 谓词）→ 循环收工退出。
+#
+# 客户端是普通 `--wait` 单包（发查询 + 校验应答）。
+
+# 监听规则：DNS 查询（QR=0）；dport=55354 用于推导监听绑定地址
+# （服务端 `packet server.pktl` 不传 HOST:PORT，按包内最外层 udp dport 绑定）。
+p = raw(bytes="")
+use(p) |> udp(dport=55354) |> ipv4(dst="127.0.0.1") |> eth()
+
+sniffer:
+  - match dns(flags=0x0100)

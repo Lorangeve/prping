@@ -1191,6 +1191,34 @@ recipe:
   degraded notifications (demo → `examples/wait_timeout/`). The fallback packet
   gets the current global/params; its send failure follows `on_error`. `wait:`
   no-value / a negative number (infinite wait) has no timeout concept.
+- **Loop block (`loop:`)**: `- loop: N` (N omitted or negative = infinite, same
+  semantics as the CLI `--wait`) wraps a group of **nested steps** (`steps:`
+  followed by indented `- ` step items); each round **runs the whole block** —
+  the looping orchestration of a server "listen → extract → reply" cycle:
+  
+  ```yaml
+  recipe:
+  - loop:                # no value / negative = infinite (until: or Ctrl+C ends)
+    until:               # optional: sniffer-style predicates; any match → finish
+    - match dns(flags=0x8180)
+    steps:
+    - packet: listen.pkt
+      wait:
+      extract:
+      - name: tid
+        from: reply.dns.id
+    - packet: reply.pkt
+  ```
+  
+  `loop: N` stops after N rounds (first of it and `until:` wins); `delay: secs`
+  pauses between rounds (from round 2 on; Ctrl+C finishes early); `until:`
+  predicates may reference `global(...)` (the Matcher is rebuilt each round with
+  the latest extract values), and when the matching packet is **not** a sniffer
+  hit (e.g. a shutdown packet) it is not replied to and the block ends right
+  away. Ctrl+C inside a block **finishes gracefully** (prints stats, exit code 0
+  — non-loop listen steps treat Ctrl+C as a failure). demo →
+  `examples/dns_loop_server/` (serves DNS queries in an endless loop; finishes
+  when a `flags=0x8180` shutdown packet arrives).
 - **Send count (`count:`)**: a step option `count: N` sends **each packet of the
   step N times** (send several packets at once; overrides the CLI `--count`,
   default 1). E.g. fire an ICMP mock request 5 times: `count: 5` (with `wait:`
@@ -1241,6 +1269,9 @@ recipe:
   extracts and reuses `dns.id` across two steps),
   `examples/dns_trigger/` (**listen-trigger minimal sample**: a valueless `wait:`
   step matches the query → extract → a later step sends the answer),
+  `examples/dns_loop_server/` (**looping listen server**: an endless `loop:`
+  wrapping listen+reply serves many requests; `until:` ends on a shutdown
+  packet),
   `examples/icmp_echo_server/` (**recipe-server starter**: one listen+reply group),
   `examples/tcp_handshake_listen/` (**TCP handshake mock**: listen pure SYN →
   SYN-ACK),

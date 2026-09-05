@@ -1,0 +1,29 @@
+# client 配方 · 步骤 1：发 DNS 查询（应用层 dns → udp → ipv4 → eth），
+# `wait: 2` 校验服务端配方回的 DNS 应答（sniffer 期望 id 一致 + 应答位）。
+#
+# 报文：dns(id=0x1234, questions=["example.com"])
+#   id     事务 ID（2B 大端）——客户端随机生成用于配对请求/应答；mock 固定
+#          0x1234 便于教学对照，真实场景应每次随机（rand16()）；
+#   flags  0x0100 = QR=0（查询）+ RD=1（期望递归），DNS 查询的标准默认值；
+#   questions 查询区列表：字符串自动转 DNS 线格式名字（长度前缀 + \0 结尾，
+#          "example.com" → \x07example\x03com\x00），qtype/qclass 默认
+#          A(1)/IN(1)。
+# 传输：udp(sport=12345, dport=5533)。sport 只是包头字节（教学示意）——
+#   payload 模式实发走普通 UDP socket，内核临时分配源端口，应答按 socket
+#   实际五元组送达（见 listen_dns.pkt 对 reply.peer.port 的说明）；
+#   dport=5533 决定发送目标端口（与 server 第 1 组监听端口一致）。
+# 目标地址可注入：-p ip=127.0.0.1（默认本机回环，可指向别的机器实验）。
+q = dns(id=0x1234, questions=["example.com"])
+full = use(q) |> udp(sport=12345, dport=5533)
+              |> ipv4(src="127.0.0.1", dst=params("ip", "127.0.0.1"))
+              |> eth(src_mac="00:11:22:33:44:55", dst_mac="66:77:88:99:aa:bb")
+
+export:
+- full
+
+# 校验规则：应答 dns.id 与发包一致（0x1234）+ flags=0x8180（QR=1 应答位 +
+# RD + RA）。服务端回包 id 回显查询 id（见 dns_reply.pkt）——固定值 mock 下
+# 字面量即可配对；也可用发包字段引用 dns(id=id, ...)（SentField，见
+# sniffer_chat/step2.pkt）。
+sniffer:
+  - match dns(id=0x1234, flags=0x8180)

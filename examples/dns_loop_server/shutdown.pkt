@@ -1,0 +1,5 @@
+# 停服包：一条 flags=0x8180 的 DNS 消息（QR=1 应答位）——不是查询，
+# 服务端 sniffer（flags=0x0100）不匹配，但 until: 谓词（flags=0x8180）命中，
+# 循环立即收工（不回应）。id=0xdead 仅作标记。
+q = dns(id=0xdead, flags=0x8180, questions=["example.com"])
+use(q) |> udp(dport=55354) |> ipv4(dst="127.0.0.1") |> eth()

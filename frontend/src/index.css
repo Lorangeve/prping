@@ -1059,6 +1059,23 @@ body {
   color: var(--warn);
 }
 
+/* 参数行的必填/选填徽标：req 未填 = 警示色（提示还差这项）、已填 = 确认色、
+ * opt 走 badge 默认淡色（悬浮 title 说明空值回退默认） */
+.param-kind.param-req-missing {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.param-kind.param-req-filled {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+/* .pktl 里被步骤 params: 覆盖同名：Run 输入对它无效——整行淡化 + title 说明 */
+.param-item.param-overridden {
+  opacity: 0.55;
+}
+
 .param-input {
   flex: 1;
   min-width: 0;
@@ -1131,6 +1148,64 @@ body {
 
 .run-stop-btn:hover {
   filter: brightness(1.1);
+}
+
+/* Stop all 悬浮清单：全连接运行任务跨标签统一可见（行内 ■ 可单停单个）。
+ * 纯 CSS hover 展示——清单挂在按钮下方，z-index 压过任务列表/控制台 */
+.stopall-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.stopall-pop {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 230px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.4);
+}
+
+.stopall-wrap:hover .stopall-pop {
+  display: block;
+}
+
+.stopall-head {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  white-space: nowrap;
+}
+
+.stopall-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 2px 0;
+  white-space: nowrap;
+}
+
+.stopall-file {
+  color: var(--text);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stopall-kill {
+  cursor: pointer;
+  color: var(--warn);
+  padding: 0 4px;
+}
+
+.stopall-kill:hover {
+  color: var(--err);
 }
 
 .run-panel {
@@ -1285,6 +1360,10 @@ body {
 
 .run-line-err {
   color: var(--err);
+}
+
+.run-line-warn {
+  color: var(--warn);
 }
 
 .run-line-summary {

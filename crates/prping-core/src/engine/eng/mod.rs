@@ -876,8 +876,42 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
         }
         writeln!(&mut w)?;
     }
+    // loop 块分组：块首步前打印 loop 头（次数 / until / 轮间延迟），块内步骤缩进
+    let mut last_loop: Option<usize> = None;
     for (i, step) in recipe.steps.iter().enumerate() {
-        print_green(&mut w, format!("step {}: {}", i + 1, step.pkg.display()))?;
+        let loop_ind = if step.loop_ctx.is_some() { 2 } else { 1 };
+        if let Some(ctx) = &step.loop_ctx {
+            if last_loop != Some(ctx.id) {
+                let times = match ctx.count {
+                    Some(n) => format!("{n}x"),
+                    None => "infinite".to_string(),
+                };
+                let mut head = format!("loop {}: {times}", ctx.id + 1);
+                if let Some(secs) = ctx.delay {
+                    head.push_str(&format!(" (delay {secs}s between rounds)"));
+                }
+                print_green(&mut w, head)?;
+                writeln!(&mut w)?;
+                if let Some(preds) = &ctx.until {
+                    for p in preds {
+                        print_dim(&mut w, format!("{}until: {p}", indent(1)))?;
+                        writeln!(&mut w)?;
+                    }
+                }
+                last_loop = Some(ctx.id);
+            }
+        } else {
+            last_loop = None;
+        }
+        print_green(
+            &mut w,
+            format!(
+                "{}step {}: {}",
+                indent(if step.loop_ctx.is_some() { 1 } else { 0 }),
+                i + 1,
+                step.pkg.display()
+            ),
+        )?;
         writeln!(&mut w)?;
         if let Some(mode) = step.wait {
             let desc = match mode {
@@ -885,7 +919,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                 crate::engine::pkg::WaitMode::OneShot(secs) => format!("{secs}s"),
                 crate::engine::pkg::WaitMode::Off => "off".to_string(),
             };
-            print_dim(&mut w, format!("{}wait: {desc}", indent(1)))?;
+            print_dim(&mut w, format!("{}wait: {desc}", indent(loop_ind)))?;
             writeln!(&mut w)?;
         }
         if let Some(ot) = &step.on_timeout {
@@ -893,15 +927,15 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                 crate::engine::recipe::OnTimeout::Retry(n) => format!("retry {n}"),
                 crate::engine::recipe::OnTimeout::Packet(f) => f.display().to_string(),
             };
-            print_dim(&mut w, format!("{}on_timeout: {desc}", indent(1)))?;
+            print_dim(&mut w, format!("{}on_timeout: {desc}", indent(loop_ind)))?;
             writeln!(&mut w)?;
         }
         if let Some(n) = step.count {
-            print_dim(&mut w, format!("{}count: {n}", indent(1)))?;
+            print_dim(&mut w, format!("{}count: {n}", indent(loop_ind)))?;
             writeln!(&mut w)?;
         }
         if let Some(secs) = step.delay {
-            print_dim(&mut w, format!("{}delay: {secs}s", indent(1)))?;
+            print_dim(&mut w, format!("{}delay: {secs}s", indent(loop_ind)))?;
             writeln!(&mut w)?;
         }
         if let Some(raw) = &step.raw {
@@ -912,7 +946,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                 },
                 crate::engine::recipe::StepRaw::Off => "raw: false".to_string(),
             };
-            print_dim(&mut w, format!("{}{desc}", indent(1)))?;
+            print_dim(&mut w, format!("{}{desc}", indent(loop_ind)))?;
             writeln!(&mut w)?;
         }
         if !step.params.is_empty() {
@@ -921,7 +955,10 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
                 .iter()
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect();
-            print_dim(&mut w, format!("{}params: {}", indent(1), ps.join(", ")))?;
+            print_dim(
+                &mut w,
+                format!("{}params: {}", indent(loop_ind), ps.join(", ")),
+            )?;
             writeln!(&mut w)?;
         }
         for e in &step.extract {
@@ -944,7 +981,11 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
             };
             print_dim(
                 &mut w,
-                format!("{}extract: {} ← {from_desc}{as_desc}", indent(1), e.name),
+                format!(
+                    "{}extract: {} ← {from_desc}{as_desc}",
+                    indent(loop_ind),
+                    e.name
+                ),
             )?;
             writeln!(&mut w)?;
         }
@@ -952,7 +993,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
             OnError::Stop => "stop",
             OnError::Continue => "continue",
         };
-        print_dim(&mut w, format!("{}on_error: {on_error}", indent(1)))?;
+        print_dim(&mut w, format!("{}on_error: {on_error}", indent(loop_ind)))?;
         writeln!(&mut w)?;
     }
     Ok(())
@@ -1052,6 +1093,17 @@ fn analyze_recipe_json(
                 "params": sp,
                 "extract": extract,
                 "on_error": match s.on_error { OnError::Stop => "stop", OnError::Continue => "continue" },
+                "loop": match &s.loop_ctx {
+                    Some(ctx) => json!({
+                        "id": ctx.id + 1,
+                        "count": ctx.count,
+                        "until": ctx.until,
+                        "delay": ctx.delay,
+                        "first": ctx.first,
+                        "last": ctx.last,
+                    }),
+                    None => json!(null),
+                },
             })
         })
         .collect();

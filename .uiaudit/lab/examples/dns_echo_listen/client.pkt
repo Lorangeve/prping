@@ -1,0 +1,10 @@
+# DNS 发包/回包模拟·客户端（packet --wait SECS，payload 模式——UDP 回显由内核送达）
+#
+# 运行：prping packet --wait 2 client.pkt 127.0.0.1:53
+# 流程：发 DNS 查询（id=0x4242）→ 服务端按模板回 DNS 应答 → sniffer 校验
+#       （id 与发包一致、flags=0x8180 应答位）。
+q = dns(id=0x4242, questions=["example.com"])
+use(q) |> udp(dport=53) |> ipv4(dst=params("ip", "127.0.0.1")) |> eth()
+
+sniffer:
+  - match dns(id=id, flags=0x8180)

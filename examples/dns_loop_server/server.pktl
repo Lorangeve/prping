@@ -1,0 +1,40 @@
+# 循环监听服务端配方（loop 块）：连续服务多个请求，直到停服包到达。
+#
+# `loop:` 无值 = 无限循环（也可写 `loop: 10` 限次或 `loop: -1` 负数 = 无限，
+# 与 CLI --wait 同语义）；每轮完整执行块内步骤（监听 → extract → 回应），
+# global 跨轮保留、每轮 extract 覆盖。
+#
+# `until:` 谓词（sniffer 同款语法，可 and/or/not）——收到任何匹配包即收工：
+#   - match dns(flags=0x8180)
+# 停服包不是查询（sniffer flags=0x0100 不匹配），所以它只会触发 until——
+# 循环立即收工、不回应（客户端发完停服包即看到服务端退出、退出码 0）。
+# 块内 Ctrl+C 同样优雅收工（打印统计、退出码 0）。
+#
+# 注意：每轮回包走 UDP 载荷发送，发送路径有 ~1s 回读窗口——窗口内到达的下一条
+# 查询会被丢弃（客户端按常规 DNS 重试即可命中下一轮监听）。
+#
+# 运行（终端 1）：prping packet examples/dns_loop_server/server.pktl
+# 客户端（终端 2）：
+#   prping packet --wait 2 examples/dns_trigger/client.pkt 127.0.0.1:55354
+#   ……可连续多次查询，同一服务进程逐个应答……
+# 停服（终端 2，发一个 flags=0x8180 的包）：
+#   prping packet --wait 1 --params sid=0x8180 examples/dns_loop_server/shutdown.pkt 127.0.0.1:55354
+global:
+- tid
+- cport
+
+recipe:
+- loop:
+  until:
+  - match dns(flags=0x8180)
+  steps:
+  - packet: listen.pkt
+    wait:
+    extract:
+    - name: tid
+      from: reply.dns.id
+      as: int
+    - name: cport
+      from: reply.peer.port
+      as: int
+  - packet: reply.pkt

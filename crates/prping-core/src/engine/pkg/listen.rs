@@ -138,12 +138,24 @@ pub fn listen_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// UDP 监听命中：匹配数据报字节 + sniffer 命中字段 + 对端地址。
-pub(crate) type UdpListenHit = (Vec<u8>, Vec<(String, String)>, SocketAddr);
+/// 配方监听步骤（UDP）的单次收包结果。
+pub(crate) enum UdpListen {
+    /// sniffer 命中：匹配字节 + 命中字段 + 对端；`until_matched` = 该包同时满足
+    /// loop 块的 `until:` 谓词（本轮结束后循环收工）。
+    Hit {
+        data: Vec<u8>,
+        fields: Vec<(String, String)>,
+        peer: SocketAddr,
+        until_matched: bool,
+    },
+    /// `until:` 命中但 sniffer 未命中：循环立即收工（非本步命中，不 extract/不回应）。
+    Until,
+}
 
 /// 配方 `wait:` 无值（持续监听）步骤（UDP）：绑定地址监听数据报，sniffer 匹配
 /// **第一个命中**即返回（不发包——命中后由配方 extract 取值、后续步骤回应）。返回
-/// (匹配字节, 命中字段, 对端)；`None` = Ctrl+C 中断。
+/// [`UdpListen`]；`None` = Ctrl+C 中断。`until` 非 None 时（loop 块上下文）额外
+/// 检查每包：sniffer 命中时附带 `until_matched`；仅 until 命中 → [`UdpListen::Until`]。
 pub(crate) fn listen_udp_once(
     module: &packet_dsl::Module,
     params: &packet_dsl::Params,
@@ -151,7 +163,8 @@ pub(crate) fn listen_udp_once(
     matcher: &packet_dsl::Matcher,
     opts: &PkgOptions,
     timeout: Option<Duration>,
-) -> anyhow::Result<Option<UdpListenHit>> {
+    until: Option<&packet_dsl::Matcher>,
+) -> anyhow::Result<Option<UdpListen>> {
     let addr = listen_addr(module, params, globals, opts)?;
     let sock = UdpSocket::bind(addr)
         .map_err(|e| anyhow::anyhow!(t!("engine.listen_bind_fail", addr = addr, err = e)))?;
@@ -168,7 +181,20 @@ pub(crate) fn listen_udp_once(
             Ok((n, peer)) => {
                 let data = buf[..n].to_vec();
                 if let Some(fields) = matcher.matches(&data, None) {
-                    return Ok(Some((data, fields, peer)));
+                    // sniffer 命中：附带 until 是否同时命中（loop 块收工判定）
+                    let until_matched = until.is_some_and(|m| m.matches(&data, None).is_some());
+                    return Ok(Some(UdpListen::Hit {
+                        data,
+                        fields,
+                        peer,
+                        until_matched,
+                    }));
+                }
+                // 非命中包也参与 until 检查（如"收到停服包即收工"）
+                if let Some(m) = until
+                    && m.matches(&data, None).is_some()
+                {
+                    return Ok(Some(UdpListen::Until));
                 }
             }
             Err(e)

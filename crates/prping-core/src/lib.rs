@@ -117,7 +117,8 @@ pub use engine::pkg::{
     send_recipe, sniffer_match, sniffer_match_with, step_send_mode,
 };
 pub use engine::recipe::{
-    Extract, ExtractAs, FromSpec, GlobalDecl, OnError, Recipe, Step, StepRaw, parse as parse_recipe,
+    Extract, ExtractAs, FromSpec, GlobalDecl, LoopCtx, OnError, Recipe, Step, StepRaw,
+    parse as parse_recipe,
 };
 
 // Web 编辑器服务器（`prping web`）

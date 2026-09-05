@@ -10,8 +10,9 @@
   工作区 `.pkt/.pktl`——`run`/`run_stop` 信封 → 服务端 spawn 自身二进制的 `packet`
   子命令（ADR #8，零改动复用 CLI 全语义与本地化报错），stdout/stderr 逐行流式回传
   （`run_out`/`run_exit`），输出行数/单行长度封顶（超限继续排水并标记 `truncated`）；
-  target/count/wait/listen（裸 `--wait`）/fuzz/raw/--iface/--out/json（`--json` JSONL
-  结构化输出）选项，`--out` 落工作区根内（`validate_rel` 防逃逸）；**json 默认开**——
+  params/count/wait/listen（裸 `--wait`）/fuzz/raw/--iface/--out/json（`--json` JSONL
+  结构化输出）选项（**无 target**：地址由包字段 params 承载、引擎从包内推导；
+  显式 HOST:PORT 只留在 CLI 位置参数），`--out` 落工作区根内（`validate_rel` 防逃逸）；**json 默认开**——
   控制台按 JSONL 解析渲染（✓/✗ 包行+层栈/字节/目标/错误、步骤行、汇总行，悬停看
   原始 JSON），非 JSON 行（stderr 提示）原样回退，listen 与 json 互斥（CLI 校验）；
   **多标签并行运行 + 任务管理**：每次 Run 新建任务（控制台跟随最新任务），

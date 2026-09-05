@@ -20,7 +20,7 @@
 //!   { "type": "browse",  "id": 11, "path": "/dir" }      浏览目录（文件夹选择对话框数据源；
 //!                                                        path 缺省 = 用户主目录）
 //!   { "type": "run",     "id": 12, "name": "a.pktl",    运行工作区 .pkt/.pktl（spawn 自身
-//!                    "target": "h:p", "params": {...},  二进制 `packet` 子命令；见 run.rs）；
+//!                    "params": {...},                   二进制 `packet` 子命令；见 run.rs）；
 //!                    "count": N, "wait": SECS|true,     wait=true = 裸 --wait（持续监听）
 //!                    "raw": bool, "iface": "eth0", "out": "run.pcap" }
 //!   { "type": "run_stop", "id": 13, "run": "run-0" }     停止运行：带 run id 停单个
@@ -603,6 +603,8 @@ fn recipe_overview(r: &crate::engine::recipe::Recipe) -> Value {
     use crate::engine::recipe::{FromSpec, OnError, OnTimeout, StepRaw};
 
     let mut params: Vec<Value> = Vec::new();
+    // 步骤级 params: 的键集合（同名运行参数会被步骤覆盖——decl 行标注用）
+    let mut overridden: std::collections::HashSet<String> = std::collections::HashSet::new();
     let steps: Vec<Value> = r
         .steps
         .iter()
@@ -610,6 +612,7 @@ fn recipe_overview(r: &crate::engine::recipe::Recipe) -> Value {
         .map(|(idx, s)| {
             for (k, v) in &s.params {
                 params.push(json!({ "key": k, "value": v, "step": idx + 1 }));
+                overridden.insert(k.clone());
             }
             let wait = match s.wait {
                 None | Some(WaitMode::Off) => Value::Null,
@@ -670,6 +673,17 @@ fn recipe_overview(r: &crate::engine::recipe::Recipe) -> Value {
                     OnError::Continue => "continue",
                 },
                 "extract": extract,
+                // loop 块上下文（扁平步骤：块内每步携带同一 LoopCtx）
+                "loop": match &s.loop_ctx {
+                    Some(ctx) => json!({
+                        "id": ctx.id + 1,
+                        "count": ctx.count,
+                        "until": ctx.until,
+                        "first": ctx.first,
+                        "last": ctx.last,
+                    }),
+                    None => Value::Null,
+                },
             })
         })
         .collect();
@@ -684,7 +698,41 @@ fn recipe_overview(r: &crate::engine::recipe::Recipe) -> Value {
             })
         })
         .collect();
-    json!({ "globals": globals, "params": params, "steps": steps })
+    // 聚合运行参数声明：遍历步骤 .pkt 的 params("名", 默认)（词法收集，容错读不到
+    // 的步骤文件——未保存/刚删的文档不能拖垮概览）。跨文件同名：任一声明无默认值
+    // = 必填（缺默认值的那份会构建失败，UI 按「必填」提示更诚实）。
+    let mut decl_names: Vec<String> = Vec::new();
+    let mut decl_defs: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for s in &r.steps {
+        let Ok(decl) = crate::engine::eng::collect_pkt_params(&s.pkg) else {
+            continue;
+        };
+        for (name, default) in decl {
+            let d = default.as_ref().map(value_display);
+            match decl_defs.get_mut(&name) {
+                Some(prev) if prev.is_some() && d.is_none() => {
+                    *prev = None; // 必填声明优先
+                }
+                Some(_) => {}
+                None => {
+                    decl_names.push(name.clone());
+                    decl_defs.insert(name, d);
+                }
+            }
+        }
+    }
+    let decl: Vec<Value> = decl_names
+        .iter()
+        .map(|name| {
+            json!({
+                "name": name,
+                "default": decl_defs.get(name).cloned().flatten(),
+                "overridden": overridden.contains(name),
+            })
+        })
+        .collect();
+    json!({ "globals": globals, "params": params, "steps": steps, "decl": decl })
 }
 
 /// `params` 对象 → (k, v) 列表（非对象 → 空）。

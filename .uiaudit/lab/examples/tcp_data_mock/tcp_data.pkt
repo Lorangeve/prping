@@ -1,0 +1,36 @@
+# client 配方 · 步骤 1：发送数据段（PSH|ACK）→ wait: 2 校验 server 配方的数据确认段
+# （纯 ACK）→ extract reply.tcp.seq（服务端序号）写 global.sseq 供步骤 2 复用。
+#
+# 学习要点（TCP 数据传输）：
+#   - 面向连接：数据传输发生在三次握手之后（本 mock 跳过握手，直接从数据段开始；
+#     握手 mock 见 examples/tcp_handshake_listen/——client 的 ack=0x2001 与它的
+#     最终 ACK 一致：SYN 占 1 个序号，服务端 ISN=0x2000，确认到 0x2001）；
+#   - 可靠传输：seq/ack + 重传；每个字节都有序号，确认号 = 期望的下一个字节序号；
+#   - PSH|ACK 组合：数据推送段（带载荷）同时捎带对方向数据的确认——真实 TCP 中
+#     数据段与确认是同一段上的两个字段，不是两种包。
+#
+# TCP 标志位组合速查：
+#   SYN        连接请求（三次握手第一步）
+#   SYN|ACK    连接确认（第二步）
+#   ACK        数据确认（第三步 / 本 mock 服务端的确认段）
+#   PSH|ACK    数据推送（数据传输段，本 mock 客户端的数据段）
+#   FIN|ACK    连接关闭（四次挥手）
+#   RST        重置连接（内核对未监听端口的反应，见下）
+#
+# 序列号设计（mock 固定值便于教学对照；真实场景客户端 ISN 应随机化）：
+#   seq=0x1000 客户端固定 ISN；载荷 45 字节 → 数据占用 0x1000..0x102D，
+#   服务端确认号 = 0x102D（sniffer 里逐字段核对）。
+#
+# 内核副作用（回环 mock 的真实行为）：9090 没有真实 TCP 服务监听，内核收到本段后
+# 会回 **RST**（flags=0x04，ack=0x102D）——RST 不满足 sniffer 的 flags=ack()
+# （字节比较 0x04≠0x10），不会误命中；命中的必然是 server 配方的纯 ACK。
+# 这也是理解「真实栈对未监听端口的反应」的活教材。
+#
+# 运行：sudo prping packet examples/tcp_data_mock/client.pktl（配方编排见 client.pktl）
+# 端口 9090 可注入覆盖：-p port=8080（注意 sniffer 的 sport=9090 字面量需同步改——
+# mock 的 sniffer 用固定字面量便于对照；9090 避开 80/8080 的原因见 README）。
+data = raw(bytes="Hello, TCP! This is a data transmission test.")
+use(data) |> tcp(sport=40000, dport=params("port", 9090), seq=0x1000, ack=0x2001, flags=bor(psh(), ack()), window=65535) |> ipv4(src="127.0.0.1", dst=params("ip", "127.0.0.1"))
+
+sniffer:
+  - match tcp(sport=9090, dport=40000, flags=ack(), ack=0x102D)

@@ -1,0 +1,13 @@
+# bad_network 步骤 4：TCP Retransmission #1（超时重传）
+# TCP 超时重传时，seq/ack 号与原始包完全一致
+# 这是第一次重传，模拟间隔约 1s
+http_req = http(start_line="GET / HTTP/1.1")
+retransmit_1 = use(http_req)
+             |> tcp(sport=params("sport", 40000), dport=params("port", 80),
+                    seq=global("cseq", 0x1000) + 1, ack=global("sseq", 0x2000) + 1,
+                    flags=bor(psh(), ack()))
+             |> ipv4(dst=params("ip", "127.0.0.1"))
+             |> eth()
+
+export:
+- retransmit_1

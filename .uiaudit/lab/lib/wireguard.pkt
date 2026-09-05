@@ -1,0 +1,116 @@
+# eng_lib/wireguard.pkt —— WireGuard 协议定义
+#
+# WireGuard 是现代 VPN 协议，特点：
+#   - 简洁高效：代码量小（约4000行），性能优秀
+#   - 现代加密：Curve25519, ChaCha20-Poly1305, BLAKE2s
+#   - 1-RTT 握手：快速建立连接
+#   - 漫游支持：IP 地址变化时自动重连
+#
+# WireGuard 消息类型：
+#   - 类型 1：握手初始化（Initiator → Responder）
+#   - 类型 2：握手响应（Responder → Initiator）
+#   - 类型 3：Cookie 回复（Responder → Initiator）
+#   - 类型 4：传输数据（双向）
+
+# WireGuard 握手初始化（类型 1）
+# WireHandshakeInitiation 结构
+# 握手初始化消息，发起方发送：
+#   - 消息类型：1
+#   - 发送方索引：随机数，用于标识会话
+#   - 随机数：32 字节，防止重放
+#   - 发送方静态公钥：32 字节，Curve25519 公钥
+#   - 发送方临时公钥：32 字节，Curve25519 公钥
+#   - 加载的预共享密钥：32 字节，Poly1305 认证标签
+#   - 时间戳：12 字节，ChaCha20-Poly1305 加密的时间戳
+# @param message_type: 消息类型（4字节，大端序）
+#                      固定为 1
+# @param sender_index: 发送方索引（4字节，大端序）
+#                      随机数，用于标识会话
+# @param random: 随机数（32字节）
+#                防止重放攻击
+# @param static_public: 发送方静态公钥（32字节）
+#                       Curve25519 公钥
+# @param ephemeral_public: 发送方临时公钥（32字节）
+#                          Curve25519 公钥
+# @param encrypted_pre_shared_key: 加载的预共享密钥（32字节）
+#                                  Poly1305 认证标签
+# @param encrypted_timestamp: 时间戳（12字节）
+#                             ChaCha20-Poly1305 加密的时间戳
+# @auto: 无自动字段（所有字段都是随机或加密的）
+#[proto]
+func wireguard_handshake_initiation(message_type=1, sender_index=0, random=pad(32), static_public=pad(32), ephemeral_public=pad(32), encrypted_pre_shared_key=pad(32), encrypted_timestamp=pad(12)) -> bytes {
+    concat(
+        be32(message_type),                 # 消息类型：4字节
+        be32(sender_index),                 # 发送方索引：4字节
+        #[meta(bytes="32")] random,          # 随机数：32字节
+        #[meta(bytes="32")] static_public,   # 发送方静态公钥：32字节
+        #[meta(bytes="32")] ephemeral_public, # 发送方临时公钥：32字节
+        #[meta(bytes="32")] encrypted_pre_shared_key, # 加载的预共享密钥：32字节
+        #[meta(bytes="12")] encrypted_timestamp # 时间戳：12字节
+    )
+}
+
+# WireGuard 握手响应（类型 2）
+# WireHandshakeResponse 结构
+# 握手响应消息，响应方发送：
+#   - 消息类型：2
+#   - 发送方索引：响应方的随机数
+#   - 接收方索引：发起方的随机数
+#   - 随机数：32 字节，防止重放
+#   - 发送方临时公钥：32 字节，Curve25519 公钥
+#   - 加密的空数据：16 字节，Poly1305 认证标签
+# @param message_type: 消息类型（4字节，大端序）
+#                      固定为 2
+# @param sender_index: 发送方索引（4字节，大端序）
+#                      响应方的随机数
+# @param receiver_index: 接收方索引（4字节，大端序）
+#                        发起方的随机数
+# @param random: 随机数（32字节）
+#                防止重放攻击
+# @param ephemeral_public: 发送方临时公钥（32字节）
+#                          Curve25519 公钥
+# @param encrypted_nothing: 加密的空数据（16字节）
+#                           Poly1305 认证标签
+# @auto: 无自动字段
+#[proto]
+func wireguard_handshake_response(message_type=2, sender_index=0, receiver_index=0, random=pad(32), ephemeral_public=pad(32), encrypted_nothing=pad(16)) -> bytes {
+    concat(
+        be32(message_type),                 # 消息类型：4字节
+        be32(sender_index),                 # 发送方索引：4字节
+        be32(receiver_index),               # 接收方索引：4字节
+        #[meta(bytes="32")] random,          # 随机数：32字节
+        #[meta(bytes="32")] ephemeral_public, # 发送方临时公钥：32字节
+        #[meta(bytes="16")] encrypted_nothing # 加密的空数据：16字节
+    )
+}
+
+# WireGuard 传输数据（类型 4）
+# WireTransportData 结构
+# 传输数据消息，双向发送：
+#   - 消息类型：4
+#   - 接收方索引：对方的随机数
+#   - 随机数：8 字节，ChaCha20 随机数
+#   - 加密数据：变长，ChaCha20-Poly1305 加密的载荷
+# @param message_type: 消息类型（4字节，大端序）
+#                      固定为 4
+# @param receiver_index: 接收方索引（4字节，大端序）
+#                        对方的随机数
+# @param counter: 随机数（8字节）
+#                 ChaCha20 随机数
+# @param encrypted_data: 加密数据（变长）
+#                        ChaCha20-Poly1305 加密的载荷
+# @auto: 无自动字段（数据已加密）
+#[proto]
+func wireguard_transport_data(message_type=4, receiver_index=0, counter=0, encrypted_data="") -> bytes {
+    concat(
+        be32(message_type),                 # 消息类型：4字节
+        be32(receiver_index),               # 接收方索引：4字节
+        be64(counter),                      # 随机数：8字节
+        #[meta(rest="encrypted_data")] encrypted_data # 加密数据：变长
+    )
+}
+
+export:
+- wireguard_handshake_initiation
+- wireguard_handshake_response
+- wireguard_transport_data

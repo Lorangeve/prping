@@ -1,0 +1,32 @@
+# arp_mock · client 配方 · 步骤 2：免费 ARP（gratuitous ARP）——
+# 原样搬自旧 examples/link_arp/free_arp_81_1.pkt（包定义不变：spa=tpa=192.168.81.1）。
+#
+# gratuitous ARP 与普通 ARP 请求的区别（对照 arp_request.pkt）：
+#   - 普通 ARP 请求：spa=本机 IP，tpa=**要解析的别人 IP**——问「谁是 tpa？」，
+#     期待 op="reply" 应答（client 步骤 1 有 wait: 2 等着收）；
+#   - gratuitous ARP：spa=tpa=**自己的 IP**——问「谁是 192.168.81.1？」，而答案
+#     就是自己。故**纯发送、无 wait**：这不是提问，是广播通告。
+#
+# 两大用途：
+#   ① IP 冲突探测——若局域网里真有别的设备占着这个 IP，它会应答/抗议（重复
+#      地址检测 DAD 的 IPv4 版）；
+#   ② 宣告 MAC<->IP 绑定——开机/换网卡/HA 主备切换后广播一句，局域网其他主机
+#      收到后把 spa->sha 写进 ARP 缓存（覆盖旧映射），流量切到新位置。
+#      RFC 5227（IPv4 Address Conflict Detection）把这套流程标准化。
+# 特征：op=request（也存在 op=reply 的变体，两者都刷缓存，request 版还能顺带
+# 探冲突），目的地址广播 ff:ff:ff:ff:ff:ff，sha=本机 MAC，tha=全零（request 模式）。
+#
+# sha 的 "2c:f0:5d:ac:20:6a" 是旧示例从真实网卡（192.168.81.1 网段）抓包得到
+# 的 MAC，保留原值便于与抓包资料对照；真实场景应取本机接口 MAC 并随机化思考
+# （固定值便于教学对照，mock 的正常手段）。
+#
+# 与 mock server 的交互：gratuitous ARP 的 op 也是 request，真实主机只在
+# tpa == 自己 IP 时才应答（192.168.81.1 不归它们，集体沉默）；本示例的 server
+# 配方只监听一轮（一组 listen+reply，服务 client 步骤 1），gratuitous ARP 到达时
+# server 已退出——同样无人应答。若给 server 加第二组 listen+reply，mock server
+# 会把所有 op="request" 都答一遍（教学简化：不检查 tpa 归属）；想更真实可练手给
+# listen.pkt 的 sniffer 追加 tpa 过滤（sniffer 规则只能写字面量，把"服务哪个 IP"
+# 写死成常量即可）。
+fa = arp(op=request(), sha="2c:f0:5d:ac:20:6a", spa="192.168.81.1",
+         tha="00:00:00:00:00:00", tpa="192.168.81.1")
+use(fa) |> eth(src_mac="2c:f0:5d:ac:20:6a", dst_mac="ff:ff:ff:ff:ff:ff")
