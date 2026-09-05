@@ -1,9 +1,0 @@
-# client 配方 · 步骤 2：再发一个 echo request——展示配方**多包**流程；
-# id 复用步骤 1 从回包提取的 global.cid（`id=id` 引用发包字段校验回包）。
-# seq 期望值 = 1002：server 回包 seq = 请求 seq(2) + 1000（配方标记，见 reply.pkt），
-# 内核替答会原样回显 seq=2，匹配 1002 即排除内核替答。
-payload = raw(bytes="again")
-use(payload) |> icmp(type=8, id=global("cid"), seq=2) |> ipv4(src="127.0.0.1", dst="127.0.0.1")
-
-sniffer:
-  - match icmp(type=0, id=id, seq=1002)

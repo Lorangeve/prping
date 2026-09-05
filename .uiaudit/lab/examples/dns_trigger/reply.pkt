@@ -1,9 +1,0 @@
-# 触发发包步骤：用 wait 监听步骤 extract 的 global 构造 DNS 应答，发回查询方。
-#   global.tid   = 查询的 dns.id（reply.dns.id 来源）
-#   global.cport = 查询方的 UDP 源端口（reply.peer.port 来源——UDP 监听载荷里没有
-#                  udp 头，对端地址来自 socket peer）
-q = dns(id=global("tid"), flags=0x8180, questions=["example.com"], answers=[["example.com", 1, 1, 300, ip4("93.184.216.34")]])
-full = use(q) |> udp(sport=53, dport=global("cport")) |> ipv4(dst="127.0.0.1") |> eth()
-
-export:
-- full

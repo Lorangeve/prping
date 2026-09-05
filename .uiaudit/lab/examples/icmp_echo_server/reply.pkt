@@ -1,9 +1,0 @@
-# server 配方 · 步骤 2（触发发包）：构造 ICMP echo reply（type=0）发回请求方。
-# 字段全部来自 listen 步骤的 extract（global）：
-#   r_id / r_seq / r_payload 原样回显；r_dst_ip（请求方）→ reply 的 dst、
-#   r_src_ip（本机）→ reply 的 src。ICMP 校验和由序列化器自动重算。
-#
-# 纯回显配方：回环上内核会替答 ICMP echo（见 README），要可验证的回环演示
-# 请用 examples/icmp_mock/（seq 偏移 +1000 作配方标记）。
-payload = raw(bytes=global("r_payload"))
-use(payload) |> icmp(type=0, id=global("r_id"), seq=global("r_seq")) |> ipv4(src=global("r_src_ip"), dst=global("r_dst_ip"))
