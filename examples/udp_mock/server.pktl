@@ -7,12 +7,12 @@
 # 正好对应 client.pktl 的两步请求；要服务更多次就再写几组。
 #
 # 每组步骤：
-#   第 1 组：listen_dns.pkt（wait: 无值 = 持续监听）——有 udp 传输层 → 自动选
+#   第 1 组：listen_dns.pkt（wait: -1 = 持续监听）——有 udp 传输层 → 自动选
 #           **UDP 数据报监听**（绑定 :5533，单组实验可免 root），sniffer 匹配
 #           DNS 查询（flags=0x0100），命中后 extract：tid=查询 id；cip/cport=
 #           查询方 IP/端口（reply.peer.*，来自 socket——UDP 载荷里没有地址头）。
 #           dns_reply.pkt 用 global 构造带 A 记录的应答发回查询方。
-#   第 2 组：listen_vnc.pkt（wait: 无值 + raw: true = **链路层监听**）——RFB
+#   第 2 组：listen_vnc.pkt（wait: -1 + raw: true = **链路层监听**）——RFB
 #           横幅是裸文本，UDP 数据报监听里反解不出任何层、无法匹配（实测
 #           ignored，见 listen_vnc.pkt 的详细说明）；链路层监听收完整帧，
 #           udp/raw 层齐全才能做「端口 + 内容」跨层匹配。链路层监听没有
@@ -39,7 +39,7 @@ global:
 recipe:
 # ── 第 1 组：DNS 查询监听 → extract → 触发发 A 记录应答（client 步骤 1）──
 - packet: listen_dns.pkt
-  wait:
+  wait: -1
   extract:
   - name: tid
     from: reply.dns.id
@@ -53,7 +53,7 @@ recipe:
 - packet: dns_reply.pkt
 # ── 第 2 组：VNC 横幅监听（链路层，raw: true）→ extract 帧内对端 → 回横幅 ──
 - packet: listen_vnc.pkt
-  wait:
+  wait: -1
   raw: true
   extract:
   - name: cip2

@@ -196,7 +196,7 @@ LSP / pcap）集成在 prping 同一 binary 中（与测量模式互斥）。
   reply.dns.id`）/ `on_error: stop|continue`；`.pkt` 内用 `global("名"[, 默认])`
   值原语读取，`-g k=v`（`--global`）注入覆盖 init、`-p k=v`（`--params` 短选项）注入
   普通参数；`engine FILE.pktl` 展示概览。示例统一为 **mock server/client 形式**
-  （服务端配方 server.pktl：`wait:` 无值监听 + extract + 触发发包；客户端配方
+  （服务端配方 server.pktl：`wait: -1` 监听 + extract + 触发发包；客户端配方
   client.pktl：发包 + `wait: N` + sniffer 校验 + extract——形态标杆见
   `examples/icmp_mock/`，完整清单见 `examples/README.md`）：
   `examples/icmp_mock/`（ICMP echo：seq+1000 配方标记排除内核替答）、

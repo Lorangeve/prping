@@ -6,7 +6,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（HTTP 80 端口） | **显式两组** listen+reply：每组 = `wait:` 无值链路层监听匹配 `http(method="GET"/"POST")` → extract 客户端端口/序列号/双向 IP 写 global → 触发发包 200 OK（`ack = r_seq + 请求字节数`，见下）。两组对应 client 两步；要服务更多次就多写几组 |
+| `server.pktl` | 服务端（HTTP 80 端口） | **显式两组** listen+reply：每组 = `wait: -1` 链路层监听匹配 `http(method="GET"/"POST")` → extract 客户端端口/序列号/双向 IP 写 global → 触发发包 200 OK（`ack = r_seq + 请求字节数`，见下）。两组对应 client 两步；要服务更多次就多写几组 |
 | `client.pktl` | 客户端（多包流程） | 1. 发 GET（`raw: true`）→ `wait: 2` 校验 200 OK（sniffer TCP 层 + http 内容双判据）；2. `delay: 0.5` 后发 POST（JSON body + Content-Length）→ `wait: 2` 校验 |
 
 ## HTTP 协议速览（RFC 2616/7230）

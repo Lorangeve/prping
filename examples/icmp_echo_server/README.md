@@ -1,6 +1,6 @@
 # icmp_echo_server：用 .pktl 配方实现一个 ICMP echo 服务端
 
-展示**配方服务端**：步骤 `wait:`（无值）链路层监听完整帧，按 sniffer 统一谓词匹配
+展示**配方服务端**：步骤 `wait: -1` 链路层监听完整帧，按 sniffer 统一谓词匹配
 ICMP echo request，命中后 `extract` 把请求字段写进 global，**触发后续步骤**构造
 echo reply（`reply.pkt`）并发回——回应包的构造属编排，一律由配方完成。
 
@@ -28,7 +28,7 @@ prping ping 127.0.0.1          # 或本机局域网 IP；-n 3 限制次数
 ```text
 recipe:
 - packet: listen.pkt     # 步骤 1：持续监听（不发送）
-  wait:                  # 无值 = 持续监听直到命中（与 CLI 裸 --wait 同语义）
+  wait: -1                  # -1 = 持续监听直到命中（与 CLI 负数 --wait 同语义）
   extract:               # 命中后从匹配帧取值写 global
   - name: r_id
     from: reply.icmp.id  # 请求的 icmp.id（回显用）

@@ -6,7 +6,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（TCP :80 + HTTP 静态页） | **显式两组** listen+reply：第 1 组 `wait:` 无值链路层监听匹配纯 SYN → extract 端口/seq/双向 IP → 触发发包 SYN-ACK（`ack=请求 seq+1`，固定服务端 ISN=0x2000）；第 2 组监听 `http(method="GET")` → extract GET 的 seq/ack → 触发发包 200 OK（`seq=GET 的 ack`，`ack=GET 的 seq+38`） |
+| `server.pktl` | 服务端（TCP :80 + HTTP 静态页） | **显式两组** listen+reply：第 1 组 `wait: -1` 链路层监听匹配纯 SYN → extract 端口/seq/双向 IP → 触发发包 SYN-ACK（`ack=请求 seq+1`，固定服务端 ISN=0x2000）；第 2 组监听 `http(method="GET")` → extract GET 的 seq/ack → 触发发包 200 OK（`seq=GET 的 ack`，`ack=GET 的 seq+38`） |
 | `client.pktl` | 客户端（三步流程） | 1. 发 SYN（seq=0x1000）→ `wait: 2` 校验 SYN-ACK → **extract 服务端 ISN**（`reply.tcp.seq` 写 `global.sseq`，真实握手核心动作）；2. `delay: 0.5` 发第三次握手 ACK（`wait: 0` 无应答）；3. `delay: 0.5` 发 HTTP GET（PSH\|ACK）→ `wait: 2` 校验 200 OK（tcp 字段 + http 状态行） |
 
 发包用**裸 IP 外层**（无 eth 层）+ `raw: true`：有 tcp 传输层的发送必须显式 raw

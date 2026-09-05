@@ -46,6 +46,7 @@ import {
   ParamRow,
   RecipePanel,
   RunPanel,
+  TaskManager,
   parseRunLine,
   type OutlineSym,
   type RecipeDoc,
@@ -125,6 +126,10 @@ export function App() {
     json: true, // 默认 JSONL 结构化渲染（listen 时自动失效）
   });
   const [runTasks, setRunTasks] = createSignal<RunTask[]>([]);
+  // 每文件（fileKey = root:path）的会话内运行计数：任务卡展示号 #n 的取号器。
+  // 单调不复用（移除任务卡不清号——「第几次运行」语义）；重连 = 新会话，与
+  // 任务卡一起清零（onStatus "connected"）。id 本身仍是服务端传输层句柄 run-N。
+  const runSeqPerFile = new Map<string, number>();
   const [activeRunId, setActiveRunId] = createSignal<string | null>(null);
   // 控制台行数上限（与 MAX_RUN_LINES 转发上限独立；超限从头丢弃）
   const MAX_UI_RUN_LINES = 4000;
@@ -327,8 +332,10 @@ export function App() {
   client.onStatus = (s) => {
     setStatus(s);
     if (s === "connected") {
-      // 重连 = 新 WS 会话：旧会话的运行已被服务端收杀，任务卡随之清空
+      // 重连 = 新 WS 会话：旧会话的运行已被服务端收杀，任务卡随之清空；
+      // 取号器一并归零（新会话每文件从 #1 重新起号）
       setRunTasks([]);
+      runSeqPerFile.clear();
       setActiveRunId(null);
       // 首连与重连统一在此初始化（WS OPEN 后才可发送）：重建 LSP 会话并
       // 重放当前文档、刷新分析/库列表/工作区树（重连后服务端工作区回到默认）
@@ -620,10 +627,15 @@ export function App() {
       return;
     }
     // 新任务卡入列（归属当前文档标签；超上限丢最旧）；视图切到新任务。
-    // startedAt/endedAt 客户端计时；starting = 受理未出输出（控制台 'starting…' 行）
+    // startedAt/endedAt 客户端计时；starting = 受理未出输出（控制台 'starting…' 行）。
+    // n = 本文件的会话内运行序号（展示 #n；移除不复用，重连随 Map 清零）
+    const fkey = tabKey(cur);
+    const n = (runSeqPerFile.get(fkey) ?? 0) + 1;
+    runSeqPerFile.set(fkey, n);
     const task: RunTask = {
       id: (res.data as { run: string }).run,
-      fileKey: tabKey(cur),
+      n,
+      fileKey: fkey,
       file: cur.path,
       lines: [],
       exit: null,
@@ -650,6 +662,25 @@ export function App() {
   /** 停全部：run_stop 不带 id——服务端停本连接所有运行（终态逐个 run_exit 推回）。 */
   function doStopAll() {
     void client.runStop();
+  }
+
+  /** 任务管理器点行导航：控制台切到该任务；任务属其它文件标签时经 applyOpen
+   *  reopen 激活该标签（沿用标签内存内容，未保存修改不丢），最后右栏切 Run。
+   *  关闭文件标签会移除其任务卡，导航目标必然是已开标签（找不到即静默忽略）。 */
+  function openTask(id: string) {
+    const t = runTasks().find((tk) => tk.id === id);
+    if (!t) return;
+    setActiveRunId(id);
+    if (activeKey() !== t.fileKey) {
+      const tab = tabs().find((tb) => tabKey(tb.file) === t.fileKey);
+      if (tab) {
+        applyOpen(tab.file, "", fileUri(
+          tab.file.root === "ws" ? (wsRoot() ?? "") : "",
+          tab.file.path,
+        ));
+      }
+    }
+    setPanelPersist("run");
   }
 
   /** 任务管理：停止单个任务（chip ✕ / 列表操作）；终态经 run_exit 落地后由 onCloseTask 移除 */
@@ -1498,6 +1529,18 @@ export function App() {
             </button>
           </span>
         </Show>
+        {/* 右上角全局任务管理器：全连接唯一任务管理面（有任务才出现，
+            徽标 = 运行中计数；面板内点行导航 / ■ 停 / ✕ 移除 / Stop all） */}
+        <Show when={runTasks().length > 0}>
+          <TaskManager
+            tasks={runTasks()}
+            activeId={activeTask()?.id ?? null}
+            onSelect={openTask}
+            onStopTask={(id) => void onStopTask(id)}
+            onCloseTask={onCloseTask}
+            onStopAll={doStopAll}
+          />
+        </Show>
       </header>
       <main class="main" classList={{ "main-md": isMd(), "side-hidden": !sideVisible() }}>
         <FileSidebar
@@ -1681,10 +1724,8 @@ export function App() {
           </Show>
           <Show when={panel() === "run"}>
             <RunPanel
-              allTasks={runTasks()}
               tasks={runTasks().filter((t) => t.fileKey === activeKey())}
               activeId={activeTask()?.id ?? null}
-              setActive={setActiveRunId}
               settings={runSettings()}
               setSettings={updateRunSettings}
               declParams={declParams()}
@@ -1693,8 +1734,6 @@ export function App() {
               canRun={canRun()}
               onRun={() => void doRun()}
               onStopTask={(id) => void onStopTask(id)}
-              onCloseTask={onCloseTask}
-              onStopAll={doStopAll}
             />
           </Show>
           </aside>

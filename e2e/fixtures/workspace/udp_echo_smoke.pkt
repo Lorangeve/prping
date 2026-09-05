@@ -1,0 +1,9 @@
+# webui 冒烟 · UDP 回显往返：载荷模式发包（有 TCP/UDP 传输层 → 普通 socket，免
+# root）→ 本地 prping server 的 UDP echo 原样回显 → packet --wait 收到 ✓ reply。
+# 端口经 params("port") 注入（e2e 沙箱把 echo server 端口填进参数框；缺省 45678
+# 供手工调试：prping server 127.0.0.1:45678 后在 Run 页签直接运行）。
+p = raw(bytes="hello webui smoke\n")
+full = use(p) |> udp(sport=41001, dport=params("port", 45678))
+             |> ipv4(dst=params("ip", "127.0.0.1"))
+export:
+- full

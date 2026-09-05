@@ -1,4 +1,4 @@
-# server 配方 · 第 1 组步骤 1：链路层持续监听（wait: 无值），匹配 HTTP GET 请求帧。
+# server 配方 · 第 1 组步骤 1：链路层持续监听（wait: -1），匹配 HTTP GET 请求帧。
 #
 # 监听方式**自动选择**：本包不含 udp/tcp 传输层（p = raw 占位 + ipv4/eth 外壳）→
 # 引擎选**链路层监听**完整帧（listen_raw_once，AF_PACKET/Npcap，需 root——

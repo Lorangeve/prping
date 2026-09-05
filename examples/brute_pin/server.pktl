@@ -5,7 +5,7 @@
 #   终端 2（爆破）：prping packet examples/brute_pin/client.pktl 127.0.0.1:55353
 #
 # 服务端只有两步：
-#   步骤 1  listen.pkt  wait:（无值 = 无限监听）——DNS 查询里 qname 不带正确 PIN
+#   步骤 1  listen.pkt  wait: -1（= 无限监听）——DNS 查询里 qname 不带正确 PIN
 #                       的候选不匹配 sniffer、被静默忽略，服务端继续等；正确候选
 #                       命中后 extract 写 global：事务 ID（reply.dns.id）+ 对端
 #                       地址（reply.peer.ip/port）。
@@ -26,7 +26,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: tid
     from: reply.dns.id

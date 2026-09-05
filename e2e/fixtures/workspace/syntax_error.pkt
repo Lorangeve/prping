@@ -1,0 +1,2 @@
+# webui 冒烟 · 语法错误样本：括号未闭合，Diagnostics 页签应报 parse 错误。
+x = udp(

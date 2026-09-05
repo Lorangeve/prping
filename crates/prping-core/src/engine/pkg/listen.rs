@@ -2,7 +2,7 @@
 //!
 //! 绑定 UDP 地址，持续接收数据报；每个数据报反解后按 .pkt 的 `sniffer:` 规则
 //! 匹配——命中打印匹配详情（字段=值 + 反解展示），未命中忽略，**不发包回应**
-//! （回应包的构造属编排，由 .pktl 配方的 `wait:` 无值步骤 + extract + 后续
+//! （回应包的构造属编排，由 .pktl 配方的 `wait: -1` 步骤 + extract + 后续
 //! 发包步骤完成，见 `examples/sniffer_chat/`、`examples/dns_trigger/`）。
 //!
 //! - 监听地址：CLI `HOST:PORT` 或按包内最外层 udp/tcp `dport` 推导
@@ -152,7 +152,7 @@ pub(crate) enum UdpListen {
     Until,
 }
 
-/// 配方 `wait:` 无值（持续监听）步骤（UDP）：绑定地址监听数据报，sniffer 匹配
+/// 配方 `wait: -1`（持续监听）步骤（UDP）：绑定地址监听数据报，sniffer 匹配
 /// **第一个命中**即返回（不发包——命中后由配方 extract 取值、后续步骤回应）。返回
 /// [`UdpListen`]；`None` = Ctrl+C 中断。`until` 非 None 时（loop 块上下文）额外
 /// 检查每包：sniffer 命中时附带 `until_matched`；仅 until 命中 → [`UdpListen::Until`]。

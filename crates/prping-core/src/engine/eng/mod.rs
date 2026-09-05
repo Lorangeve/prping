@@ -915,7 +915,7 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
         writeln!(&mut w)?;
         if let Some(mode) = step.wait {
             let desc = match mode {
-                crate::engine::pkg::WaitMode::Continuous => "infinite (-1 / no value)".to_string(),
+                crate::engine::pkg::WaitMode::Continuous => "infinite (-1)".to_string(),
                 crate::engine::pkg::WaitMode::OneShot(secs) => format!("{secs}s"),
                 crate::engine::pkg::WaitMode::Off => "off".to_string(),
             };

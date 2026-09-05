@@ -1,6 +1,6 @@
 # TCP 三次握手 · 服务端配方（server.pktl）：监听触发 + extract 取值 + 触发发包。
 #
-# 步骤 1：`wait:`（无值 = 持续监听）——listen.pkt 无传输层 → 自动链路层监听
+# 步骤 1：`wait: -1`（= 持续监听）——listen.pkt 无传输层 → 自动链路层监听
 #         完整帧，匹配纯 SYN（flags="syn"），命中后 extract 匹配帧字段写 global：
 #         客户端端口/序列号 + 双向 IP。
 # 步骤 2：触发发包——synack.pkt 构造 SYN-ACK（ack=请求 seq+1）发回请求方
@@ -18,7 +18,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_sport
     from: reply.tcp.sport

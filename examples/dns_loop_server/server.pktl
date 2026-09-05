@@ -1,8 +1,8 @@
 # 循环监听服务端配方（loop 块）：连续服务多个请求，直到停服包到达。
 #
-# `loop:` 无值 = 无限循环（也可写 `loop: 10` 限次或 `loop: -1` 负数 = 无限，
-# 与 CLI --wait 同语义）；每轮完整执行块内步骤（监听 → extract → 回应），
-# global 跨轮保留、每轮 extract 覆盖。
+# `loop: -1`（负数）= 无限循环（也可写 `loop: 10` 限次，与 CLI 负数 --wait
+# 同语义；空值非法——字段要么不写、要么写值）；每轮完整执行块内步骤
+# （监听 → extract → 回应），global 跨轮保留、每轮 extract 覆盖。
 #
 # `until:` 谓词（sniffer 同款语法，可 and/or/not）——收到任何匹配包即收工：
 #   - match dns(flags=0x8180)
@@ -24,12 +24,12 @@ global:
 - cport
 
 recipe:
-- loop:
+- loop: -1
   until:
   - match dns(flags=0x8180)
   steps:
   - packet: listen.pkt
-    wait:
+    wait: -1
     extract:
     - name: tid
       from: reply.dns.id

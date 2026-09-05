@@ -3,7 +3,7 @@
 # 每组对应 client.pktl 的一步：
 #
 #   第 1 组（对应 client 步骤 1 发 SYN）：
-#     listen_syn.pkt —— wait:（无值 = 持续监听）链路层匹配纯 SYN（flags="syn"），
+#     listen_syn.pkt —— wait: -1（= 持续监听）链路层匹配纯 SYN（flags="syn"），
 #                       命中后 extract 请求方端口/ISN/双向 IP 写 global；
 #     synack.pkt     —— 触发发包：SYN-ACK（ack=请求 seq+1，固定服务端 ISN 0x2000）。
 #   第 2 组（对应 client 步骤 3 发 GET；client 步骤 2 的纯 ACK 无应答、也无监听——
@@ -34,7 +34,7 @@ global:
 recipe:
 # ── 第 1 组：监听纯 SYN → extract → 触发发包 SYN-ACK（client 步骤 1）──
 - packet: listen_syn.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_sport
     from: reply.tcp.sport
@@ -52,7 +52,7 @@ recipe:
   raw: true
 # ── 第 2 组：监听 http GET → extract → 触发发包 200 OK（client 步骤 3）──
 - packet: listen_get.pkt
-  wait:
+  wait: -1
   extract:
   - name: r2_sport
     from: reply.tcp.sport

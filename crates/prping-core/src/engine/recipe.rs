@@ -28,11 +28,12 @@
 //! - global 项三种形态：`- name: X`（可后跟缩进 `init:`）、`- X`（裸声明，未初始化）、
 //!   `- X=v`（一行内联 init；v 与 `init:` 同字面量语法，见下）。
 //! - 步骤项：`- packet: 文件`（后可跟选项行）或裸文件名 `- 文件`。
-//! - 步骤选项：`wait:`（**与 CLI `--wait` 同语义**——`wait:` 无值或负数 = 无限等待
-//!   （等价 CLI 裸 `--wait` / 负数 `--wait`）：无值时本步不发送、用 .pkt 的 sniffer 匹配
+//! - 步骤选项：`wait:`（**与 CLI `--wait` 同语义**——`wait: -1`（任意负数）= 无限等待
+//!   （等价 CLI 裸 `--wait` / 负数 `--wait`）：本步不发送、用 .pkt 的 sniffer 匹配
 //!   外部到达的包，命中后配方继续（触发后续步骤发包），匹配包供 `extract` 的 `reply.`
 //!   来源取值（`raw: true|网卡名` 走链路层监听，否则 UDP 数据报监听）；`wait: 秒数` =
-//!   发送后等一个匹配应答（等价 CLI `--wait SECS`）；不写 = 纯发送）、
+//!   发送后等一个匹配应答（等价 CLI `--wait SECS`）；不写 = 纯发送。**空值非法**：
+//!   字段要么不写、要么写值（空值易误读语义，解析期报错并提示 `wait: -1`），
 //!   `on_timeout: 文件`（**wait 超时处理**：`wait: 秒数` 超时未收到匹配应答时，
 //!   打印超时信息并**发送该 .pkt**（发其它包），步骤继续）、`delay: 秒数`（步骤开始前
 //!   等待——非首步生效，pcap 转码配方用；响应 Ctrl+C 提前结束）、
@@ -40,7 +41,8 @@
 //!   `raw: true|false|网卡名`（覆盖 `--raw`：`true` 开原始发送、网卡名 = 开原始发送并
 //!   指定网卡、`false` 强制载荷发送）、`extract:`（子列表 `- name:` + `from:` + `as:`）、
 //!   `on_error: stop|continue`。
-//! - **loop 块**（`- loop: N`，N 可省或负数 = 无限，与 CLI `--wait` 同语义）：包裹
+//! - **loop 块**（`- loop: N`，N 为负数 = 无限，与 CLI 负数 `--wait` 同语义；空值
+//!   非法，无限循环写 `loop: -1`）：包裹
 //!   一组嵌套步骤（`steps:` 后跟缩进 `- ` 步骤项），每轮完整执行块内步骤——服务端
 //!   "监听→extract→回应"循环编排。
 //!   `until:` 谓词列表（sniffer 同款 `match 层(条件, ...)` / and/or/not，顶层多条
@@ -132,6 +134,9 @@ impl ExtractAs {
     }
 
     fn parse(s: &str, line: usize) -> anyhow::Result<Self> {
+        if s.trim().is_empty() {
+            return Err(err(line, t!("engine.parse_as_empty")));
+        }
         match s {
             "int" => Ok(ExtractAs::Int),
             "hex" => Ok(ExtractAs::Hex),
@@ -223,8 +228,8 @@ pub enum OnTimeout {
 pub struct LoopCtx {
     /// loop 块序号（解析顺序，0 起；同块内步骤相同）。
     pub id: usize,
-    /// 循环次数；None = 无限（`loop:` 无值或负数，与 CLI `--wait` 同语义——直到
-    /// `until` 命中或 Ctrl+C 优雅收工）。
+    /// 循环次数；None = 无限（`loop: 负数`，与 CLI 负数 `--wait` 同语义——直到
+    /// `until` 命中或 Ctrl+C 优雅收工；空值非法，无限写 `loop: -1`）。
     pub count: Option<usize>,
     /// `until:` 谓词文本列表（sniffer 同款语法：`match 层(条件, ...)` / and/or/not，
     /// 顶层多条 = 隐式 OR）。任一谓词命中即满足；执行期每轮构建 Matcher
@@ -245,9 +250,10 @@ pub struct LoopCtx {
 pub struct Step {
     /// .pkt 文件（相对 .pktl 所在目录解析）。
     pub pkg: PathBuf,
-    /// 与 CLI `--wait` 同语义：`wait:` 无值或 `-1` = 无限等待（无值时本步不发送，
+    /// 与 CLI `--wait` 同语义：`wait: -1`（任意负数）= 无限等待（本步不发送，
     /// 用 .pkt 的 sniffer 匹配外部到达的包，命中后配方继续触发后续步骤发包）；
     /// `wait: 秒数` = 发送后等一个匹配应答；None = 纯发送（继承 CLI `--wait SECS` 作默认）。
+    /// 空值非法（字段要么不写、要么写值；解析期报错提示 `wait: -1`）。
     pub wait: Option<crate::engine::pkg::WaitMode>,
     /// **wait 超时处理**：`wait: 秒数` 超时未收到匹配应答时——`retry [N]` 重发
     /// 当前步骤的包（每次重新 wait），或发送备选 .pkt（发其它包）；步骤继续。
@@ -386,10 +392,12 @@ pub fn parse_text(src: &str, path: &Path) -> anyhow::Result<Recipe> {
                             &mut loop_id,
                             &mut recipe.steps,
                         )?;
-                        // 与 CLI `--wait` 同语义：无值或负数 = 无限（等价 CLI 裸
-                        // `--wait` / 负数 `--wait`）；正整数 = 循环次数
+                        // 与 CLI 负数 `--wait` 同语义：负数 = 无限；正整数 = 循环次数。
+                        // 空值非法（字段要么不写、要么写值）——无限循环显式写 `loop: -1`
                         let count = match val.trim() {
-                            "" => None,
+                            "" => {
+                                return Err(err(line_no, t!("engine.parse_loop_empty")));
+                            }
                             other => {
                                 let n: i64 = other.parse().map_err(|_| {
                                     err(line_no, t!("engine.parse_loop_value", val = other))
@@ -464,6 +472,9 @@ pub fn parse_text(src: &str, path: &Path) -> anyhow::Result<Recipe> {
                     line_no,
                     t!("engine.parse_init_inline_conflict", name = gb.name),
                 ));
+            }
+            if val.trim().is_empty() {
+                return Err(err(line_no, t!("engine.parse_init_empty")));
             }
             let v = parse_init_value(val, line_no)?;
             let g = recipe
@@ -781,6 +792,9 @@ fn parse_global_item(rest: &str, line: usize) -> anyhow::Result<(String, Option<
 /// 3. 其余 → [`FromSpec::Expr`] 值表达式：`reply.<层>.<字段>` 叶子改写为
 ///    `reply("层", "字段")` 调用后按 DSL 值表达式解析（可调函数/原语/`+` 运算）。
 fn parse_from(v: &str, line: usize) -> anyhow::Result<FromSpec> {
+    if v.trim().is_empty() {
+        return Err(err(line, t!("engine.parse_from_empty")));
+    }
     if let Some((layer, field)) = parse_field_ref(v, "reply.") {
         // 监听对端（listen 步骤的 UDP 监听）：`reply.peer.ip` / `reply.peer.port`——
         // 载荷里没有 udp 头，对端地址来自 socket（peer），供后续步骤回包
@@ -1025,11 +1039,13 @@ fn step_line(
     let (key, val) = split_kv(trimmed, line_no)?;
     match key.as_str() {
         "wait" => {
-            // 与 CLI `--wait` 同语义：无值或负数 = 无限等待（无值时本步不发送，
-            // 用 .pkt 的 sniffer 匹配外部到达的包，命中后配方继续触发后续步骤
-            // 发包）；非负秒数 = 发送后等一个匹配应答
+            // 与 CLI `--wait` 同语义：负数 = 无限等待（本步不发送，用 .pkt 的
+            // sniffer 匹配外部到达的包，命中后配方继续触发后续步骤发包）；
+            // 非负秒数 = 发送后等一个匹配应答；空值非法（要么不写、要么写值）
             let mode = match val.trim() {
-                "" => crate::engine::pkg::WaitMode::Continuous,
+                "" => {
+                    return Err(err(line_no, t!("engine.parse_wait_empty")));
+                }
                 other => {
                     let secs: f64 = other
                         .parse()
@@ -1048,6 +1064,9 @@ fn step_line(
             step.wait = Some(mode);
         }
         "delay" => {
+            if val.trim().is_empty() {
+                return Err(err(line_no, t!("engine.parse_delay_empty")));
+            }
             let secs: f64 = val
                 .parse()
                 .map_err(|_| err(line_no, t!("engine.parse_delay_value", val = val)))?;
@@ -1061,6 +1080,9 @@ fn step_line(
             step.delay = Some(secs);
         }
         "params" => {
+            if val.trim().is_empty() {
+                return Err(err(line_no, t!("engine.parse_params_empty")));
+            }
             let pairs = parse_params_list(val, line_no)?;
             for (k, v) in pairs {
                 if let Some(existing) = step.params.iter_mut().find(|(ek, _)| *ek == k) {
@@ -1097,6 +1119,9 @@ fn step_line(
             step.on_timeout = Some(on_timeout);
         }
         "count" => {
+            if val.trim().is_empty() {
+                return Err(err(line_no, t!("engine.parse_count_empty")));
+            }
             let n: usize = val
                 .trim()
                 .parse()
@@ -1107,6 +1132,9 @@ fn step_line(
             step.count = Some(n);
         }
         "on_error" => {
+            if val.trim().is_empty() {
+                return Err(err(line_no, t!("engine.parse_on_error_empty")));
+            }
             step.on_error = match val {
                 "stop" => OnError::Stop,
                 "continue" => OnError::Continue,
@@ -1119,7 +1147,11 @@ fn step_line(
             };
         }
         "extract" => {
-            // 进入提取子列表（extract: 独占一行，后跟 - 项）
+            // 进入提取子列表（extract: 独占一行，后跟 - 项）；内联值非法——
+            // 列表容器的条目只能写在后续 `- ` 行（与 until:/steps: 同规则）
+            if !val.is_empty() {
+                return Err(err(line_no, t!("engine.parse_extract_inline")));
+            }
             *in_extract = true;
         }
         // until/steps 仅属于 loop 块（`- loop:` 项的选项），普通步骤报专门错误
@@ -1307,7 +1339,7 @@ recipe:
   - match udp(dport=9)
   steps:
   - packet: listen.pkt
-    wait:
+    wait: -1
     extract:
     - name: tid
       from: reply.icmp.id
@@ -1354,11 +1386,11 @@ recipe:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `loop:` 无值或负数 = 无限循环（count None；与 CLI `--wait` 同语义）。
+    /// `loop:` 负数 = 无限循环（count None；与 CLI 负数 `--wait` 同语义；空值非法，
+    /// 报错见 recipe_parse_loop_errors）。
     #[test]
     fn recipe_parse_loop_infinite() {
         for (tag, body) in [
-            ("none", "recipe:\n- loop:\n  steps:\n  - a.pkt\n"),
             ("neg1", "recipe:\n- loop: -1\n  steps:\n  - a.pkt\n"),
             ("neg5", "recipe:\n- loop: -5\n  steps:\n  - a.pkt\n"),
         ] {
@@ -1372,7 +1404,7 @@ recipe:
             assert_eq!(
                 r.steps[0].loop_ctx.as_ref().unwrap().count,
                 None,
-                "{tag}: 无值或负数 = 无限"
+                "{tag}: 负数 = 无限"
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -1400,13 +1432,13 @@ recipe:
         // until 内联值不接受
         let e = parse(
             "untilinline.pktl",
-            "recipe:\n- loop:\n  until: match icmp(type=0)\n  steps:\n  - a.pkt\n",
+            "recipe:\n- loop: -1\n  until: match icmp(type=0)\n  steps:\n  - a.pkt\n",
         );
         assert!(e.contains("until"), "{e}");
         // until 写在 steps: 之后（进入嵌套步骤模式后报 loop 选项专用错误）
         let e = parse(
             "untillate.pktl",
-            "recipe:\n- loop:\n  steps:\n  - a.pkt\n  until:\n",
+            "recipe:\n- loop: -1\n  steps:\n  - a.pkt\n  until:\n",
         );
         assert!(e.contains("loop") && e.contains("steps"), "{e}");
         // 普通步骤写 until / steps
@@ -1417,15 +1449,18 @@ recipe:
         // 未知 loop 选项
         let e = parse(
             "loopopt.pktl",
-            "recipe:\n- loop:\n  wait: 1\n  steps:\n  - a.pkt\n",
+            "recipe:\n- loop: -1\n  wait: 1\n  steps:\n  - a.pkt\n",
         );
         assert!(e.contains("loop"), "{e}");
         // until 谓词语法错误（解析期预检）
         let e = parse(
             "badpred.pktl",
-            "recipe:\n- loop:\n  until:\n  - icmp.type == 0\n  steps:\n  - a.pkt\n",
+            "recipe:\n- loop: -1\n  until:\n  - icmp.type == 0\n  steps:\n  - a.pkt\n",
         );
         assert!(e.contains("until") || e.contains("match"), "{e}");
+        // loop 空值非法（原「无值 = 无限」）——无限循环显式写 `loop: -1`
+        let e = parse("loopempty.pktl", "recipe:\n- loop:\n  steps:\n  - a.pkt\n");
+        assert!(e.contains("loop") && e.contains("loop: -1"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

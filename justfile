@@ -427,6 +427,38 @@ artifacts:
 clean:
     cargo clean
 
+# ── WebUI 冒烟测试（Playwright，e2e/；设计说明见 e2e/README.md）────
+
+# 全套：前端 dist → 二进制（缺失时）→ playwright（首次自动装依赖 + Chromium）。
+# PRPING_BIN 可指定二进制（如 target/release/prping 做发布冒烟）；SKIP=1 跳过重编。
+# Chromium 固定装到 e2e/.local/browsers（自包含、免系统缓存目录写权限）。
+test-webui *ARGS:
+    #!/bin/sh
+    set -e
+    just web-dist
+    # 能力探测而非存在性检查：二进制可能是无 web feature 的旧产物（如裸 cargo build 覆盖）
+    if [ "${SKIP:-0}" != "1" ]; then
+        bin=""
+        [ -x target/debug/prping ] && bin=target/debug/prping
+        [ -z "$bin" ] && [ -x target/debug/prping.exe ] && bin=target/debug/prping.exe
+        if [ -z "$bin" ] || ! "$bin" web --help >/dev/null 2>&1; then
+            cargo build --features prping/web
+        fi
+    fi
+    cd e2e
+    export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$PWD/.local/browsers}"
+    if command -v bun >/dev/null 2>&1; then
+        [ -d node_modules ] || bun install
+        bunx playwright install chromium
+        exec bunx playwright test "$@"
+    elif command -v npm >/dev/null 2>&1; then
+        [ -d node_modules ] || npm install --no-audit --no-fund
+        npx playwright install chromium
+        exec npx playwright test "$@"
+    else
+        echo "需要 node/bun 运行 WebUI 冒烟测试"; exit 1
+    fi
+
 # ── 测试循环（.test-loop/ 现场沙箱，gitignored）────────────
 
 # 新建一轮测试循环目录 .test-loop/NN-描述（现场产物/沙箱/截图/日志都放这，不入库）

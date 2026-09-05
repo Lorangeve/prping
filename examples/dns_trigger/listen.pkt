@@ -1,7 +1,7 @@
-# 配方监听触发（packet .pktl，`wait:` 无值 = 持续监听）：sniffer 匹配结果触发发包
+# 配方监听触发（packet .pktl，`wait: -1` = 持续监听）：sniffer 匹配结果触发发包
 #
 # 服务端是一个**配方**（server.pktl），不是独立监听进程：
-#   步骤 1 `wait:`（无值）—— 不发送，用本文件的 sniffer 匹配外部到达的 DNS 查询，
+#   步骤 1 `wait: -1` —— 不发送，用本文件的 sniffer 匹配外部到达的 DNS 查询，
 #             命中后 extract 匹配包字段（dns.id / 对端端口 peer.port）写 global；
 #   步骤 2 —— 触发发包：用 global 构造 DNS 应答，发回查询方。
 # 客户端是普通 `--wait` 单包（发查询 + 校验应答）。

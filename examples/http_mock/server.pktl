@@ -4,7 +4,7 @@
 # 这里两组对应 client.pktl 的两步请求（GET / POST）；要服务更多次就再写几组。
 #
 # 每组步骤：
-#   步骤 1：listen_*.pkt + wait:（无值 = 持续监听）——包内无 udp/tcp 传输层 →
+#   步骤 1：listen_*.pkt + wait: -1（= 持续监听）——包内无 udp/tcp 传输层 →
 #           自动选**链路层监听**完整帧（需 root），sniffer 匹配 http(method=...)
 #           （GET/POST 帧 dport=80 触发 http 反解快速分派，见 listen_*.pkt 注释）；
 #           命中后 extract 匹配帧字段写 global：客户端端口/序列号 + 双向 IP。
@@ -34,7 +34,7 @@ global:
 recipe:
 # ── 第 1 组：GET → 200 OK（对应 client 步骤 1）──
 - packet: listen_get.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_sport
     from: reply.tcp.sport
@@ -52,7 +52,7 @@ recipe:
   raw: true
 # ── 第 2 组：POST → 200 OK（对应 client 步骤 2）──
 - packet: listen_post.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_sport
     from: reply.tcp.sport

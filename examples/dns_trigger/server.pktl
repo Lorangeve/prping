@@ -1,6 +1,6 @@
 # 服务端配方：wait 持续监听触发发包。
 #
-# 步骤 1：`wait:`（无值，与 CLI 裸 `--wait` 同语义）= 持续监听——本步不发送，
+# 步骤 1：`wait: -1`（与 CLI 裸 `--wait` 同语义）= 持续监听——本步不发送，
 #   监听 UDP 55353，sniffer 匹配 DNS 查询；命中后 extract 匹配包字段写 global
 #   （tid=查询 id、cport=查询方端口），配方继续。
 # 步骤 2：触发发包——reply.pkt 用 global 构造 DNS 应答发回查询方。
@@ -13,7 +13,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: tid
     from: reply.dns.id

@@ -39,7 +39,7 @@ global（tid/cip/cport）并回包即退出。
 
 | 文件 | 角色 | 关键点 |
 | --- | --- | --- |
-| `listen.pkt` | 门禁监听 | `wait:`（无值）无限监听；口令校验 = sniffer 一行 `match dns(contains("PIN-4242"))`——字节谓词打在 dns 层原始字节上，**改口令就是改这一行** |
+| `listen.pkt` | 门禁监听 | `wait: -1` 无限监听；口令校验 = sniffer 一行 `match dns(contains("PIN-4242"))`——字节谓词打在 dns 层原始字节上，**改口令就是改这一行** |
 | `grant.pkt` | 触发回包 | extract 到的 tid + 对端地址（`reply.peer.ip/port`）重建应答：`dns(id=global("tid"), flags=0x8180, questions=["GRANT.pin.lab"])` |
 | `attempt.pkt` | 爆破尝试 | 候选经 `params("code")` 注入 qname；sniffer 只认 `dns(id=0x1337, flags=0x8180)` 的应答 |
 | `server.pktl` | 门禁编排 | 监听 → extract（tid/cip/cport）→ 触发发包，两步闭环 |

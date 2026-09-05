@@ -1,4 +1,4 @@
-# arp_mock · server 配方 · 步骤 1：链路层持续监听（`wait:` 无值 + 包内无 udp/tcp
+# arp_mock · server 配方 · 步骤 1：链路层持续监听（`wait: -1` + 包内无 udp/tcp
 # 传输层 → 自动选链路层监听完整帧，AF_PACKET 收完整 eth+arp 帧，需 root；
 # 缺省监听全接口，`--iface` 可指定网卡）。
 #

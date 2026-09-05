@@ -36,10 +36,15 @@ export interface AnalyzeDoc {
   * 每个字符一行——层栈面板全是单字符行。） */
 function fieldsRows(fields: string): { k: string; v: string }[] {
   if (!fields) return [];
-  return fields.split(", ").map((part) => {
-    const i = part.indexOf("=");
-    return i > 0 ? { k: part.slice(0, i), v: part.slice(i + 1) } : { k: "", v: part };
-  });
+  // 引擎 fields 为空格分隔的 k=v 串，但值本身可含空格（如 http start_line）——
+  // 在「下一个 k= token 前的空白」处切分：值内空格保留、键各行其是。
+  // （此前按 ", " 切分与引擎格式不符，整层字段坍缩成一行。）
+  return fields
+    .split(/\s+(?=[A-Za-z_][A-Za-z0-9_]*=)/)
+    .map((part) => {
+      const i = part.indexOf("=");
+      return i > 0 ? { k: part.slice(0, i), v: part.slice(i + 1) } : { k: "", v: part };
+    });
 }
 
 export type Panel =
@@ -79,10 +84,13 @@ export interface RunLineView {
   text: string;
   title?: string;
 }
-/** 一次运行的任务卡（Run 面板多标签；App 聚合 run_out/run_exit）。
- *  fileKey = 发起运行的文档标签（Run 面板按它过滤——每个文件 tab 独立的任务列表）。 */
+/** 一次运行的任务卡（右上角任务管理器统一管理；App 聚合 run_out/run_exit）。
+ *  fileKey = 发起运行的文档标签；n = 本文件的会话内运行序号（展示 #n——
+ *  单调稳定号，移除任务卡不复用；id 仍是服务端传输层句柄 run-N）。 */
 export interface RunTask {
   id: string;
+  /** 本文件的会话内运行序号（从 1 起建卡时定死；重连清任务卡时一并归零） */
+  n: number;
   fileKey: string;
   /** 运行的文件（工作区相对路径） */
   file: string;
@@ -652,6 +660,46 @@ function fmtDuration(ms: number): string {
   return `${m}m${String(s % 60).padStart(2, "0")}s`;
 }
 
+// ── 任务卡共享视图（任务管理器行 / Run 面板状态行共用）──────────────────
+
+/** 任务卡状态图标：● 运行中 / ✓✗ 终态 / ■ 已停止 / ? 无退出码。 */
+function taskIcon(t: RunTask): string {
+  if (t.running) return "●";
+  if (t.exit?.stopped) return "■";
+  if (t.exit?.code == null) return "?";
+  return t.exit.code === 0 ? "✓" : "✗";
+}
+
+/** 任务行状态配色（run-task-state 的修饰类）。 */
+function taskStateCls(t: RunTask): string {
+  if (t.running) return "running";
+  if (!t.exit?.stopped && t.exit?.code != null && t.exit.code !== 0) return "fail";
+  if (t.exit?.code === 0) return "ok";
+  return "";
+}
+
+/** 任务行状态文案。 */
+function taskStatusText(t: RunTask): string {
+  if (t.running) return "running…";
+  if (t.exit?.stopped) return "stopped";
+  if (t.exit?.code != null) return "exit " + t.exit.code;
+  return "?";
+}
+
+/** 运行中任务耗时秒级跳动：hasRunning() 为真时开 1s interval（为假即清）。 */
+function createNowTicker(hasRunning: () => boolean) {
+  const [nowTick, setNowTick] = createSignal(0);
+  createEffect(() => {
+    if (!hasRunning()) return;
+    const iv = setInterval(() => setNowTick((n) => n + 1), 1000);
+    onCleanup(() => clearInterval(iv));
+  });
+  return () => {
+    nowTick(); // 依赖 tick：运行中任务每秒重算
+    return Date.now();
+  };
+}
+
 /** 单行运行参数输入（Run 面板与 Layers 页签共用同一声明形状）：必填/选填徽标
  *  —— req 未填 = 警示色、已填 = 确认色、opt = 默认淡色；.pktl 聚合声明带
  *  overridden = 步骤 params: 覆盖同名（整行淡化 + title 说明，输入不生效）。 */
@@ -696,16 +744,134 @@ export function ParamRow(props: {
   );
 }
 
-/** Run 面板：packet 选项 + 执行控制台（服务端 spawn 自身 CLI，见 web/run.rs）。 */
-export function RunPanel(props: {
-  /** 本文件标签的任务卡（按 fileKey 过滤；chip 即任务管理） */
+/** 右上角全局任务管理器：全连接唯一任务管理面（顶栏徽标按钮 + 右对齐弹层面板）。
+ *  行分区：运行中（含 starting）在上，已结束在下（终态新的在前）；行 = 状态 +
+ *  文件 + #n（本文件会话内序号）+ 耗时 + 状态 + ■/✕。点行导航到该任务（App 负责
+ *  切文件标签与控制台）；面板头 ■ Stop all = run_stop 不带 id（停本连接全部）。
+ *  tooltip 保留原始服务端 id（run-N），对服务端日志/报 bug 用。 */
+export function TaskManager(props: {
+  /** 全连接不过滤的任务卡（唯一数据源） */
   tasks: RunTask[];
-  /** 全连接不过滤的任务卡（Stop all 悬浮清单数据源——本标签任务列表
-   *  按 fileKey 过滤，别的标签在跑什么这里看不见） */
-  allTasks: RunTask[];
+  /** 当前查看的任务 id（控制台归属，行高亮对账用） */
+  activeId: string | null;
+  /** 点行导航：切到该任务（App 切文件标签 + Run 控制台），随后面板收起 */
+  onSelect: (id: string) => void;
+  onStopTask: (id: string) => void;
+  /** 从列表移除一个任务（运行中的先停；终态经 run_exit 落地后移除） */
+  onCloseTask: (id: string) => void;
+  /** 停止全部运行中任务（run_stop 不带 id——服务端停本连接全部） */
+  onStopAll: () => void;
+}) {
+  const [open, setOpen] = createSignal(false);
+  let wrap: HTMLDivElement | undefined;
+  // 开着时点面板外关闭（按钮在 wrap 内，自然豁免）
+  createEffect(() => {
+    if (!open()) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wrap && !wrap.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("click", onDoc);
+    onCleanup(() => document.removeEventListener("click", onDoc));
+  });
+  const running = () => props.tasks.filter((t) => t.running);
+  // 已结束分区：终态新的在前（endedAt 倒序；无终态时刻兜底启动时刻）
+  const finished = () =>
+    props.tasks
+      .filter((t) => !t.running)
+      .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt));
+  const now = createNowTicker(() => running().length > 0);
+  const dur = (t: RunTask) => fmtDuration((t.endedAt ?? now()) - t.startedAt);
+  const row = (t: RunTask) => (
+    <div
+      class="run-task-row"
+      classList={{ active: props.activeId === t.id }}
+      onClick={() => {
+        props.onSelect(t.id);
+        setOpen(false);
+      }}
+      title={t.file + "  (" + t.id + ")"}
+    >
+      <span class={`run-task-state ${taskStateCls(t)}`}>{taskIcon(t)}</span>
+      <span class="run-task-id">#{t.n}</span>
+      <span class="run-task-file" title={t.file}>
+        {t.file.split("/").pop()}
+      </span>
+      <span class="run-task-dur">{dur(t)}</span>
+      <span class="run-task-status">{taskStatusText(t)}</span>
+      <Show when={t.running}>
+        <button
+          class="run-task-act"
+          title="stop this task"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onStopTask(t.id);
+          }}
+        >
+          ■
+        </button>
+      </Show>
+      <button
+        class="run-task-act"
+        title="remove from list"
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onCloseTask(t.id);
+        }}
+      >
+        ✕
+      </button>
+    </div>
+  );
+  return (
+    <div class="taskmgr-wrap" ref={wrap}>
+      <button
+        class="taskmgr-btn"
+        classList={{ live: running().length > 0 }}
+        onClick={() => setOpen(!open())}
+        title="task manager — all runs on this connection"
+      >
+        <Show when={running().length > 0} fallback={<>tasks {props.tasks.length}</>}>
+          <span class="taskmgr-dot">●</span> {running().length}/{props.tasks.length}
+        </Show>
+      </button>
+      <Show when={open()}>
+        <div class="taskmgr-pop">
+          <div class="taskmgr-head">
+            <span>tasks on this connection: {props.tasks.length}</span>
+            <Show when={running().length > 0}>
+              <button
+                class="run-stop-btn"
+                onClick={() => props.onStopAll()}
+                title={`stop all ${running().length} running task(s) on this connection (run_stop without id)`}
+              >
+                ■ Stop all
+              </button>
+            </Show>
+          </div>
+          <div class="taskmgr-list">
+            <Show when={running().length > 0}>
+              <div class="taskmgr-sec">running</div>
+              <For each={running()}>{(t) => row(t)}</For>
+            </Show>
+            <Show when={finished().length > 0}>
+              <div class="taskmgr-sec">finished</div>
+              <For each={finished()}>{(t) => row(t)}</For>
+            </Show>
+          </div>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+/** Run 面板：packet 选项 + 执行控制台（服务端 spawn 自身 CLI，见 web/run.rs）。
+ *  任务管理（列表/停全/移除）已整体迁往右上角任务管理器——这里只保留
+ *  ▶ Run / ■ Stop（当前查看任务）/ 状态行与控制台。 */
+export function RunPanel(props: {
+  /** 本文件标签的任务卡（用于定位当前查看任务；管理入口在任务管理器） */
+  tasks: RunTask[];
   /** 当前查看的任务 id */
   activeId: string | null;
-  setActive: (id: string) => void;
   settings: RunSettings;
   setSettings: (s: RunSettings) => void;
   /** 文件声明的运行参数（params("名", 默认)）；与 Layers 页签共用同一份输入值。
@@ -715,15 +881,11 @@ export function RunPanel(props: {
   setRunValues: (v: Record<string, string>) => void;
   canRun: boolean;
   onRun: () => void;
+  /** 停止当前查看的任务（终态经 run_exit 回调落地） */
   onStopTask: (id: string) => void;
-  onCloseTask: (id: string) => void;
-  /** 停止全部运行中任务（run_stop 不带 id——服务端停本连接全部） */
-  onStopAll: () => void;
 }) {
   let consoleHost: HTMLDivElement | undefined;
   const active = () => props.tasks.find((t) => t.id === props.activeId) ?? null;
-  // 全连接运行中的任务（不过滤 fileKey）——Stop all 的作用范围与悬浮清单数据源
-  const runningAll = () => props.allTasks.filter((t) => t.running);
   // 跟随滚动只在「用户本就在底部附近（≤40px）」时进行——上翻阅读历史输出时不拽走
   let stickBottom = true;
   let lastActiveId: string | null | undefined;
@@ -741,18 +903,6 @@ export function RunPanel(props: {
     }
     if (consoleHost && stickBottom) consoleHost.scrollTop = consoleHost.scrollHeight;
   });
-  // 运行中任务的耗时秒级跳动（只在有运行中任务时开 interval）
-  const [nowTick, setNowTick] = createSignal(0);
-  createEffect(() => {
-    if (!props.tasks.some((tk) => tk.running)) return;
-    const iv = setInterval(() => setNowTick((n) => n + 1), 1000);
-    onCleanup(() => clearInterval(iv));
-  });
-  const now = () => {
-    nowTick(); // 依赖 tick：运行中任务每秒重算
-    return Date.now();
-  };
-  const taskDuration = (t: RunTask) => fmtDuration((t.endedAt ?? now()) - t.startedAt);
   const set = (patch: Partial<RunSettings>) =>
     props.setSettings({ ...props.settings, ...patch });
   const exitText = () => {
@@ -761,13 +911,6 @@ export function RunPanel(props: {
     if (e.stopped) return "stopped";
     if (e.code == null) return "exit ?"; // unix 被 kill 等无退出码情形
     return "exit " + e.code;
-  };
-  // 任务卡状态图标（chip 即任务管理：● 运行中 / ✓✗ 终态 / ■ 已停止）
-  const taskIcon = (t: RunTask) => {
-    if (t.running) return "●";
-    if (t.exit?.stopped) return "■";
-    if (t.exit?.code == null) return "?";
-    return t.exit.code === 0 ? "✓" : "✗";
   };
   // JSONL 模式（settings.json && !listen）：渲染 ingestion 算好的结构化视图；
   // 非 JSON 行（stderr 的 raw 升级提示等）原样回退文本
@@ -800,45 +943,9 @@ export function RunPanel(props: {
             ▶ Run
           </button>
         </Show>
-        <Show when={runningAll().length > 0}>
-          {/* 悬浮清单：任务列表按 fileKey 过滤，别的标签在跑什么这里看不到——
-              Stop all 又是全连接清场，先让用户看清要杀什么（行内 ■ 可单停） */}
-          <div class="stopall-wrap">
-            <button
-              class="run-stop-btn"
-              onClick={() => props.onStopAll()}
-              title={`stop all ${runningAll().length} running task(s) on this connection (run_stop without id)`}
-            >
-              ■ Stop all
-            </button>
-            <div class="stopall-pop">
-              <div class="stopall-head">running on this connection: {runningAll().length}</div>
-              <For each={runningAll()}>
-                {(t) => (
-                  <div class="stopall-row" title={t.file}>
-                    <span class="run-task-state running">●</span>
-                    <span class="stopall-file">{t.file.split("/").pop()}</span>
-                    <span class="run-task-id">#{t.id.replace("run-", "")}</span>
-                    <span class="run-task-dur">{taskDuration(t)}</span>
-                    <span
-                      class="stopall-kill"
-                      title="stop this task"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        props.onStopTask(t.id);
-                      }}
-                    >
-                      ■
-                    </span>
-                  </div>
-                )}
-              </For>
-            </div>
-          </div>
-        </Show>
         <span class="run-status" classList={{ running: !!active()?.running }}>
           <Show when={active()} fallback={null}>
-            <span>#{active()!.id.replace("run-", "")} </span>
+            <span>#{active()!.n} </span>
           </Show>
           <Show when={active()?.running} fallback={exitText()}>
             running…
@@ -852,78 +959,11 @@ export function RunPanel(props: {
             </span>
           </Show>
         </span>
-        <Show when={props.tasks.length > 0}>
-          <span class="run-tasks-hint">
-            {props.tasks.filter((t) => t.running).length}/{props.tasks.length} tasks
-          </span>
-        </Show>
       </div>
       {/* 控制台图例（一行）：✓/✗/exit 语义 + 步骤路径基准 */}
       <div class="run-legend">
         ✓ sent · ✗ send/wait failed · exit N — paths are relative to workspace root
       </div>
-      {/* 任务列表（任务管理）：有任务即常驻；点行切控制台，■ 停止，✕ 移除 */}
-      <Show when={props.tasks.length > 0}>
-        <div class="run-task-list">
-          <For each={props.tasks}>
-            {(t) => {
-              const failed = !t.running && !t.exit?.stopped && t.exit?.code != null && t.exit.code !== 0;
-              const ok = !t.running && t.exit?.code === 0;
-              return (
-                <div
-                  class="run-task-row"
-                  classList={{ active: props.activeId === t.id }}
-                  onClick={() => props.setActive(t.id)}
-                  title={t.file + "  (" + t.id + ")"}
-                >
-                  <span
-                    class="run-task-state"
-                    classList={{ running: t.running, ok, fail: failed }}
-                  >
-                    {taskIcon(t)}
-                  </span>
-                  <span class="run-task-id">#{t.id.replace("run-", "")}</span>
-                  <span class="run-task-file" title={t.file}>
-                    {t.file.split("/").pop()}
-                  </span>
-                  <span class="run-task-dur">{taskDuration(t)}</span>
-                  <span class="run-task-status">
-                    {t.running
-                      ? "running…"
-                      : t.exit?.stopped
-                        ? "stopped"
-                        : t.exit?.code != null
-                          ? "exit " + t.exit.code
-                          : "?"}
-                  </span>
-                  <Show when={t.running}>
-                    <button
-                      class="run-task-act"
-                      title="stop this task"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        props.onStopTask(t.id);
-                      }}
-                    >
-                      ■ stop
-                    </button>
-                  </Show>
-                  <button
-                    class="run-task-act"
-                    title="remove from list"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onCloseTask(t.id);
-                    }}
-                  >
-                    ✕
-                  </button>
-                </div>
-              );
-            }}
-          </For>
-        </div>
-      </Show>
       {/* 无 target 输入：地址由包字段（params ip/port…）承载，引擎从包内推导
           socket 目标并在控制台显示「target: … (derived from packet)」 */}
       <div class="run-row">
@@ -1037,7 +1077,7 @@ export function RunPanel(props: {
               fallback={
                 <>
                   Run starts a task (multiple runs run in parallel — switch via
-                  the task chips); set count/wait above.
+                  the task manager in the top bar); set count/wait above.
                 </>
               }
             >

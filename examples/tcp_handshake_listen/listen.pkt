@@ -1,4 +1,4 @@
-# server 配方 · 步骤 1：链路层持续监听（wait: 无值）——匹配纯 SYN。
+# server 配方 · 步骤 1：链路层持续监听（wait: -1）——匹配纯 SYN。
 #
 # 监听规则：只响应**纯 SYN**（flags="syn" 精确匹配；SYN-ACK 反解为 "syn,ack"
 # 不命中——不会把自己刚回的 SYN-ACK 当新请求）。

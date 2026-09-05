@@ -1,7 +1,7 @@
 # 协议学习用 Examples
 
 本目录的协议流程示例统一为 **mock server/client 形式**：每个协议一个 `*_mock`
-目录，内含**两个配方**——`server.pktl`（服务端：`wait:` 无值持续监听 +
+目录，内含**两个配方**——`server.pktl`（服务端：`wait: -1` 持续监听 +
 sniffer 匹配 + `extract` 写 global + 触发发包步骤）与 `client.pktl`（客户端：
 发包 + `wait: N` + sniffer 校验回包 + extract 复用），两个终端各跑一个即可在
 本机闭环模拟一次完整协议会话。形态标杆是 `icmp_mock/`。
@@ -26,7 +26,7 @@ sniffer 匹配 + `extract` 写 global + 触发发包步骤）与 `client.pktl`�
 | --- | --- | --- |
 | `icmp_echo_server/` | **配方服务端入门样板**：单组 listen+reply 的 ICMP echo | 链路层（root） |
 | `dns_echo_listen/` | **DNS mock**：查询 → 带 A 记录应答；客户端两步 extract 复用 tid | UDP :53（root 绑定） |
-| `dns_trigger/` | **配方监听触发最小样例**：`wait:` 无值命中后触发发包 | UDP 55353（免 root） |
+| `dns_trigger/` | **配方监听触发最小样例**：`wait: -1` 命中后触发发包 | UDP 55353（免 root） |
 | `dns_loop_server/` | **循环监听服务**：`loop:` 无限包 listen+reply 连续服务多请求，`until:` 停服包收工（Ctrl+C 亦优雅） | UDP 55354（免 root） |
 | `tcp_handshake_listen/` | **TCP 握手 mock**：listen 纯 SYN → SYN-ACK（ack=seq+1），客户端 extract 服务端 ISN | 链路层（root） |
 | `sniffer_chat/` | **双进程对话模拟**：`sent.`/`reply.` 两种 extract 来源 + and/not sniffer 组合 | UDP 55353（免 root） |

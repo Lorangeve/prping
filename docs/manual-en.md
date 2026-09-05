@@ -972,7 +972,7 @@ reproduce capture pacing; hand-written recipes can use it too.
 **sniffer block** (reply validation / listen rule): with `--wait`, replies are matched
 against the `sniffer` declaration in the `.pkt` file; a match prints
 `✓ reply matched: field=value (rtt)`, a timeout prints `✗ no matching reply`.
-With a bare `--wait` (or a recipe's no-value `wait:`) the same declaration becomes the **listen rule** (match incoming datagrams and print details):
+With a bare `--wait` (or a recipe's `wait: -1`) the same declaration becomes the **listen rule** (match incoming datagrams and print details):
 
 ```pkt
 sniffer:
@@ -994,7 +994,7 @@ udp/tcp dport when omitted), dissects each one and matches the `.pkt` sniffer ru
 a hit prints the match details (`✓ matched ... from peer` + dissect),
 misses are ignored, Ctrl+C exits and prints match statistics. It **does not send
 anything back** — building a response is orchestration and belongs to a `.pktl`
-recipe (`wait:` no-value listen trigger + extract + a later send step; demo &
+recipe (`wait: -1` listen trigger + extract + a later send step; demo &
 walkthrough → `examples/sniffer_chat/`: server recipe `server.pktl`,
 client recipe `packet client.pktl`, covering
 `sent.`/`reply.` extract end to end).
@@ -1005,7 +1005,7 @@ root/admin required) and matches the sniffer rule (listen has no sent packet —
 literals/predicates); a hit prints the matched fields + dissect (no reply-template
 injection — `reply("layer","field")` is now a recipe-extract-only primitive and is an
 error inside a `.pkt`); Ctrl+C stops and prints match stats. For a "listen +
-respond" server, use a **`.pktl` recipe**: a no-value `wait:` listen trigger →
+respond" server, use a **`.pktl` recipe**: a `wait: -1` listen trigger →
 extract into globals → a later step builds and sends the response
 (demos → `examples/icmp_echo_server/`, `examples/tcp_handshake_listen/`,
 `examples/dns_echo_listen/`).
@@ -1154,8 +1154,8 @@ recipe:
   - `sent.<layer>.<field>` picks the dissected **sent** packet's field for this step
     (**no wait needed** — reads the packet that was actually sent, e.g. the
     serialized dns.id / tcp.seq), `as:` as above;
-  - `reply.peer.ip` / `reply.peer.port` — the **peer address** of a **`wait:`
-    no-value (continuous listen) step** (UDP listen): the datagram payload has no
+  - `reply.peer.ip` / `reply.peer.port` — the **peer address** of a **`wait: -1`
+    (continuous listen) step** (UDP listen): the datagram payload has no
     UDP header, so the peer comes
     from the socket — use it to reply from a later step
     (e.g. `udp(dport=global("cport"))`);
@@ -1169,8 +1169,8 @@ recipe:
     explicit `as:` converts to int / hex / str / bytes). TCP echo bodies are kept
     in the reply too, so extract works there as well.
 - **Wait / listen (`wait:`)**: the step option `wait:` shares the CLI `--wait`
-  semantics — **no value or a negative number = wait forever** (no value =
-  continuous listen, equivalent to a bare `--wait` / a negative `--wait`): the step
+  semantics — **a negative number (`wait: -1`) = wait forever** (continuous listen,
+  equivalent to a bare `--wait` / a negative `--wait`): the step
   does **not send**; it
   matches incoming packets with the `.pkt`'s `sniffer:` rule, and **on a hit the
   recipe continues** (triggering later steps to send), with the matched packet
@@ -1189,21 +1189,23 @@ recipe:
   step, default 1), or `on_timeout: FILE` **prints the timeout notice and sends
   that `.pkt`** (send other packets); the step continues — for retry / fallback /
   degraded notifications (demo → `examples/wait_timeout/`). The fallback packet
-  gets the current global/params; its send failure follows `on_error`. `wait:`
-  no-value / a negative number (infinite wait) has no timeout concept.
-- **Loop block (`loop:`)**: `- loop: N` (N omitted or negative = infinite, same
-  semantics as the CLI `--wait`) wraps a group of **nested steps** (`steps:`
+  gets the current global/params; its send failure follows `on_error`. A negative
+  `wait: -1` (infinite wait) has no timeout concept.
+- **Loop block (`loop:`)**: `- loop: N` (a negative N = infinite, same semantics
+  as a negative CLI `--wait`; empty values are invalid — either omit the field or
+  give it a value, write `loop: -1` for an infinite loop) wraps a group of
+  **nested steps** (`steps:`
   followed by indented `- ` step items); each round **runs the whole block** —
   the looping orchestration of a server "listen → extract → reply" cycle:
   
   ```yaml
   recipe:
-  - loop:                # no value / negative = infinite (until: or Ctrl+C ends)
+  - loop: -1             # negative = infinite (until: or Ctrl+C ends; no empty)
     until:               # optional: sniffer-style predicates; any match → finish
     - match dns(flags=0x8180)
     steps:
     - packet: listen.pkt
-      wait:
+      wait: -1
       extract:
       - name: tid
         from: reply.dns.id
@@ -1247,7 +1249,7 @@ recipe:
   validates its `reply(...)` leaves too). `packet FILE.pktl` prints the same
   param summary in its header.
 - **Examples** all follow the **mock server/client form** (a `server.pktl` recipe:
-  valueless `wait:` listen + extract + triggered send steps; a `client.pktl`
+  `wait: -1` listen + extract + triggered send steps; a `client.pktl`
   recipe: send + `wait: N` + sniffer verification + extract; full catalog in
   `examples/README.md`):
   `examples/icmp_mock/` (**ICMP mock, the form's reference**: server.pktl
@@ -1267,9 +1269,9 @@ recipe:
   banners by port),
   `examples/dns_echo_listen/` (**DNS mock**: query → A-record answer; client
   extracts and reuses `dns.id` across two steps),
-  `examples/dns_trigger/` (**listen-trigger minimal sample**: a valueless `wait:`
-  step matches the query → extract → a later step sends the answer),
-  `examples/dns_loop_server/` (**looping listen server**: an endless `loop:`
+  `examples/dns_trigger/` (**listen-trigger minimal sample**: a `wait: -1` step
+  matches the query → extract → a later step sends the answer),
+  `examples/dns_loop_server/` (**looping listen server**: an endless `loop: -1`
   wrapping listen+reply serves many requests; `until:` ends on a shutdown
   packet),
   `examples/icmp_echo_server/` (**recipe-server starter**: one listen+reply group),

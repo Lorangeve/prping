@@ -6,7 +6,7 @@
 # 更多次就多写几组（同款多轮写法见 ../icmp_mock/server.pktl）。
 #
 # 每组步骤：
-#   步骤 1：`wait:`（无值 = 持续监听）——UDP 数据报监听 :55353，sniffer 匹配 DNS
+#   步骤 1：`wait: -1`（= 持续监听）——UDP 数据报监听 :55353，sniffer 匹配 DNS
 #           查询（and/not 组合规则，见 listen.pkt），命中后 extract 写 global。
 #   步骤 2：触发发包——echo.pkt 用 global 重建查询（同 id）发回查询方。
 #
@@ -19,7 +19,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: tid
     from: reply.dns.id
@@ -33,7 +33,7 @@ recipe:
 - packet: echo.pkt
 # ── 第 2 轮：继续监听第 2 个查询 → extract → 触发回显（client 步骤 2）──
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: tid
     from: reply.dns.id

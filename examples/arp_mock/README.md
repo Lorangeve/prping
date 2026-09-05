@@ -8,7 +8,7 @@ ARP 请求并触发应答，**客户端配方**发包 + `wait` 校验 + `extract
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（ARP 应答机，模拟「持有该 IP 的主机」） | **一组 listen+reply**：`wait:` 无值链路层监听匹配 ARP 请求（`op="request"`）→ extract 请求方 sha/spa/被询问的 tpa 写 global → 触发发包 `arp_reply.pkt`（**谁问的 IP 我来答**：spa=请求的 tpa、tha 回填请求方 MAC，单播发回）。要服务更多次就照 icmp_mock 再写几组 listen+reply |
+| `server.pktl` | 服务端（ARP 应答机，模拟「持有该 IP 的主机」） | **一组 listen+reply**：`wait: -1` 链路层监听匹配 ARP 请求（`op="request"`）→ extract 请求方 sha/spa/被询问的 tpa 写 global → 触发发包 `arp_reply.pkt`（**谁问的 IP 我来答**：spa=请求的 tpa、tha 回填请求方 MAC，单播发回）。要服务更多次就照 icmp_mock 再写几组 listen+reply |
 | `client.pktl` | 客户端（两步流程） | 1. 发 ARP 请求（广播，`tpa=params("ip","127.0.0.1")`）→ `wait: 2` 校验应答（sniffer 匹配 `op="reply"` + 服务端固定 MAC）→ extract `reply.arp.sha` 写 global.rmac（教学点：**从应答学习对方 MAC**——单步用不到，演示复用入口）；2. `delay: 0.5` 后发 gratuitous ARP（`free_arp.pkt`，纯发送无 wait） |
 
 支撑包：`listen.pkt`（服务端监听占位 + sniffer 规则）、`arp_reply.pkt`（应答

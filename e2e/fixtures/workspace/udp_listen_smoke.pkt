@@ -1,0 +1,7 @@
+# webui 冒烟 · 裸 --wait 持续监听（sniffer 匹配）：监听规则永不命中 → 进程一直
+# 存活，供 Stop 冒烟（Run 面板 listen 选项 → 顶栏 ■ 停止 → 任务卡 stopped）。
+# 端口经 params("port") 注入（e2e 沙箱预留的空闲端口；缺省 51111 供手工调试）。
+p = raw(bytes="")
+use(p) |> udp(dport=params("port", 51111)) |> ipv4(dst="127.0.0.1")
+sniffer:
+  - match raw(startswith("webui-never-matches-"))

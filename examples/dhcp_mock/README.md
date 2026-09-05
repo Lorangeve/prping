@@ -6,7 +6,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（DHCP 服务器） | **显式两组** listen+reply：每组 = `wait:` 无值链路层监听匹配 BOOTREQUEST → extract 客户端 IP/端口、本机 IP 写 global → 触发发包应答（第 1 组回 Offer、第 2 组回 Ack）。两组对应 client 两步；要服务更多次就多写几组 |
+| `server.pktl` | 服务端（DHCP 服务器） | **显式两组** listen+reply：每组 = `wait: -1` 链路层监听匹配 BOOTREQUEST → extract 客户端 IP/端口、本机 IP 写 global → 触发发包应答（第 1 组回 Offer、第 2 组回 Ack）。两组对应 client 两步；要服务更多次就多写几组 |
 | `client.pktl` | 客户端（两步发包流程） | 1. 发 Discover → `wait: 2` 校验 Offer（sniffer）→ extract 服务端 IP 写 `global.sip`；2. `delay: 0.5` 后发 Request（dst 复用 `global.sip`）→ `wait: 2` 校验 Ack |
 | `listen.pkt` | 服务端监听规则 | 三重跨层 AND：`ipv4(proto=17)` + `udp(68→67)` + `raw 首字节 mask(0x01)`（op=1） |
 | `dhcp_discover.pkt` / `dhcp_request.pkt` | 客户端两个请求包 | 旧 `dhcp_flow/` 的裸字节数组逐字段注释全保留，封装改单播回环；各带 wait 校验用的 sniffer |

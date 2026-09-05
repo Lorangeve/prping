@@ -210,13 +210,26 @@ impl LspServer {
         let indent = before.len() - before.trim_start().len();
 
         // 值位：`key:` 之后——有枚举的键给枚举值；packet 给同目录 .pkt 文件名；
-        // 自由值键（wait/delay/count/params/init/name）不弹
+        // wait/loop 给 -1（持续监听/无限循环的显式写法——空值已非法）；
+        // 其余自由值键（delay/count/params/init/name）不弹
         if let Some((raw_key, _)) = trimmed.split_once(':') {
             let key = raw_key.trim().trim_start_matches('-').trim();
             match key {
                 "as" => return str_items(&["int", "hex", "str", "bytes"], "as 值"),
                 "on_error" => return str_items(&["stop", "continue"], "on_error 值"),
                 "raw" => return str_items(&["true", "false", "<网卡名>"], "raw 值"),
+                "wait" => {
+                    return str_items(
+                        &["-1"],
+                        "wait 值：-1 = 持续监听（本步不发送）；秒数 = 发送后等应答（空值非法）",
+                    );
+                }
+                "loop" => {
+                    return str_items(
+                        &["-1"],
+                        "loop 值：-1 = 无限（直到 until / Ctrl+C）；正整数 = 循环次数（空值非法）",
+                    );
+                }
                 "packet" => return self.recipe_packet_items(uri),
                 "from" => {
                     // 二级路径补全：reply. → 层名；reply.层. → 该层字段
@@ -262,8 +275,7 @@ impl LspServer {
                         })
                         .collect();
                 }
-                "wait" | "delay" | "count" | "params" | "init" | "name" | "loop" | "steps"
-                | "until" => return vec![],
+                "delay" | "count" | "params" | "init" | "name" | "steps" | "until" => return vec![],
                 _ => {}
             }
         }
@@ -3138,8 +3150,8 @@ mod tests {
         );
         // packet: 值位（无真实目录）→ 空（不弹全局函数）
         assert!(ask(10, 10).is_empty());
-        // wait: 自由值 → 不弹
-        assert!(ask(5, 9).is_empty());
+        // wait: 值位 → -1（持续监听的显式写法——空值已非法）
+        assert_eq!(ask(5, 9), vec!["-1".to_string()]);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（ICMP echo 服务） | **显式多组** listen+reply（pktl 可含任意多包）：每组 = `wait:` 无值链路层监听匹配 echo request → extract id/载荷/双向 IP 写 global → 触发发包 echo reply（**seq 偏移 +1000 作配方标记**，见下）。两组对应 client 两步；要服务更多次就多写几组 |
+| `server.pktl` | 服务端（ICMP echo 服务） | **显式多组** listen+reply（pktl 可含任意多包）：每组 = `wait: -1` 链路层监听匹配 echo request → extract id/载荷/双向 IP 写 global → 触发发包 echo reply（**seq 偏移 +1000 作配方标记**，见下）。两组对应 client 两步；要服务更多次就多写几组 |
 | `client.pktl` | 客户端（多包流程） | 1. 发 echo request（id=0x1234, seq=1）→ `wait: 2` 校验 echo reply（sniffer 期望 seq=1001）→ extract 回包 icmp.id 写 global.cid；2. `delay: 0.5` 后**复用** cid 再发一个 request（seq=2，期望 1002）→ `wait: 2` 校验 |
 
 发包用**裸 IP 外层**（无 eth 层）：ICMP 发送走**内核 IP 栈 raw socket**——
@@ -46,7 +46,7 @@ sudo prping packet examples/icmp_mock/client.pktl
 
 ## 配方引擎已覆盖的能力（即"全部功能都支持"）
 
-- **监听触发**：`wait:` 无值（= CLI 裸 `--wait`）= 持续监听，sniffer 匹配外部包，
+- **监听触发**：`wait: -1`（= CLI 裸 `--wait`）= 持续监听，sniffer 匹配外部包，
   命中后配方继续（触发后续步骤发包）；
 - **链路层监听**：`raw: true` 让监听步骤走完整帧匹配（`icmp` 层字段齐全，无需
   `reply.peer.*`——帧内 ipv4 src/dst 直接可取）；

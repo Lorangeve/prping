@@ -1,6 +1,6 @@
 # tcp_handshake_listen：用 .pktl 配方模拟 TCP 三次握手
 
-服务端**配方**：`wait:`（无值）链路层监听完整帧，按 sniffer 规则匹配纯 SYN，
+服务端**配方**：`wait: -1` 链路层监听完整帧，按 sniffer 规则匹配纯 SYN，
 `extract` 取请求的端口/序列号/双向 IP 写 global，**触发后续步骤**构造 SYN-ACK
 （`ack = 请求 seq + 1`）发回；客户端配方（client.pktl）发 SYN、校验 SYN-ACK、
 再发最终 ACK——三个握手段齐全。
@@ -34,7 +34,7 @@ ack=0x1001 = 客户端 SYN seq+1，证明配方 extract → global → 触发发
 ```text
 recipe:
 - packet: listen.pkt        # 步骤 1：持续监听（不发送）
-  wait:                     # 无值 = 持续监听直到命中（与 CLI 裸 --wait 同语义）
+  wait: -1                     # -1 = 持续监听直到命中（与 CLI 负数 --wait 同语义）
   extract:
   - name: r_sport
     from: reply.tcp.sport   # 请求的客户端端口

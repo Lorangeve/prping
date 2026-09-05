@@ -2219,7 +2219,7 @@ fn recipe_loop_listen_serves_two() {
     .unwrap();
     std::fs::write(
         dir.join("server.pktl"),
-        "global:\n- tid\n- cport\n\nrecipe:\n- loop: 2\n  steps:\n  - packet: listen.pkt\n    wait:\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
+        "global:\n- tid\n- cport\n\nrecipe:\n- loop: 2\n  steps:\n  - packet: listen.pkt\n    wait: -1\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
     )
     .unwrap();
 
@@ -2292,7 +2292,7 @@ fn recipe_loop_until_ends_on_condition() {
     .unwrap();
     std::fs::write(
         dir.join("server.pktl"),
-        "global:\n- tid\n- cport\n\nrecipe:\n- loop:\n  until:\n  - match dns(flags=0x8180)\n  steps:\n  - packet: listen.pkt\n    wait:\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
+        "global:\n- tid\n- cport\n\nrecipe:\n- loop: -1\n  until:\n  - match dns(flags=0x8180)\n  steps:\n  - packet: listen.pkt\n    wait: -1\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
     )
     .unwrap();
 
@@ -2362,7 +2362,7 @@ fn recipe_loop_interrupt_graceful() {
     .unwrap();
     std::fs::write(
         dir.join("server.pktl"),
-        "global:\n- tid\n- cport\n\nrecipe:\n- loop:\n  steps:\n  - packet: listen.pkt\n    wait:\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
+        "global:\n- tid\n- cport\n\nrecipe:\n- loop: -1\n  steps:\n  - packet: listen.pkt\n    wait: -1\n    extract:\n    - name: tid\n      from: reply.dns.id\n    - name: cport\n      from: reply.peer.port\n  - packet: reply.pkt\n",
     )
     .unwrap();
 

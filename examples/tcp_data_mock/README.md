@@ -7,7 +7,7 @@ icmp_mock 同构的 mock 服务端/客户端形态：
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（数据确认服务） | **显式两组** listen+reply：每组 = `wait:` 无值链路层监听匹配 PSH|ACK 数据段 → extract 端口/seq/双向 IP 写 global → 触发发包纯 ACK（ack = 本轮 r_seq + 45）。两组对应 client 两步；要服务更多次就多写几组 |
+| `server.pktl` | 服务端（数据确认服务） | **显式两组** listen+reply：每组 = `wait: -1` 链路层监听匹配 PSH|ACK 数据段 → extract 端口/seq/双向 IP 写 global → 触发发包纯 ACK（ack = 本轮 r_seq + 45）。两组对应 client 两步；要服务更多次就多写几组 |
 | `client.pktl` | 客户端（两步数据发送） | 1. 发数据段（seq=0x1000，载荷 45 字节）→ `wait: 2` 校验纯 ACK（ack=0x102D）→ extract reply.tcp.seq 写 global.sseq；2. `delay: 0.5` 后发第二个数据段（seq=0x102D，ack=sseq+1——**用第一轮 ACK 提取的服务端 seq 动态构造确认号**）→ `wait: 2` 校验（ack=0x105A） |
 | `listen.pkt` | server 步骤 1 | 链路层监听包体（仅 ipv4，无传输层）+ sniffer：`match tcp(flags=bor(psh(), ack()))` |
 | `tcp_ack.pkt` | server 步骤 2 | 纯 ACK 确认段（seq=0x2000，ack=global("r_seq") + 45，window=65535） |

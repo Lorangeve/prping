@@ -302,7 +302,7 @@ ubuntu 增设 `test-pcap`（非门禁）；llvm-cov 汇总上报（非门禁）�
 | PKG-5 | listen_addr_decision_matrix | L0 | 显式 target 优先；单 dport 推导；多 dport→Err；无端口→Err；IPv6→`[::]:port` | P0 |
 | PKG-6 | send_payload_tcp_wait_zero_no_read | L1 | TCP wait=0 发送成功且不阻塞读（服务端不回显） | P1 |
 | PKG-7 | listen_udp_once_deadline_returns_none | L1 | timeout 到期无包→Ok(None) | P1 |
-| PKG-8 | recipe_listen_step_requires_sniffer | L4 | wait: 无值 + .pkt 无 sniffer → 步骤失败 stop | P1 |
+| PKG-8 | recipe_listen_step_requires_sniffer | L4 | `wait: -1` + .pkt 无 sniffer → 步骤失败 stop | P1 |
 | PKG-9 | step_params_override_cli_params | L1 | 步骤 params 同名覆盖 CLI `--params`（dport 参数化验证） | P1 |
 | PKG-10 | match_reply_sniffer_requires_sent_report | L0 | sniffer+None report→Err("内部错误") | P1 |
 | PKG-12 | send_raw_bytes_rejects_non_raw_outer | L0 | 最外层非 eth/ipv4/ipv6 → raw 提示错误（先于系统调用，跨平台可测） | P1 |

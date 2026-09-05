@@ -4,7 +4,7 @@
 # 两步查询；要服务更多次就多写几组——同款多轮写法见 ../icmp_mock/server.pktl）。
 #
 # 每组步骤：
-#   步骤 1：`wait:`（无值 = 持续监听）——UDP 数据报监听 :53，sniffer 匹配 DNS 查询
+#   步骤 1：`wait: -1`（= 持续监听）——UDP 数据报监听 :53，sniffer 匹配 DNS 查询
 #           （flags=0x0100），命中后 extract 匹配包字段写 global：
 #           tid=查询 id；cip/cport=查询方 IP/端口（reply.peer.*，来自 socket）。
 #   步骤 2：触发发包——reply.pkt 用 global 构造带 A 记录的 DNS 应答发回查询方。
@@ -23,7 +23,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: tid
     from: reply.dns.id
@@ -37,7 +37,7 @@ recipe:
 - packet: reply.pkt
 # ── 第 2 轮：继续监听第 2 个查询 → extract → 触发发包（client 步骤 2 复用 tid）──
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: tid
     from: reply.dns.id

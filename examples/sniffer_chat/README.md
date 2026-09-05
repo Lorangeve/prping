@@ -5,7 +5,7 @@
 
 1. **从发包提取值**——配方 `extract: from: sent.<层>.<字段>` 取本步**发出的包**
    的字段值（无需等回包）；
-2. **监听触发**——服务端配方 `wait:`（无值）按 `.pkt` 的 `sniffer:` 规则匹配
+2. **监听触发**——服务端配方 `wait: -1` 按 `.pkt` 的 `sniffer:` 规则匹配
    收到的 UDP 数据报，命中后 `extract` 取值写 global，**触发后续步骤**把查询
    重建后发回查询方（服务端 = 一个配方，见 `server.pktl`）；
 3. **按规则校验回包**——客户端的 `wait: 2` + `sniffer:` 声明匹配服务端回显，
@@ -18,7 +18,7 @@
 
 | 文件 | 角色 |
 | --- | --- |
-| `server.pktl` | 服务端配方：**两组** listen 步骤（`wait:` 无值）→ extract → echo 步骤回显（对应 client 两步查询——每步发包用独立 socket，只有一组的话第二步的查询无人应答） |
+| `server.pktl` | 服务端配方：**两组** listen 步骤（`wait: -1`）→ extract → echo 步骤回显（对应 client 两步查询——每步发包用独立 socket，只有一组的话第二步的查询无人应答） |
 | `listen.pkt` | 服务端步骤 1：`sniffer:` 即监听规则（`and`/`not` 组合 + 字段等式） |
 | `echo.pkt` | 服务端步骤 2：用 global 重建查询（同 id）发回查询方 |
 | `step1.pkt` | 客户端步骤 1：发固定 id 的 DNS 查询（sent extract 的取值来源） |
@@ -111,7 +111,7 @@ step 2/2  examples/sniffer_chat/step2.pkt
 | `sent.<层>.<字段>` | 配方 `extract from:` | 取**发包**反解字段（无需 wait） |
 | `reply.<层>.<字段>` | 配方 `extract from:` | 取**回包/匹配包**反解字段（需 wait） |
 | `reply.peer.ip/port` | 配方 `extract from:` | UDP 监听步骤的**对端地址**（来自 socket） |
-| 配方 `wait:` 无值 | `.pktl` 步骤选项 | 服务端：监听触发（命中后配方继续） |
+| 配方 `wait: -1` | `.pktl` 步骤选项 | 服务端：监听触发（命中后配方继续） |
 
 ## 谓词速查（统一谓词引擎）
 

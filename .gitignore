@@ -14,6 +14,12 @@ frontend/dist/*
 .npm-cache/
 .pw-test/
 
+# WebUI 冒烟测试（e2e/）本地产物：依赖 / 浏览器报告 / 测试结果 / 运行沙箱
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/
+e2e/.local/
+
 # just dotenv 本地配置（set dotenv-load；不提交）
 .env
 

@@ -5,7 +5,7 @@
 # echo reply。这里两组对应 client.pktl 的两步请求；要服务更多次就再写几组。
 #
 # 每组步骤：
-#   步骤 1：`wait:`（无值 = 持续监听）——**自动按包内有无 udp/tcp 选监听方式**：
+#   步骤 1：`wait: -1`（= 持续监听）——**自动按包内有无 udp/tcp 选监听方式**：
 #           本包是 icmp/ipv4（无传输层）→ 链路层监听完整帧，匹配 ICMP echo request
 #           （type=8），命中后 extract 匹配帧字段写 global：id/载荷回显 + 请求方
 #           IP（reply.ipv4.src）/本机 IP（reply.ipv4.dst）。
@@ -29,7 +29,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_id
     from: reply.icmp.id
@@ -50,7 +50,7 @@ recipe:
   raw: true
 # ── 第 2 轮：继续监听第 2 个请求 → extract → 触发发包（client 步骤 2）──
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_id
     from: reply.icmp.id

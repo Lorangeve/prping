@@ -7,7 +7,7 @@
 # 每组步骤：
 #   步骤 1：listen.pkt + raw: true（**必须显式**——包内有 udp，不写 raw 会自动
 #           选 UDP 数据报监听，而裸 DHCP 载荷反解不出任何层，永远匹配不到；
-#           论证与实测见 listen.pkt 头注）→ wait:（无值 = 持续监听）链路层抓帧
+#           论证与实测见 listen.pkt 头注）→ wait: -1（= 持续监听）链路层抓帧
 #           匹配 BOOTREQUEST，命中后 extract 匹配帧字段写 global：
 #           cip=reply.ipv4.src（客户端 IP）、cport=reply.udp.sport（客户端端口）、
 #           sip=reply.ipv4.dst（本机 IP——客户端把包发给了谁）。
@@ -35,7 +35,7 @@ recipe:
 # ── 第 1 组：监听 Discover → extract → 触发发包 Offer（对应 client 步骤 1）──
 - packet: listen.pkt
   raw: true
-  wait:
+  wait: -1
   extract:
   - name: cip
     from: reply.ipv4.src
@@ -51,7 +51,7 @@ recipe:
 # ── 第 2 组：监听 Request → extract → 触发发包 Ack（对应 client 步骤 2）──
 - packet: listen.pkt
   raw: true
-  wait:
+  wait: -1
   extract:
   - name: cip
     from: reply.ipv4.src

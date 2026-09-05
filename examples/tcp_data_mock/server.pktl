@@ -5,7 +5,7 @@
 # 纯 ACK 确认段。这里两组对应 client.pktl 的两步数据发送；要服务更多次就再写几组。
 #
 # 每组步骤：
-#   步骤 1：wait:（无值 = 持续监听）——listen.pkt 只有 ipv4（无传输层）→ 链路层
+#   步骤 1：wait: -1（= 持续监听）——listen.pkt 只有 ipv4（无传输层）→ 链路层
 #           监听完整帧，sniffer 匹配 PSH|ACK（数据段；纯 ACK/RST 不误命中，
 #           见 listen.pkt 注释），命中后 extract 匹配帧字段写 global：请求方
 #           端口/序列号（确认号推导用）+ 双向 IP。
@@ -36,7 +36,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_sport
     from: reply.tcp.sport
@@ -54,7 +54,7 @@ recipe:
   raw: true
 # ── 第 2 轮：继续监听第二个数据段 → extract → 触发发包（client 步骤 2）──
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_sport
     from: reply.tcp.sport

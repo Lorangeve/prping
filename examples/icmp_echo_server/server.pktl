@@ -1,6 +1,6 @@
 # ICMP echo 服务端配方（server.pktl）：监听触发 + extract 取值 + 触发发包。
 #
-# 步骤 1：`wait:`（无值 = 持续监听）——本包无 udp/tcp 传输层 → 自动链路层监听
+# 步骤 1：`wait: -1`（= 持续监听）——本包无 udp/tcp 传输层 → 自动链路层监听
 #         完整帧，匹配 ICMP echo request（type=8），命中后 extract 匹配帧字段写
 #         global：id/seq/载荷回显 + 请求方 IP（reply.ipv4.src）/本机 IP（reply.ipv4.dst）。
 # 步骤 2：触发发包——reply.pkt 用 global 构造 echo reply 发回请求方（raw: true，
@@ -23,7 +23,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_id
     from: reply.icmp.id

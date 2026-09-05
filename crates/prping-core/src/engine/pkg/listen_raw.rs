@@ -1,7 +1,7 @@
 //! 链路层监听（`packet --wait --raw`，裸 `--wait` = 持续监听）：持续接收**完整帧**（Linux 默认
 //! AF_PACKET；macOS/Windows 与 Linux `--features pcap` 走 libpcap/Npcap），
 //! 按 .pkt 的 sniffer 统一谓词匹配（`allow_sent: false`），命中只打印匹配详情与反解展示
-//! ——**纯监听**：回应包的构造属编排，一律由 .pktl 配方的 `wait:` 无值步骤监听 +
+//! ——**纯监听**：回应包的构造属编排，一律由 .pktl 配方的 `wait: -1` 步骤监听 +
 //! `extract` 取值 + 后续步骤发包（见 `examples/icmp_mock/`、`examples/tcp_handshake_listen/`）。
 //!
 //! - 抓包复用：Linux 经 `util::socket::open_af_packet`（与 serve 抓包共用）；
@@ -125,6 +125,10 @@ pub fn listen_raw_packets(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> 
 }
 
 /// 配方监听步骤（链路层）的单次收帧结果。
+///
+/// `Clone`：pcap 多设备路径的主线程从共享 `Mutex<Option<RawListen>>` 取
+/// 快照时需要（worker 线程持有锁，克隆后即释放、join 前不再依赖）。
+#[derive(Clone)]
 pub(crate) enum RawListen {
     /// sniffer 命中帧；`until_matched` = 同时满足 loop 块的 `until:` 谓词。
     Hit { data: Vec<u8>, until_matched: bool },
@@ -132,7 +136,7 @@ pub(crate) enum RawListen {
     Until,
 }
 
-/// 配方 `wait:` 无值（持续监听）步骤（raw 链路层）：抓包循环，sniffer 匹配
+/// 配方 `wait: -1`（持续监听）步骤（raw 链路层）：抓包循环，sniffer 匹配
 /// **第一个命中帧**即返回（命中后由配方 extract 取值、后续步骤发包回应）。
 /// `None` = Ctrl+C 中断。匹配器用 Arc（pcap 多设备多线程）。`until` 非 None 时
 /// （loop 块上下文）额外检查每帧：sniffer 命中附带 `until_matched`；仅 until

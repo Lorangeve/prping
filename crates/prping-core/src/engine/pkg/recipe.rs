@@ -253,7 +253,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         }
         // 步骤级选项：wait（三态，与 CLI --wait 同语义）覆盖 CLI；raw 覆盖发送方式
         // （true/网卡 = 强制 raw，false = 强制 payload——覆盖 CLI --raw）；
-        // 持续监听步骤（wait 无值）不发送 → 内部 wait 强制 Off（监听由 listen_once 驱动）
+        // 持续监听步骤（`wait: -1`）不发送 → 内部 wait 强制 Off（监听由 listen_once 驱动）
         let is_listen = matches!(step.wait, Some(crate::engine::pkg::WaitMode::Continuous));
         let step_opts = PkgOptions {
             wait: if is_listen {
@@ -454,7 +454,7 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                 )?;
                 writeln!(&mut w)?;
             }
-            // 持续监听（wait 无值）无超时；`listen_once` 内部轮询 Ctrl+C
+            // 持续监听（`wait: -1`）无超时；`listen_once` 内部轮询 Ctrl+C
             let timeout: Option<Duration> = None;
             // 命中第一个匹配包即返回（replies 供 extract）；对端供 reply.peer.* 取值。
             // loop 块内：until 命中 / Ctrl+C → 优雅收工（loop_abort = 块尾下标）
@@ -1450,8 +1450,8 @@ mod tests {
     use packet_dsl::Serializer as _;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
-    /// 解析：`packet:` 键 + `wait:` 三态（无值 = 持续监听 / 秒数 = 发后等一个应答 /
-    /// 不写 = 纯发送，与 CLI `--wait` 同语义）。
+    /// 解析：`packet:` 键 + `wait:` 三态（`wait: -1` = 持续监听 / 秒数 = 发后等一个
+    /// 应答 / 不写 = 纯发送，与 CLI `--wait` 同语义；空值非法，见错误测试）。
     #[test]
     fn recipe_parse_packet_and_wait_three_state() {
         let dir = std::env::temp_dir().join(format!("prping-parse-wait-{}", std::process::id()));
@@ -1460,7 +1460,7 @@ mod tests {
         let pktl = dir.join("r.pktl");
         std::fs::write(
             &pktl,
-            "recipe:\n- packet: a.pkt\n  wait: 5\n- packet: b.pkt\n  wait:\n- c.pkt\n",
+            "recipe:\n- packet: a.pkt\n  wait: 5\n- packet: b.pkt\n  wait: -1\n- c.pkt\n",
         )
         .unwrap();
         let r = crate::engine::recipe::parse(&pktl).unwrap();
@@ -1523,6 +1523,21 @@ mod tests {
         std::fs::write(&pktl, "recipe:\n- packet: a.pkt\n  wait: abc\n").unwrap();
         let err = crate::engine::recipe::parse(&pktl).unwrap_err().to_string();
         assert!(err.contains("`wait`"), "{err}");
+        // 空值非法（要么不写、要么写值）：报错带 `wait: -1` 迁移提示
+        std::fs::write(&pktl, "recipe:\n- packet: a.pkt\n  wait:\n").unwrap();
+        let err = crate::engine::recipe::parse(&pktl).unwrap_err().to_string();
+        assert!(err.contains("`wait`") && err.contains("wait: -1"), "{err}");
+        // 空值非法：loop 同规则（无限写 loop: -1）
+        std::fs::write(&pktl, "recipe:\n- loop:\n  steps:\n  - packet: a.pkt\n").unwrap();
+        let err = crate::engine::recipe::parse(&pktl).unwrap_err().to_string();
+        assert!(err.contains("`loop`") && err.contains("loop: -1"), "{err}");
+        // 空值非法：params（原静默无操作）/ extract 内联值（原被静默忽略）
+        std::fs::write(&pktl, "recipe:\n- packet: a.pkt\n  params:\n").unwrap();
+        let err = crate::engine::recipe::parse(&pktl).unwrap_err().to_string();
+        assert!(err.contains("`params`"), "{err}");
+        std::fs::write(&pktl, "recipe:\n- packet: a.pkt\n  extract: 3\n").unwrap();
+        let err = crate::engine::recipe::parse(&pktl).unwrap_err().to_string();
+        assert!(err.contains("`extract`"), "{err}");
         // 旧键 pkg: → 明确报错提示改名
         std::fs::write(&pktl, "recipe:\n- pkg: a.pkt\n").unwrap();
         let err = crate::engine::recipe::parse(&pktl).unwrap_err().to_string();
@@ -1544,7 +1559,7 @@ mod tests {
         assert_eq!(
             server.steps[0].wait,
             Some(crate::engine::pkg::WaitMode::Continuous),
-            "server 步骤 1 = wait 无值（持续监听）"
+            "server 步骤 1 = wait: -1（持续监听）"
         );
         let client = crate::engine::recipe::parse(&ex.join("client.pktl")).unwrap();
         assert_eq!(client.steps.len(), 2);
@@ -2017,7 +2032,7 @@ mod tests {
         res.expect("配方应成功完成（超时 → on_timeout 发包 → 继续）");
     }
 
-    /// 集成：配方步骤 `wait:`（无值 = 持续监听，与 CLI 裸 `--wait` 同语义）匹配 DNS
+    /// 集成：配方步骤 `wait: -1`（持续监听，与 CLI 裸 `--wait` 同语义）匹配 DNS
     /// 查询 → extract 匹配包字段 → 后续步骤**触发发包**（应答回客户端）。
     /// 字节级回环，无 root 依赖。
     #[test]
@@ -2046,7 +2061,7 @@ mod tests {
         std::fs::write(
             &pktl,
             format!(
-                "global:\n- tid\n- cport\nrecipe:\n- packet: listen.pkt\n  wait:\n  params: port={port}\n  extract:\n  - name: tid\n    from: reply.dns.id\n    as: int\n  - name: cport\n    from: reply.peer.port\n    as: int\n- packet: trigger.pkt\n"
+                "global:\n- tid\n- cport\nrecipe:\n- packet: listen.pkt\n  wait: -1\n  params: port={port}\n  extract:\n  - name: tid\n    from: reply.dns.id\n    as: int\n  - name: cport\n    from: reply.peer.port\n    as: int\n- packet: trigger.pkt\n"
             ),
         )
         .unwrap();

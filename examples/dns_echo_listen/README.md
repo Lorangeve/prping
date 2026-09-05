@@ -26,7 +26,7 @@ id=0x4242（与查询一致）、flags=0x8180（应答位）。
 ```text
 recipe:
 - packet: listen.pkt      # 步骤 1：持续监听（不发送）
-  wait:                   # 无值 = 持续监听直到命中（与 CLI 裸 --wait 同语义）
+  wait: -1                   # -1 = 持续监听直到命中（与 CLI 负数 --wait 同语义）
   extract:                # 命中后从匹配包取值写 global
   - name: tid
     from: reply.dns.id    # 查询的 dns.id

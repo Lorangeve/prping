@@ -2,7 +2,7 @@
 # 「持有某个 IP 的主机」的协议栈：收到 ARP 请求，判断归属，单播回一句应答。
 #
 # 配方结构（一组 listen+reply 对应 client.pktl 的一步；pktl 可包含任意多包）：
-#   步骤 1：`wait:`（无值 = 持续监听）——listen.pkt 无 udp/tcp 传输层 → 自动选
+#   步骤 1：`wait: -1`（= 持续监听）——listen.pkt 无 udp/tcp 传输层 → 自动选
 #           **链路层监听完整帧**（AF_PACKET 收完整 eth+arp 帧，需 root），sniffer
 #           匹配 ARP 请求（op="request"），命中后 extract 匹配帧字段写 global：
 #           r_sha=请求方 MAC / r_spa=请求方 IP / r_tpa=被询问的 IP
@@ -32,7 +32,7 @@ global:
 
 recipe:
 - packet: listen.pkt
-  wait:
+  wait: -1
   extract:
   - name: r_sha
     from: reply.arp.sha

@@ -1150,20 +1150,47 @@ body {
   filter: brightness(1.1);
 }
 
-/* Stop all 悬浮清单：全连接运行任务跨标签统一可见（行内 ■ 可单停单个）。
- * 纯 CSS hover 展示——清单挂在按钮下方，z-index 压过任务列表/控制台 */
-.stopall-wrap {
+/* 右上角全局任务管理器：徽标按钮 + 右对齐弹层面板（全连接唯一任务管理面，
+ * 行样式复用 .run-task-row；点按钮开合，点面板外关闭；margin-left:auto 推到顶栏最右） */
+.taskmgr-wrap {
   position: relative;
   display: inline-flex;
+  margin-left: auto;
 }
 
-.stopall-pop {
-  display: none;
+.taskmgr-btn {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.taskmgr-btn:hover {
+  filter: brightness(1.15);
+  color: var(--text);
+}
+
+/* 有运行中任务：徽标转警示色 */
+.taskmgr-btn.live {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.taskmgr-dot {
+  font-size: 9px;
+}
+
+.taskmgr-pop {
   position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 40;
-  min-width: 230px;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 100;
+  width: 340px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1171,41 +1198,28 @@ body {
   box-shadow: 0 6px 18px rgb(0 0 0 / 0.4);
 }
 
-.stopall-wrap:hover .stopall-pop {
-  display: block;
-}
-
-.stopall-head {
+.taskmgr-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 11px;
   color: var(--text-dim);
   margin-bottom: 4px;
   white-space: nowrap;
 }
 
-.stopall-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  padding: 2px 0;
-  white-space: nowrap;
+.taskmgr-sec {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 2px 2px;
 }
 
-.stopall-file {
-  color: var(--text);
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.stopall-kill {
-  cursor: pointer;
-  color: var(--warn);
-  padding: 0 4px;
-}
-
-.stopall-kill:hover {
-  color: var(--err);
+.taskmgr-list {
+  max-height: 300px;
+  overflow: auto;
 }
 
 .run-panel {
@@ -1374,19 +1388,7 @@ body {
   padding-top: 3px;
 }
 
-/* 任务列表（任务管理）：有任务即常驻；行 = 任务（点行切控制台，■ 停止，✕ 移除） */
-.run-task-list {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  max-height: 140px;
-  overflow: auto;
-  background: var(--bg);
-  flex-shrink: 0;
-}
-
+/* 任务行（右上角任务管理器复用）：点行切控制台，■ 停止，✕ 移除 */
 .run-task-row {
   display: flex;
   align-items: center;

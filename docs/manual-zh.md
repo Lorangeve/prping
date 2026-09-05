@@ -939,7 +939,7 @@ prping engine --pcap x.pcap --to-pkt dir/ --threads 8       # 8 线程并行解�
 
 **sniffer 段**（回包校验 / 监听规则）：`--wait` 时按 `.pkt` 里的 sniffer 声明匹配应答
 （匹配成功显示 `✓ reply matched: 字段=值 (rtt)`，超时显示 `✗ no matching reply`）；
-裸 `--wait`（或配方 `wait:` 无值）时同一声明作为**监听规则**（匹配收到的数据报并打印详情）：
+裸 `--wait`（或配方 `wait: -1`）时同一声明作为**监听规则**（匹配收到的数据报并打印详情）：
 
 ```pkt
 sniffer:
@@ -958,7 +958,7 @@ sniffer:
 **发送段先行**（文件有可发送的导出就先发送，再进入监听），随后绑定 UDP 地址持续接收数据报（地址省略时按包内最外层 udp/tcp dport 推导），反解后
 按 `.pkt` 的 sniffer 规则匹配——命中打印匹配详情（`✓ matched ... from peer`
 + 反解展示），未命中忽略，Ctrl+C 结束并打印匹配统计。**不发包回应**——回应包
-的构造属编排，由 `.pktl` 配方完成（`wait:` 无值监听触发 + extract + 后续步骤
+的构造属编排，由 `.pktl` 配方完成（`wait: -1` 监听触发 + extract + 后续步骤
 发包，demo 与说明 → `examples/sniffer_chat/`：服务端配方 `server.pktl`，
 客户端配方 `client.pktl`，含 `sent.`/`reply.` extract 全链路）。
 
@@ -967,7 +967,7 @@ sniffer:
 按 sniffer 规则匹配（监听无发包，规则用字面量/谓词），命中打印匹配字段 +
 反解展示（无应答模板注入——`reply("层","字段")` 现为配方 extract 专用原语，
 `.pkt` 内出现即报错）；Ctrl+C 停止并打印匹配统计。要"监听 + 回应"的
-服务端，用 **`.pktl` 配方**：`wait:` 无值监听触发 → extract 取值写 global →
+服务端，用 **`.pktl` 配方**：`wait: -1` 监听触发 → extract 取值写 global →
 后续步骤构造回应包发回（demo → `examples/icmp_echo_server/`、
 `examples/tcp_handshake_listen/`、`examples/dns_echo_listen/`）。
 
@@ -1098,7 +1098,7 @@ recipe:
     `bytes`（字段原始字节，网络序）；
   - `sent.<层>.<字段>` 直取**本步发包**反解字段（**无需 wait**——取的是发出去
     的包的字段，如实际序列化后的 dns.id / tcp.seq），`as:` 同上；
-  - `reply.peer.ip` / `reply.peer.port`——**`wait:` 无值（持续监听）步骤**（UDP
+  - `reply.peer.ip` / `reply.peer.port`——**`wait: -1`（持续监听）步骤**（UDP
     监听）的**对端地址**：UDP 监听到的是数据报载荷（没有 udp 头），对端来自
     socket，供后续步骤回包（如 `udp(dport=global("cport"))`）；
   - **值表达式**（可调函数/原语/`+` 运算，内嵌 `reply.<层>.<字段>` 叶子）：
@@ -1108,8 +1108,8 @@ recipe:
     字节列表），可引用同步骤 .pkt 的 `func` 值函数、`params(...)`、`global(...)`；
     `as:` 可选（缺省 = 表达式的自然类型；显式 `as:` 按 int/hex/str/bytes 转换）。
     TCP 载荷回显的应答字节也保留（配方 extract 可用）。
-- **等待/监听（`wait:`）**：步骤选项 `wait:` 与 CLI `--wait` **同语义**——无值或
-  负数 = **无限等待**（无值 = 持续监听，等价 CLI 裸 `--wait` / `--wait 负数`）：本步
+- **等待/监听（`wait:`）**：步骤选项 `wait:` 与 CLI `--wait` **同语义**——
+  `wait: -1`（任意负数）= **无限等待**（持续监听，等价 CLI 裸 `--wait` / `--wait 负数`）：本步
   **不发送**，用该 `.pkt` 的 `sniffer:` 规则匹配外部到达的包，**命中后配方继续**
   （触发后续步骤发包），匹配包供 `extract` 的 `reply.` 来源取值（含
   `reply.peer.ip/port` 对端）；`wait: 秒数` = 发送后等一个匹配应答（等价 CLI
@@ -1123,19 +1123,20 @@ recipe:
   任一次等到回包即成功，默认 1 次），或 `on_timeout: 文件` **打印超时信息并发送
   该 .pkt**（发其它包），步骤继续——超时重试/回退/降级通知等场景
   （demo → `examples/wait_timeout/`）。备选包注入当前 global/params；其发送失败走
-  `on_error`。`wait:` 无值 / 负数（无限等待）无超时概念。
-- **循环块（`loop:`）**：`- loop: N`（N 可省或负数 = 无限，与 CLI `--wait` 同语义）
+  `on_error`。`wait: -1` 等负数（无限等待）无超时概念。
+- **循环块（`loop:`）**：`- loop: N`（N 为负数 = 无限，与 CLI 负数 `--wait` 同语义；
+  空值非法——字段要么不写、要么写值，无限循环写 `loop: -1`）
   包裹一组**嵌套步骤**（`steps:` 后跟缩进 `- ` 步骤项），每轮**完整执行块内步骤**
   ——服务端"监听→extract→回应"的循环编排：
   
   ```yaml
   recipe:
-  - loop:                # 无值/负数 = 无限（until: 命中或 Ctrl+C 收工）
+  - loop: -1             # 负数 = 无限（until: 命中或 Ctrl+C 收工；空值非法）
     until:               # 可选：sniffer 同款谓词，任一命中 → 本轮结束后收工
     - match dns(flags=0x8180)
     steps:
     - packet: listen.pkt
-      wait:
+      wait: -1
       extract:
       - name: tid
         from: reply.dns.id
@@ -1167,7 +1168,7 @@ recipe:
   提前报错，与 extract 字段校验同一哲学）+ 步骤选项，并校验 extract 的
   层/字段名——表达式形态同样校验 `reply(...)` 叶子）；`packet FILE.pktl` 执行时
   header 同样汇总打印参数名。
-- **示例**统一为 **mock server/client 形式**（服务端配方 `server.pktl`：`wait:` 无值
+- **示例**统一为 **mock server/client 形式**（服务端配方 `server.pktl`：`wait: -1`
   监听 + extract + 触发发包；客户端配方 `client.pktl`：发包 + `wait: N` + sniffer
   校验 + extract；完整清单见 `examples/README.md`）：
   `examples/icmp_mock/`（**ICMP mock，形态标杆**：链路层监听触发发包 + client.pktl
@@ -1181,7 +1182,7 @@ recipe:
   `examples/udp_mock/`（**UDP mock**：同一服务端按端口分派 DNS 应答与 VNC 横幅）、
   `examples/dns_echo_listen/`（**DNS mock**：查询 → A 记录应答，客户端两步 extract
   复用 tid）、
-  `examples/dns_trigger/`（**监听触发最小样例**：配方 `wait:` 无值匹配查询 →
+  `examples/dns_trigger/`（**监听触发最小样例**：配方 `wait: -1` 匹配查询 →
   extract → 触发步骤发包应答）、
   `examples/dns_loop_server/`（**循环监听服务**：`loop:` 无限包 listen+reply，
   连续服务多个请求，`until:` 收到停服包收工）、
