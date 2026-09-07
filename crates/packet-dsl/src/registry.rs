@@ -322,6 +322,18 @@ pub fn builtin_docs() -> Vec<BuiltinDoc> {
             ],
             auto: "仅配方 extract 的 from: 表达式求值时按内置处理（宿主注入当前步骤回包）；其余上下文回退用户函数（eng_lib 的 ARP 位常量 `reply()` 等撞名保持原语义）；数值字段 → Int，地址/字符串字段 → Str（display），payload/body/raw 字节 → 字节列表",
         },
+        BuiltinDoc {
+            name: "round",
+            summary: "serve 阶段当前轮次（闸门放行后 1 起；配方 serve: 阶段专用）",
+            params: vec![],
+            auto: "仅配方 serve: 阶段的监听 matcher / until 谓词 / extract / 阶段内步骤表达式求值时按内置处理（宿主注入当前轮次：监听 matcher 构建时 = 当前轮；命中后 extract/handler 求值时含本次命中）；其余上下文报错",
+        },
+        BuiltinDoc {
+            name: "hits",
+            summary: "serve 阶段已命中次数（命中后含本次；on_mismatch 不计数）",
+            params: vec![],
+            auto: "仅配方 serve: 阶段的监听 matcher / until 谓词 / extract / 阶段内步骤表达式求值时按内置处理（宿主注入已命中次数：监听 matcher 构建时 = 之前轮次累计；命中后 extract/handler 求值时含本次）；其余上下文报错",
+        },
     ]
 }
 

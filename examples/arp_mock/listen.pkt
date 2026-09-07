@@ -1,6 +1,6 @@
-# arp_mock · server 配方 · 步骤 1：链路层持续监听（`wait: -1` + 包内无 udp/tcp
-# 传输层 → 自动选链路层监听完整帧，AF_PACKET 收完整 eth+arp 帧，需 root；
-# 缺省监听全接口，`--iface` 可指定网卡）。
+# arp_mock · server 配方 · serve 规则监听源：包内无 udp/tcp 传输层 → 自动选
+# 链路层监听完整帧（AF_PACKET 收完整 eth+arp 帧，需 root；缺省监听全接口，
+# `--iface` 可指定网卡）。
 #
 # 匹配规则：ARP 请求（op="request"）。**包体仅用于占位/文档**（表达"我在等
 # eth+arp 帧"），实际匹配完全由 sniffer 规则决定——收到的帧反解出 eth/arp 层后

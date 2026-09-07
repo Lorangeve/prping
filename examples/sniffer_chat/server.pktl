@@ -1,14 +1,15 @@
-# 服务端配方（server.pktl）：监听触发 + extract 取值 + 触发回显。
+# 服务端配方（server.pktl）：serve 监听分派 + extract 取值 + 触发回显。
 #
-# 配方显式列出**两组**监听+回显步骤（pktl 可包含任意多包）——对应 client.pktl
-# 的两步查询。注意：每步发包用独立 socket（源端口不同），第一组回显只到第一步
-# 的源端口；没有第二组的话，client 步骤 2 的查询无人应答（wait 超时）。要服务
-# 更多次就多写几组（同款多轮写法见 ../icmp_mock/server.pktl）。
+# `serve:` 阶段（阻塞至收工）：单条规则监听 :55353（UDP 数据报监听，按
+# listen.pkt 包内 udp dport 推导），sniffer 匹配 DNS 查询（and/not 组合规则，
+# 见 listen.pkt）；`max: 2` = 逐轮服务两个查询（对应 client.pktl 的两步查询），
+# 每轮：命中 → extract 写 global（tid=查询 id、cip/cport=查询方 IP/端口，
+# reply.peer.* 来自 socket）→ handler 用 echo.pkt 重建查询（同 id）发回查询方。
+# global 跨轮保留、每轮 extract 覆盖。
 #
-# 每组步骤：
-#   步骤 1：`wait: -1`（= 持续监听）——UDP 数据报监听 :55353，sniffer 匹配 DNS
-#           查询（and/not 组合规则，见 listen.pkt），命中后 extract 写 global。
-#   步骤 2：触发发包——echo.pkt 用 global 重建查询（同 id）发回查询方。
+# 注意：每步发包用独立 socket（源端口不同）——回显走 global 里当轮的对端地址，
+# 所以多轮共用一条规则即可。要服务更多查询：调大 `max:`；`max: -1` = 无限
+# 服务，Ctrl+C 随时优雅收工（打印统计、退出码 0）。
 #
 # 运行（终端 1）：prping packet examples/sniffer_chat/server.pktl
 # 客户端（终端 2）：prping packet examples/sniffer_chat/client.pktl 127.0.0.1:55353
@@ -18,30 +19,19 @@ global:
 - cport
 
 recipe:
-- packet: listen.pkt
-  wait: -1
-  extract:
-  - name: tid
-    from: reply.dns.id
-    as: int
-  - name: cip
-    from: reply.peer.ip
-    as: str
-  - name: cport
-    from: reply.peer.port
-    as: int
-- packet: echo.pkt
-# ── 第 2 轮：继续监听第 2 个查询 → extract → 触发回显（client 步骤 2）──
-- packet: listen.pkt
-  wait: -1
-  extract:
-  - name: tid
-    from: reply.dns.id
-    as: int
-  - name: cip
-    from: reply.peer.ip
-    as: str
-  - name: cport
-    from: reply.peer.port
-    as: int
-- packet: echo.pkt
+- serve:
+  max: 2
+  rules:
+  - packet: listen.pkt
+    extract:
+    - name: tid
+      from: reply.dns.id
+      as: int
+    - name: cip
+      from: reply.peer.ip
+      as: str
+    - name: cport
+      from: reply.peer.port
+      as: int
+    handler:
+    - packet: echo.pkt

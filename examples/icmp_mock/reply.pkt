@@ -1,5 +1,5 @@
-# server 配方 · 步骤 2（触发发包）：构造 ICMP echo reply（type=0）发回请求方。
-# 字段全部来自 listen 步骤的 extract（global）：
+# server 配方 · handler 步骤（触发发包）：构造 ICMP echo reply（type=0）发回请求方。
+# 字段全部来自规则 extract（global）：
 #   r_id / r_payload 回显；r_dst_ip（请求方）→ reply 的 dst、
 #   r_src_ip（本机）→ reply 的 src。ICMP 校验和由序列化器自动重算。
 #

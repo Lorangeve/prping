@@ -48,9 +48,10 @@ pub use registry::{Params, builtin_doc, builtin_docs, is_builtin, parse_param_va
 
 pub use dissect::{DissectReport, dissect};
 pub use eval::{
-    Globals, PacketSource, ReplyAccess, eval_extract_value, eval_sniffer_value,
-    eval_sniffer_value_with_globals, resolve, resolve_sources, resolve_sources_with_globals,
-    resolve_sources_with_params, resolve_sources_with_reply, resolve_with_globals,
+    Globals, PacketSource, ReplyAccess, ServeCtx, eval_extract_value, eval_extract_value_ctx,
+    eval_sniffer_value, eval_sniffer_value_ctx, eval_sniffer_value_with_globals, resolve,
+    resolve_sources, resolve_sources_with_globals, resolve_sources_with_params,
+    resolve_sources_with_reply, resolve_sources_with_serve, resolve_with_globals,
     resolve_with_params,
 };
 pub use ir::{BuildResult, Layer, PacketSpec};

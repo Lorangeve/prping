@@ -4,14 +4,12 @@
 #   终端 1（门禁）：prping packet examples/brute_pin/server.pktl
 #   终端 2（爆破）：prping packet examples/brute_pin/client.pktl 127.0.0.1:55353
 #
-# 服务端只有两步：
-#   步骤 1  listen.pkt  wait: -1（= 无限监听）——DNS 查询里 qname 不带正确 PIN
-#                       的候选不匹配 sniffer、被静默忽略，服务端继续等；正确候选
-#                       命中后 extract 写 global：事务 ID（reply.dns.id）+ 对端
-#                       地址（reply.peer.ip/port）。
-#   步骤 2  grant.pkt   触发发包——flags=0x8180、qname "GRANT.pin.lab" 的应答回给
-#                       命中方。配方到此结束（门禁开一次即完成使命；要再来一轮就
-#                       重启本配方）。
+# 服务端是一个 `serve:` 阶段（阻塞至收工，`max: 1` = 服务一轮即结束）：
+#   规则监听 listen.pkt——UDP 数据报监听 :55353，DNS 查询里 qname 不带正确 PIN
+#   的候选不匹配 sniffer、被静默忽略，服务端继续等；正确候选命中后 extract 写
+#   global：事务 ID（reply.dns.id）+ 对端地址（reply.peer.ip/port）。
+#   handler 触发发包——grant.pkt，flags=0x8180、qname "GRANT.pin.lab" 的应答
+#   回给命中方。配方到此结束（门禁开一次即完成使命；要再来一轮就重启本配方）。
 #
 # 教学点（对着 client.pktl 的 ✗/✓ 看）：
 #   - 爆破的「成功判定」在服务端匹配规则：contains("PIN-4242") 就是口令校验；
@@ -25,16 +23,19 @@ global:
 - cport     # 命中方端口（reply.peer.port → grant.pkt 的 dport）
 
 recipe:
-- packet: listen.pkt
-  wait: -1
-  extract:
-  - name: tid
-    from: reply.dns.id
-    as: int
-  - name: cip
-    from: reply.peer.ip
-    as: str
-  - name: cport
-    from: reply.peer.port
-    as: int
-- packet: grant.pkt
+- serve:
+  max: 1
+  rules:
+  - packet: listen.pkt
+    extract:
+    - name: tid
+      from: reply.dns.id
+      as: int
+    - name: cip
+      from: reply.peer.ip
+      as: str
+    - name: cport
+      from: reply.peer.port
+      as: int
+    handler:
+    - packet: grant.pkt

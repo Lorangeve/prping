@@ -1,4 +1,4 @@
-# 门禁 mock · 步骤 2（触发发包）：只有正确 PIN 命中监听、extract 写完 global
+# 门禁 mock · handler 步骤（触发发包）：只有正确 PIN 命中监听、extract 写完 global
 # 才会执行到本步。构造 DNS 应答回给命中方：
 #   global.tid   = 命中查询的事务 ID（reply.dns.id——应答必须同 id，客户端靠它配对）
 #   global.cip   = 命中方 IP（reply.peer.ip——UDP 监听载荷里没有 IP 头，对端地址

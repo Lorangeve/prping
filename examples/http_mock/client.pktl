@@ -5,8 +5,8 @@
 #         显式 raw: true，否则会走"TCP 载荷"模式用内核建连，mock 没有真 TCP 栈
 #         握不了手）→ wait: 2 校验 200 OK 应答（sniffer：TCP 四元组/确认号 +
 #         http 内容判定，见 http_get.pkt 注释）。
-# 步骤 2：delay: 0.5 —— server 配方命中 GET 后要重开下一轮抓包（AF_PACKET 设备
-#         枚举/打开），回环上 client 亚毫秒就发完，不加 delay 会错过 POST 请求
+# 步骤 2：delay: 0.5 —— server 的两个 serve 阶段串行（GET 阶段收工 → POST 阶段
+#         开监听），回环上 client 亚毫秒就发完，不加 delay 会错过 POST 请求
 #         （同 icmp_mock「为什么 seq 是 1001/1002」一节的经验）。再发 POST
 #         （http_post.pkt，JSON body + Content-Length: 32）→ wait: 2 校验。
 #

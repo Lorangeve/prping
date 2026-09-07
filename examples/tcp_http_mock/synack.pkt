@@ -1,5 +1,5 @@
-# server 配方 · 第 1 组步骤 2（触发发包）：构造 SYN-ACK 发回请求方（三次握手第 2 段）。
-# 字段全部来自 listen_syn 步骤的 extract（global）：
+# server 配方 · 规则 handler 第一步（触发发包）：构造 SYN-ACK 发回请求方（三次握手第 2 段）。
+# 字段全部来自规则 extract（global）：
 #   r_sport  = 请求的 tcp.sport（客户端端口）→ SYN-ACK 的 dport；
 #   r_seq    = 请求的 tcp.seq → ack = r_seq + 1。**确认号 = 对方 seq + 1** 是三次握手
 #              的数值核心："你的第 seq 号字节（SYN 本身占 1 个序号）我收到了，

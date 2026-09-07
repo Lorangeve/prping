@@ -107,8 +107,8 @@ pub use engine::convert::{ConvertOptions, ConvertReport, convert_pcap};
 pub use engine::eng::{
     analyze_file, analyze_recipe, analyze_text_json, decode_hex, decode_pcap, dns_type_name,
     effective_libs, ensure_proto_registry, layer_name, libs_display, ls_builtins, opt_bytes_len,
-    render_dissected, render_hexdump, render_layers, render_packet, render_packet_fields, run_lsp,
-    run_lsp_on, value_display,
+    recipe_pkt_paths, render_dissected, render_hexdump, render_layers, render_packet,
+    render_packet_fields, run_lsp, run_lsp_on, value_display,
 };
 pub use engine::pcap::{LinkType, PcapRecord, linktype_of, read_pcap, write_pcap};
 pub use engine::pkg::{
@@ -117,8 +117,8 @@ pub use engine::pkg::{
     send_recipe, sniffer_match, sniffer_match_with, step_send_mode,
 };
 pub use engine::recipe::{
-    Extract, ExtractAs, FromSpec, GlobalDecl, LoopCtx, OnError, Recipe, Step, StepRaw,
-    parse as parse_recipe,
+    Extract, ExtractAs, FromSpec, GlobalDecl, LoopCtx, OnError, Recipe, RecipeItem, Serve,
+    ServeItem, ServeRule, Step, StepRaw, parse as parse_recipe,
 };
 
 // Web 编辑器服务器（`prping web`）

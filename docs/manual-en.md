@@ -972,7 +972,7 @@ reproduce capture pacing; hand-written recipes can use it too.
 **sniffer block** (reply validation / listen rule): with `--wait`, replies are matched
 against the `sniffer` declaration in the `.pkt` file; a match prints
 `✓ reply matched: field=value (rtt)`, a timeout prints `✗ no matching reply`.
-With a bare `--wait` (or a recipe's `wait: -1`) the same declaration becomes the **listen rule** (match incoming datagrams and print details):
+With a bare `--wait` (or a recipe's `serve:` rule) the same declaration becomes the **listen rule** (match incoming datagrams and print details):
 
 ```pkt
 sniffer:
@@ -994,7 +994,7 @@ udp/tcp dport when omitted), dissects each one and matches the `.pkt` sniffer ru
 a hit prints the match details (`✓ matched ... from peer` + dissect),
 misses are ignored, Ctrl+C exits and prints match statistics. It **does not send
 anything back** — building a response is orchestration and belongs to a `.pktl`
-recipe (`wait: -1` listen trigger + extract + a later send step; demo &
+recipe (`serve:` rule listen + extract + a handler send step; demo &
 walkthrough → `examples/sniffer_chat/`: server recipe `server.pktl`,
 client recipe `packet client.pktl`, covering
 `sent.`/`reply.` extract end to end).
@@ -1005,8 +1005,8 @@ root/admin required) and matches the sniffer rule (listen has no sent packet —
 literals/predicates); a hit prints the matched fields + dissect (no reply-template
 injection — `reply("layer","field")` is now a recipe-extract-only primitive and is an
 error inside a `.pkt`); Ctrl+C stops and prints match stats. For a "listen +
-respond" server, use a **`.pktl` recipe**: a `wait: -1` listen trigger →
-extract into globals → a later step builds and sends the response
+respond" server, use a **`.pktl` recipe**: a `serve:` stage rule listens →
+extract into globals → the handler builds and sends the response
 (demos → `examples/icmp_echo_server/`, `examples/tcp_handshake_listen/`,
 `examples/dns_echo_listen/`).
 
@@ -1154,11 +1154,12 @@ recipe:
   - `sent.<layer>.<field>` picks the dissected **sent** packet's field for this step
     (**no wait needed** — reads the packet that was actually sent, e.g. the
     serialized dns.id / tcp.seq), `as:` as above;
-  - `reply.peer.ip` / `reply.peer.port` — the **peer address** of a **`wait: -1`
-    (continuous listen) step** (UDP listen): the datagram payload has no
+  - `reply.peer.ip` / `reply.peer.port` — the **peer address** of a **`serve:` rule**
+    (UDP datagram listen): the datagram payload has no
     UDP header, so the peer comes
-    from the socket — use it to reply from a later step
-    (e.g. `udp(dport=global("cport"))`);
+    from the socket — use it to reply from the handler
+    (e.g. `udp(dport=global("cport"))`; link-layer listen has no peer — take it
+    from the frame via `reply.ipv4.src` / `reply.udp.sport`);
   - **value expression** (functions / primitives / `+` arithmetic, with embedded
     `reply.<layer>.<field>` leaves): `from: reply.tcp.seq + 1`,
     `from: be16(reply.dns.id)`, `from: cksum(reply.icmp.payload)` — the expression
@@ -1168,59 +1169,79 @@ recipe:
     `global(...)`; `as:` is optional (default = the expression's natural type; an
     explicit `as:` converts to int / hex / str / bytes). TCP echo bodies are kept
     in the reply too, so extract works there as well.
-- **Wait / listen (`wait:`)**: the step option `wait:` shares the CLI `--wait`
-  semantics — **a negative number (`wait: -1`) = wait forever** (continuous listen,
-  equivalent to a bare `--wait` / a negative `--wait`): the step
-  does **not send**; it
-  matches incoming packets with the `.pkt`'s `sniffer:` rule, and **on a hit the
-  recipe continues** (triggering later steps to send), with the matched packet
-  available to `extract` (`reply.` sources, including `reply.peer.ip/port`);
-  `wait: SECONDS` = send then wait for one matching reply (equivalent to
-  `--wait SECS`); absent = plain send. **The listen mode is chosen automatically**:
-  a packet with a udp/tcp transport layer → UDP datagram listen (bind address =
-  CLI `HOST:PORT` or derived from the packet's outermost udp/tcp dport); without
-  (ICMP/ARP etc.) → **link-layer listen** (full frames matched); `raw: true` /
-  `raw: NIC` overrides explicitly.
-  A whole server can be a recipe: demo → `examples/dns_trigger/` (wait listens for
-  a DNS query → extract id / peer port → a later step sends the reply).
+- **Wait for a reply (`wait:`)**: the step option `wait:` shares the CLI
+  `--wait SECS` semantics — `wait: SECONDS` (**non-negative**) = send then wait
+  for one matching reply; absent = plain send. Negative numbers and empty values
+  are **now invalid** — continuous listen (the step does not send; incoming
+  packets are matched against the `.pkt`'s `sniffer:` rule and a hit drives the
+  recipe on) has moved to the `serve:` stage, see **Serve stage (`serve:`)**
+  below.
 - **Wait timeout handling (`on_timeout: retry [N] | FILE`)**: when `wait: SECONDS`
   times out with no matching reply — `on_timeout: retry [N]` **resends the step's
   packets N times** (each resend waits again; the first reply received succeeds the
   step, default 1), or `on_timeout: FILE` **prints the timeout notice and sends
   that `.pkt`** (send other packets); the step continues — for retry / fallback /
   degraded notifications (demo → `examples/wait_timeout/`). The fallback packet
-  gets the current global/params; its send failure follows `on_error`. A negative
-  `wait: -1` (infinite wait) has no timeout concept.
-- **Loop block (`loop:`)**: `- loop: N` (a negative N = infinite, same semantics
-  as a negative CLI `--wait`; empty values are invalid — either omit the field or
-  give it a value, write `loop: -1` for an infinite loop) wraps a group of
-  **nested steps** (`steps:`
-  followed by indented `- ` step items); each round **runs the whole block** —
-  the looping orchestration of a server "listen → extract → reply" cycle:
+  gets the current global/params; its send failure follows `on_error`.
+- **Serve stage (`serve:`)**: a `- serve:` item (a container item, no inline
+  value) = **multi-rule listen dispatch + hit handling**, blocking until the
+  stage finishes — each round is driven by **one matched packet**: a rule
+  listens → the hit packet's `extract` writes globals → that rule's `handler`
+  runs (once per hit) → the next round keeps listening; globals persist across
+  rounds and each round's extract overwrites. Stage options and rule syntax:
   
   ```yaml
   recipe:
-  - loop: -1             # negative = infinite (until: or Ctrl+C ends; no empty)
-    until:               # optional: sniffer-style predicates; any match → finish
-    - match dns(flags=0x8180)
-    steps:
-    - packet: listen.pkt
-      wait: -1
-      extract:
-      - name: tid
+  - serve:
+    max: -1               # rounds to serve (negative = infinite, explicit; omit = infinite; no empty)
+    until:                # optional: shutdown predicates (sniffer syntax; and/or/not) —
+    - match dns(flags=0x8180)   # any matching incoming packet → finish after this round
+    delay: 0.5            # optional: pause between rounds (from round 2 on; Ctrl+C finishes early)
+    on_mismatch:          # optional: mismatch handler (runs when a packet matches no rule)
+    - packet: warn.pkt    # handler syntax; consumes no service round, then keeps listening
+    rules:                # required: rule list (at least one; after the options above)
+    - packet: listen.pkt  # rule = listen source .pkt (its sniffer: block = this rule's dispatch predicate)
+      extract:            # hit values into globals: reply.* reads the hit packet,
+      - name: tid         # reply.peer.* reads the UDP listen's socket peer
         from: reply.dns.id
-    - packet: reply.pkt
+      handler:            # steps after a hit (run once per matched packet)
+      - packet: reply.pkt
+    - packet: listen2.pkt # multiple rules = dispatch: different dports split naturally,
+      handler:            # rules on the same listen address match in declaration order
+      - packet: reply2.pkt
   ```
   
-  `loop: N` stops after N rounds (first of it and `until:` wins); `delay: secs`
-  pauses between rounds (from round 2 on; Ctrl+C finishes early); `until:`
-  predicates may reference `global(...)` (the Matcher is rebuilt each round with
-  the latest extract values), and when the matching packet is **not** a sniffer
-  hit (e.g. a shutdown packet) it is not replied to and the block ends right
-  away. Ctrl+C inside a block **finishes gracefully** (prints stats, exit code 0
-  — non-loop listen steps treat Ctrl+C as a failure). demo →
-  `examples/dns_loop_server/` (serves DNS queries in an endless loop; finishes
-  when a `flags=0x8180` shutdown packet arrives).
+  Semantics: **the listen mode is chosen automatically** — a rule packet with a
+  udp/tcp transport layer → UDP datagram listen (bind = CLI `HOST:PORT` or
+  derived from the packet's outermost udp/tcp dport), without → link-layer
+  listen; the rule's `raw: true|NIC` overrides explicitly (a multi-rule stage or
+  one with `on_mismatch:` uses **dispatch listening**: one socket matches every
+  rule in declaration order, first hit serves; all rules of a stage must be
+  datagram listens or all raw link-layer listens — mixing is an error).
+  A packet matching `until:` but
+  **not** any sniffer rule (e.g. a shutdown packet) is not replied to; the round
+  ends and the stage finishes right away. `until:` predicates may reference
+  `global(...)` (the Matcher is rebuilt each round with the latest extract
+  values). A **nested `on_recv`** (an `- on_recv:` item inside a handler) waits
+  for the **next** matching packet (single round) and runs its handler —
+  multi-step handshakes / state machines are orchestrated by nesting depth
+  (nested at most 8 levels; deeper is a parse error). The **`on_mismatch:`**
+  segment fires on unmatched packets and **consumes no service round** (max
+  counts real hits only); its steps read **the packet that triggered the
+  mismatch** via `reply.*`/`reply.peer.*` (e.g. to answer the sender with a
+  protocol-error response; the extract needs no `wait:` on the step). Inside
+  the stage the value primitives **`round()`**
+  (current round, 1 after the gate passes) and **`hits()`** (hits so far,
+  including the current hit; on_mismatch does not count) are usable in listen
+  matchers, until predicates, extracts and in-stage step expressions (e.g.
+  `raw(bytes=be16(round()))`). Ctrl+C inside the stage **finishes gracefully**
+  (prints stats, exit code 0).
+  The UDP reply send path has a ~1 s read-back window — requests arriving within
+  it are dropped (clients simply retry and hit the next round's listen). demos →
+  `examples/dns_loop_server/` (a `serve:` stage serving DNS queries endlessly;
+  finishes when a `flags=0x8180` shutdown packet arrives),
+  `examples/tcp_http_mock/` (nested on_recv multi-step handshake),
+  `examples/udp_mock/` (two `serve:` stages, each `max: 1`, dispatching DNS/VNC).
 - **Send count (`count:`)**: a step option `count: N` sends **each packet of the
   step N times** (send several packets at once; overrides the CLI `--count`,
   default 1). E.g. fire an ICMP mock request 5 times: `count: 5` (with `wait:`
@@ -1249,7 +1270,7 @@ recipe:
   validates its `reply(...)` leaves too). `packet FILE.pktl` prints the same
   param summary in its header.
 - **Examples** all follow the **mock server/client form** (a `server.pktl` recipe:
-  `wait: -1` listen + extract + triggered send steps; a `client.pktl`
+  `serve:` stage rule listen + extract + handler send steps; a `client.pktl`
   recipe: send + `wait: N` + sniffer verification + extract; full catalog in
   `examples/README.md`):
   `examples/icmp_mock/` (**ICMP mock, the form's reference**: server.pktl
@@ -1269,11 +1290,10 @@ recipe:
   banners by port),
   `examples/dns_echo_listen/` (**DNS mock**: query → A-record answer; client
   extracts and reuses `dns.id` across two steps),
-  `examples/dns_trigger/` (**listen-trigger minimal sample**: a `wait: -1` step
-  matches the query → extract → a later step sends the answer),
-  `examples/dns_loop_server/` (**looping listen server**: an endless `loop: -1`
-  wrapping listen+reply serves many requests; `until:` ends on a shutdown
-  packet),
+  `examples/dns_trigger/` (**listen-trigger minimal sample**: a `serve:` rule
+  matches the query → extract → the handler sends the answer),
+  `examples/dns_loop_server/` (**looping listen server**: a `serve:` stage with
+  multi-rule / unlimited service; `until:` ends on a shutdown packet),
   `examples/icmp_echo_server/` (**recipe-server starter**: one listen+reply group),
   `examples/tcp_handshake_listen/` (**TCP handshake mock**: listen pure SYN →
   SYN-ACK),

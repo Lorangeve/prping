@@ -1,10 +1,14 @@
-# TCP 三次握手 · 服务端配方（server.pktl）：监听触发 + extract 取值 + 触发发包。
+# TCP 三次握手 · 服务端配方（server.pktl）：serve 监听分派 + extract 取值 + 触发发包。
 #
-# 步骤 1：`wait: -1`（= 持续监听）——listen.pkt 无传输层 → 自动链路层监听
-#         完整帧，匹配纯 SYN（flags="syn"），命中后 extract 匹配帧字段写 global：
-#         客户端端口/序列号 + 双向 IP。
-# 步骤 2：触发发包——synack.pkt 构造 SYN-ACK（ack=请求 seq+1）发回请求方
-#         （raw: true：有 tcp 传输层，必须显式 raw 才不会走 TCP 载荷建连）。
+# `serve:` 阶段（阻塞至收工）：本规则 listen.pkt 无传输层 → 自动**链路层监听**
+#   完整帧，匹配纯 SYN（flags="syn"），命中后 extract 匹配帧字段写 global：
+#   客户端端口/序列号 + 双向 IP。
+#   `max: 1`：服务一轮即收工。`handler:` = 命中后步骤——synack.pkt 构造
+#   SYN-ACK（ack=请求 seq+1）发回请求方（raw: true：有 tcp 传输层，必须显式
+#   raw 才不会走 TCP 载荷建连）。
+#
+# 要连续服务更多握手：调大 `max:`（如 `max: 10`）逐轮服务即可；`max: -1` =
+# 无限服务，Ctrl+C 随时优雅收工。
 #
 # 运行（需 root；Linux AF_PACKET / macOS·Win libpcap）：
 #   sudo prping packet examples/tcp_handshake_listen/server.pktl
@@ -17,20 +21,23 @@ global:
 - r_dst_ip
 
 recipe:
-- packet: listen.pkt
-  wait: -1
-  extract:
-  - name: r_sport
-    from: reply.tcp.sport
-    as: int
-  - name: r_seq
-    from: reply.tcp.seq
-    as: int
-  - name: r_src_ip
-    from: reply.ipv4.src
-    as: str
-  - name: r_dst_ip
-    from: reply.ipv4.dst
-    as: str
-- packet: synack.pkt
-  raw: true
+- serve:
+  max: 1
+  rules:
+  - packet: listen.pkt
+    extract:
+    - name: r_sport
+      from: reply.tcp.sport
+      as: int
+    - name: r_seq
+      from: reply.tcp.seq
+      as: int
+    - name: r_src_ip
+      from: reply.ipv4.src
+      as: str
+    - name: r_dst_ip
+      from: reply.ipv4.dst
+      as: str
+    handler:
+    - packet: synack.pkt
+      raw: true

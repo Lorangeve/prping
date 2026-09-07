@@ -6,8 +6,8 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（HTTP 80 端口） | **显式两组** listen+reply：每组 = `wait: -1` 链路层监听匹配 `http(method="GET"/"POST")` → extract 客户端端口/序列号/双向 IP 写 global → 触发发包 200 OK（`ack = r_seq + 请求字节数`，见下）。两组对应 client 两步；要服务更多次就多写几组 |
-| `client.pktl` | 客户端（多包流程） | 1. 发 GET（`raw: true`）→ `wait: 2` 校验 200 OK（sniffer TCP 层 + http 内容双判据）；2. `delay: 0.5` 后发 POST（JSON body + Content-Length）→ `wait: 2` 校验 |
+| `server.pktl` | 服务端（HTTP 80 端口） | **单一 serve 阶段双规则分派**（`max: 2`）：两条链路层监听规则匹配 `http(method="GET"/"POST")` 共用一条抓包会话（按声明顺序逐个匹配、先命中先服务）→ 命中规则的 extract 写客户端端口/序列号/双向 IP → 该规则 handler 触发发包 200 OK（`ack = r_seq + 请求字节数`，见下） |
+| `client.pktl` | 客户端（多包流程） | 1. 发 GET（`raw: true`）→ `wait: 2` 校验 200 OK（sniffer TCP 层 + http 内容双判据）；2. `delay: 0.5` 后发 POST（JSON body + Content-Length）→ `wait: 2` 校验（分派监听无重绑间隙，delay 仅为可读性保留） |
 
 ## HTTP 协议速览（RFC 2616/7230）
 

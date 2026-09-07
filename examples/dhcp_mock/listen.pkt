@@ -1,4 +1,4 @@
-# dhcp_mock · server 配方 · 监听步骤（listen.pkt）：链路层持续监听 BOOTREQUEST。
+# dhcp_mock · server 配方 · serve 规则监听源（listen.pkt）：链路层监听 BOOTREQUEST。
 #
 # ── 为什么必须链路层监听（server.pktl 里显式 raw: true），而不是 UDP 数据报监听 ──
 # 引擎按「listen 包内有无 udp/tcp 传输层」自动选监听方式：本包有 udp → 自动选
@@ -41,7 +41,7 @@ sniffer:
   # 字节谓词里 startswith/endswith/contains 只接受**字符串**参数（parser.rs
   # pat_item：Tok::Str → UTF-8 字节），而 DSL 字符串转义只有 \n \r \t \\ \"
   # （lexer.rs 验证），表达不了 0x01/0x03 这类控制字节；mask 又只看首字节。
-  # 即：现有谓词无法表达 option 53 的字节模式。因此两组监听复用本文件同一条
-  # 规则、按组配对——第 1 组命中 = Discover → 回 Offer；第 2 组命中 = Request
-  # → 回 Ack（与 icmp_mock 两组 listen 用同一规则、按位置配对同款思路）。
+  # 即：现有谓词无法表达 option 53 的字节模式。因此两个 serve 阶段复用本文件
+  # 同一条规则、按阶段配对——第 1 阶段命中 = Discover → 回 Offer；第 2 阶段命中 =
+  # Request → 回 Ack（回显型同规则场景可像 icmp_mock 那样合并成单规则多轮 max: N）。
   - and(match ipv4(proto=17), match udp(sport=68, dport=67), match raw(mask(0x01)))

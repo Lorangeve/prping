@@ -1,14 +1,14 @@
-# dns_trigger：配方 `wait:` 持续监听——sniffer 匹配结果触发发包
+# dns_trigger：配方 `serve:` 监听触发——sniffer 匹配结果触发发包
 
-展示 `.pktl` 配方的**监听触发**能力：步骤选项 `wait: -1`（与 CLI 负数 `--wait`
-同语义）让该步骤不发送，用该 `.pkt` 的 sniffer 规则匹配外部到达的包，**命中后配方
-继续**（触发后续步骤发包）——一个配方就能做服务端（`--wait --raw` 是纯监听、
-不发包回应，这里由**配方后续步骤**负责发包，可编排任意多步逻辑）。
+展示 `.pktl` 配方的**监听触发**能力：`serve:` 阶段让配方阻塞监听，用规则监听源
+`.pkt`（`listen.pkt`）的 sniffer 规则匹配外部到达的包，命中后执行 `handler`
+步骤（触发发包）——一个配方就能做服务端（`--wait --raw` 是纯监听、不发包回应，
+这里由 **handler 步骤**负责发包，可编排任意多步逻辑）。
 
 ## 运行
 
 ```bash
-# 终端 1 —— 服务端（配方：wait 监听匹配查询 → 触发发包应答）
+# 终端 1 —— 服务端（配方：serve 监听匹配查询 → 触发发包应答）
 prping packet examples/dns_trigger/server.pktl
 
 # 终端 2 —— 客户端配方：发查询 + wait 校验应答
@@ -22,19 +22,23 @@ prping packet examples/dns_trigger/client.pktl 127.0.0.1:55353
 
 ```yaml
 recipe:
-- packet: listen.pkt      # 步骤 1：持续监听（不发送）
-  wait: -1                   # -1 = 持续监听直到命中（与 CLI 负数 --wait 同语义）
-  extract:                # 命中后从**匹配包**取值写 global
-  - name: tid
-    from: reply.dns.id    # 匹配包的 dns.id
-  - name: cport
-    from: reply.peer.port # 查询方的 UDP 源端口（见下）
-- packet: reply.pkt       # 步骤 2：触发发包——用 global 构造应答发回查询方
+- serve:                  # serve 阶段：监听分派 + 命中处理，阻塞至收工
+  max: 1                  # 服务一轮即收工（-1 = 无限）
+  rules:
+  - packet: listen.pkt    # 监听源：其 sniffer 即本规则的分派谓词（不发送）
+    extract:              # 命中后从**匹配包**取值写 global
+    - name: tid
+      from: reply.dns.id    # 匹配包的 dns.id
+    - name: cport
+      from: reply.peer.port # 查询方的 UDP 源端口（见下）
+    handler:              # 命中后步骤——用 global 构造应答发回查询方
+    - packet: reply.pkt
 ```
 
-- `wait:` 与 CLI `--wait` **同语义**：`wait: -1`（任意负数）= 无限等待（持续监听，
-  本步不发送，匹配外部包，命中后配方继续）；`wait: 秒数` = 发送后等一个匹配应答；
-  不写 = 纯发送。**空值非法**——字段要么不写、要么写值；
+- `serve:` 阶段阻塞至收工：`max: 1` 服务一轮；`max: -1`（负数）= 无限服务，
+  `until:` 谓词命中提前收工，Ctrl+C 优雅收工。普通步骤 `wait: 秒数` = 发送后等
+  一个匹配应答（负数已非法——持续监听由 `serve:` 接管）。**字段空值非法**——
+  要么不写、要么写值；
 - **`reply.peer.ip` / `reply.peer.port`**：UDP 监听到的是**数据报载荷**（没有
   udp 头），`reply.udp.sport` 取不到——对端地址来自 socket（`peer`），供后续
   步骤回包（`udp(dport=global("cport"))`）；
@@ -47,10 +51,10 @@ recipe:
 | --- | --- | --- |
 | 裸 `--wait`（UDP 监听，纯监听） | 无人应答 | 只打印匹配详情 |
 | `--wait --raw`（链路层监听，纯监听） | 无人应答 | 只打印匹配详情 |
-| 配方 `wait: -1`（本 demo） | **配方后续步骤** | extract → 触发任意步骤发包 |
+| 配方 `serve:`（本 demo） | **handler 步骤** | extract → 触发任意步骤发包 |
 
 ## 验证（字节级，不依赖 root/网络）
 
-`recipe_listen_triggers_next_step`（`pkg/recipe.rs` 测试）：UDP 回环——配方线程
-`wait:` 持续监听匹配 DNS 查询 → extract `reply.dns.id`/`reply.peer.port` → 后续步骤
-构造应答发回客户端 → 客户端收到应答。
+`recipe_listen_triggers_next_step`（`pkg/recipe.rs` 测试）：UDP 回环——配方
+`serve:` 阶段监听匹配 DNS 查询 → extract `reply.dns.id`/`reply.peer.port` →
+handler 构造应答发回客户端 → 客户端收到应答。

@@ -185,7 +185,7 @@ fn walk_value(v: &packet_dsl::ast::Value, out: &mut Vec<(String, Option<packet_d
     }
 }
 
-/// 聚合配方参数面：按名字排序去重，合并默认值列表与步骤索引。
+/// 聚合配方参数面：按名字排序去重，合并默认值列表与来源序号（收集序）。
 pub fn aggregate_pkt_params(
     per_step: &[Vec<(String, Option<packet_dsl::ast::Value>)>],
 ) -> Vec<(String, Vec<packet_dsl::ast::Value>, Vec<usize>)> {
@@ -205,6 +205,46 @@ pub fn aggregate_pkt_params(
     }
     let mut out: Vec<_> = map.into_iter().map(|(k, (v1, v2))| (k, v1, v2)).collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// 收集配方引用的全部 packet 路径（深度优先、不去重）：顶层步骤 `.pkg`、serve
+/// 规则 `packet`、handler 内步骤与嵌套 `on_recv`（递归）。
+///
+/// 概览参数面收集 / CLI raw-only 预检 / web 面板 decl 聚合共用，收敛同构遍历。
+pub fn recipe_pkt_paths(recipe: &crate::engine::recipe::Recipe) -> Vec<PathBuf> {
+    use crate::engine::recipe::{RecipeItem, ServeItem};
+
+    // 规则子树：自身 packet + handler 内步骤 / 嵌套 on_recv 递归
+    fn push_rule(out: &mut Vec<PathBuf>, rule: &crate::engine::recipe::ServeRule) {
+        out.push(rule.packet.clone());
+        for item in &rule.handler {
+            match item {
+                ServeItem::Step(s) => out.push(s.pkg.clone()),
+                ServeItem::OnRecv(r) => push_rule(out, r),
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for item in &recipe.items {
+        match item {
+            RecipeItem::Step(s) => out.push(s.pkg.clone()),
+            RecipeItem::Serve(serve) => {
+                for rule in &serve.rules {
+                    push_rule(&mut out, rule);
+                }
+                if let Some(items) = &serve.on_mismatch {
+                    for item in items {
+                        match item {
+                            crate::engine::recipe::ServeItem::Step(s) => out.push(s.pkg.clone()),
+                            crate::engine::recipe::ServeItem::OnRecv(r) => push_rule(&mut out, r),
+                        }
+                    }
+                }
+            }
+        }
+    }
     out
 }
 
@@ -262,68 +302,118 @@ pub(crate) fn validate_expr_reply_leaves(
     Ok(())
 }
 
+/// 单条 extract 子句的层/字段校验（顶层步骤 / serve 规则 / handler 嵌套步骤共用；
+/// 直取形态的层/字段名，字面量参数才静态校验，动态参数留给执行期报错）。
+fn validate_extract_clause(out: &mut Vec<(usize, String)>, e: &crate::engine::recipe::Extract) {
+    use crate::engine::recipe::FromSpec;
+
+    match &e.from {
+        FromSpec::PeerField { field } => {
+            if !matches!(field.as_str(), "ip" | "port") {
+                out.push((
+                    e.line,
+                    t!(
+                        "engine.recipe_peer_field_only",
+                        line = e.line,
+                        field = field
+                    )
+                    .to_string(),
+                ));
+            }
+        }
+        FromSpec::Field { layer, field } | FromSpec::SentField { layer, field } => {
+            let kind = if matches!(e.from, FromSpec::SentField { .. }) {
+                t!("engine.recipe_src_label_sent")
+            } else {
+                t!("engine.recipe_src_label_reply")
+            };
+            match crate::engine::pkg::sniffer_field_names(layer) {
+                None => out.push((
+                    e.line,
+                    t!(
+                        "engine.recipe_unknown_layer",
+                        line = e.line,
+                        kind = kind,
+                        layer = layer
+                    )
+                    .to_string(),
+                )),
+                Some(names) if !names.contains(&field.as_str()) => {
+                    out.push((
+                        e.line,
+                        t!(
+                            "engine.recipe_unknown_field",
+                            line = e.line,
+                            layer = layer,
+                            field = field,
+                            names = names.join("/")
+                        )
+                        .to_string(),
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        FromSpec::Expr(v) => {
+            if let Err(err) = validate_expr_reply_leaves(v, e.line) {
+                out.push((e.line, err.to_string()));
+            }
+        }
+    }
+}
+
+/// serve 规则的 extract 校验 + handler 递归（嵌套 `on_recv` 自身也有 extract，
+/// 与规则同构处理）。
+fn validate_serve_rule(out: &mut Vec<(usize, String)>, rule: &crate::engine::recipe::ServeRule) {
+    use crate::engine::recipe::ServeItem;
+
+    for e in &rule.extract {
+        validate_extract_clause(out, e);
+    }
+    for item in &rule.handler {
+        match item {
+            ServeItem::Step(s) => {
+                for e in &s.extract {
+                    validate_extract_clause(out, e);
+                }
+            }
+            ServeItem::OnRecv(r) => validate_serve_rule(out, r),
+        }
+    }
+}
+
 /// 配方 extract 校验（共享）：`analyze_recipe` 概览（首个错误即 bail）与
-/// LSP/web 配方诊断（全部收集为行级诊断）同一口径。直取形态的层/字段名
-/// （字面量参数才静态校验；动态参数留给执行期报错）。
-/// 返回 (行号 1 基, 本地化消息) 列表，按步骤 / 子句顺序。
+/// LSP/web 配方诊断（全部收集为行级诊断）同一口径。
+/// 返回 (行号 1 基, 本地化消息) 列表，按条目 / 子句顺序。
 pub(crate) fn validate_recipe_extract(
     recipe: &crate::engine::recipe::Recipe,
 ) -> Vec<(usize, String)> {
-    use crate::engine::recipe::FromSpec;
+    use crate::engine::recipe::RecipeItem;
 
     let mut out = Vec::new();
-    for step in &recipe.steps {
-        for e in &step.extract {
-            match &e.from {
-                FromSpec::PeerField { field } => {
-                    if !matches!(field.as_str(), "ip" | "port") {
-                        out.push((
-                            e.line,
-                            t!(
-                                "engine.recipe_peer_field_only",
-                                line = e.line,
-                                field = field
-                            )
-                            .to_string(),
-                        ));
-                    }
+    for item in &recipe.items {
+        match item {
+            RecipeItem::Step(step) => {
+                for e in &step.extract {
+                    validate_extract_clause(&mut out, e);
                 }
-                FromSpec::Field { layer, field } | FromSpec::SentField { layer, field } => {
-                    let kind = if matches!(e.from, FromSpec::SentField { .. }) {
-                        t!("engine.recipe_src_label_sent")
-                    } else {
-                        t!("engine.recipe_src_label_reply")
-                    };
-                    match crate::engine::pkg::sniffer_field_names(layer) {
-                        None => out.push((
-                            e.line,
-                            t!(
-                                "engine.recipe_unknown_layer",
-                                line = e.line,
-                                kind = kind,
-                                layer = layer
-                            )
-                            .to_string(),
-                        )),
-                        Some(names) if !names.contains(&field.as_str()) => {
-                            out.push((
-                                e.line,
-                                t!(
-                                    "engine.recipe_unknown_field",
-                                    line = e.line,
-                                    layer = layer,
-                                    field = field,
-                                    names = names.join("/")
-                                )
-                                .to_string(),
-                            ));
+            }
+            RecipeItem::Serve(serve) => {
+                for rule in &serve.rules {
+                    validate_serve_rule(&mut out, rule);
+                }
+                if let Some(items) = &serve.on_mismatch {
+                    for item in items {
+                        match item {
+                            crate::engine::recipe::ServeItem::Step(s) => {
+                                for e in &s.extract {
+                                    validate_extract_clause(&mut out, e);
+                                }
+                            }
+                            crate::engine::recipe::ServeItem::OnRecv(r) => {
+                                validate_serve_rule(&mut out, r)
+                            }
                         }
-                        Some(_) => {}
-                    }
-                }
-                FromSpec::Expr(v) => {
-                    if let Err(err) = validate_expr_reply_leaves(v, e.line) {
-                        out.push((e.line, err.to_string()));
                     }
                 }
             }
@@ -788,8 +878,186 @@ fn sniffer_pred_text(p: &packet_dsl::ast::SnifferPred) -> String {
     pred(p)
 }
 
+// ══════════════════════════════════════════════════════════════
+// 配方概览打印（条目模型：顶层步骤 / serve 阶段，规则内 handler 递归缩进）
+// ══════════════════════════════════════════════════════════════
+
+/// extract `from:` 形态的展示文本（文本概览与 JSON 输出共用，口径一致）。
+fn extract_from_text(from: &crate::engine::recipe::FromSpec) -> String {
+    use crate::engine::recipe::FromSpec;
+
+    match from {
+        FromSpec::PeerField { field } => format!("reply.peer.{field}"),
+        FromSpec::Field { layer, field } => format!("reply.{layer}.{field}"),
+        FromSpec::SentField { layer, field } => format!("sent.{layer}.{field}"),
+        FromSpec::Expr(v) => value_display(v),
+    }
+}
+
+/// extract 子句显式 `as:` 的形态名（未显式给出 = None；缺省形态由 from 形态决定）。
+fn extract_as_name(e: &crate::engine::recipe::Extract) -> Option<&'static str> {
+    use crate::engine::recipe::ExtractAs;
+
+    if !e.as_given {
+        return None;
+    }
+    Some(match e.as_ {
+        ExtractAs::Int => "int",
+        ExtractAs::Hex => "hex",
+        ExtractAs::Str => "str",
+        ExtractAs::Bytes => "bytes",
+    })
+}
+
+/// 步骤/规则 `raw:` 覆盖的展示文本（`true` / `false` / 网卡名）。
+fn step_raw_text(raw: &crate::engine::recipe::StepRaw) -> String {
+    use crate::engine::recipe::StepRaw;
+
+    match raw {
+        StepRaw::On { iface } => match iface {
+            Some(i) => i.clone(),
+            None => "true".to_string(),
+        },
+        StepRaw::Off => "false".to_string(),
+    }
+}
+
+/// 单个步骤的概览打印（顶层条目与 serve handler 内步骤共用；`level` = 条目头
+/// 缩进层级，选项行再深一层；`n` = 所在列表的 1 基序号）。
+fn print_step_overview(
+    w: &mut StandardStream,
+    step: &crate::engine::recipe::Step,
+    n: usize,
+    level: usize,
+) -> anyhow::Result<()> {
+    use crate::engine::recipe::{OnError, OnTimeout};
+
+    print_green(
+        w,
+        format!("{}step {}: {}", indent(level), n, step.pkg.display()),
+    )?;
+    writeln!(w)?;
+    // wait：非负秒数（None = 纯发送；持续监听已由 serve: 阶段接管）
+    if let Some(secs) = step.wait {
+        print_dim(w, format!("{}wait: {secs}s", indent(level + 1)))?;
+        writeln!(w)?;
+    }
+    if let Some(ot) = &step.on_timeout {
+        let desc = match ot {
+            OnTimeout::Retry(retries) => format!("retry {retries}"),
+            OnTimeout::Packet(f) => f.display().to_string(),
+        };
+        print_dim(w, format!("{}on_timeout: {desc}", indent(level + 1)))?;
+        writeln!(w)?;
+    }
+    if let Some(n) = step.count {
+        print_dim(w, format!("{}count: {n}", indent(level + 1)))?;
+        writeln!(w)?;
+    }
+    if let Some(secs) = step.delay {
+        print_dim(w, format!("{}delay: {secs}s", indent(level + 1)))?;
+        writeln!(w)?;
+    }
+    if let Some(raw) = &step.raw {
+        print_dim(
+            w,
+            format!("{}raw: {}", indent(level + 1), step_raw_text(raw)),
+        )?;
+        writeln!(w)?;
+    }
+    if !step.params.is_empty() {
+        let ps: Vec<String> = step
+            .params
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        print_dim(w, format!("{}params: {}", indent(level + 1), ps.join(", ")))?;
+        writeln!(w)?;
+    }
+    for e in &step.extract {
+        let as_desc = match extract_as_name(e) {
+            Some(as_name) => format!(" ({as_name})"),
+            None => String::new(),
+        };
+        print_dim(
+            w,
+            format!(
+                "{}extract: {} ← {}{as_desc}",
+                indent(level + 1),
+                e.name,
+                extract_from_text(&e.from)
+            ),
+        )?;
+        writeln!(w)?;
+    }
+    let on_error = match step.on_error {
+        OnError::Stop => "stop",
+        OnError::Continue => "continue",
+    };
+    print_dim(w, format!("{}on_error: {on_error}", indent(level + 1)))?;
+    writeln!(w)?;
+    Ok(())
+}
+
+/// serve 规则的概览打印（规则表项与嵌套 on_recv 共用）：监听源 + raw 覆盖 +
+/// 静态 params + extract，handler 内步骤 / 嵌套 on_recv 再缩进一层。规则无 wait
+/// （监听持续到 max/until 收工）。
+fn print_rule_overview(
+    w: &mut StandardStream,
+    rule: &crate::engine::recipe::ServeRule,
+    label: &str,
+    level: usize,
+) -> anyhow::Result<()> {
+    use crate::engine::recipe::ServeItem;
+
+    print_green(
+        w,
+        format!("{}{label}: {}", indent(level), rule.packet.display()),
+    )?;
+    writeln!(w)?;
+    if let Some(raw) = &rule.raw {
+        print_dim(
+            w,
+            format!("{}raw: {}", indent(level + 1), step_raw_text(raw)),
+        )?;
+        writeln!(w)?;
+    }
+    if !rule.params.is_empty() {
+        let ps: Vec<String> = rule
+            .params
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        print_dim(w, format!("{}params: {}", indent(level + 1), ps.join(", ")))?;
+        writeln!(w)?;
+    }
+    for e in &rule.extract {
+        let as_desc = match extract_as_name(e) {
+            Some(as_name) => format!(" ({as_name})"),
+            None => String::new(),
+        };
+        print_dim(
+            w,
+            format!(
+                "{}extract: {} ← {}{as_desc}",
+                indent(level + 1),
+                e.name,
+                extract_from_text(&e.from)
+            ),
+        )?;
+        writeln!(w)?;
+    }
+    for (j, item) in rule.handler.iter().enumerate() {
+        match item {
+            ServeItem::Step(s) => print_step_overview(w, s, j + 1, level + 1)?,
+            ServeItem::OnRecv(r) => print_rule_overview(w, r, "on_recv", level + 1)?,
+        }
+    }
+    Ok(())
+}
+
 pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
-    use crate::engine::recipe::{ExtractAs, FromSpec, OnError};
+    use crate::engine::recipe::RecipeItem;
 
     let recipe = crate::engine::recipe::parse(path)?;
     // 校验 extract 的层/字段名（执行期同样报错，这里提前暴露笔误）——校验逻辑
@@ -797,26 +1065,28 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
     if let Some((_, message)) = validate_recipe_extract(&recipe).first() {
         anyhow::bail!("{message}");
     }
-    // 步骤 .pkt 用到的 params（词法收集 `params("名", 默认)`）。解析失败 = 配方在
-    // 执行期同样失败，概览提前暴露（与 extract 字段校验同一「提前报错」哲学）。
-    let mut per_step: Vec<Vec<(String, Option<packet_dsl::ast::Value>)>> = Vec::new();
-    for (i, step) in recipe.steps.iter().enumerate() {
-        let used = collect_pkt_params(&step.pkg).map_err(|e| {
+    // 全部 packet 的 params（词法收集 `params("名", 默认)`）：顶层步骤 + serve
+    // 规则 + handler/on_recv 递归（recipe_pkt_paths 深度优先）。收集失败 = 配方
+    // 在执行期同样失败，概览提前暴露（与 extract 字段校验同一「提前报错」哲学）。
+    let pkts = recipe_pkt_paths(&recipe);
+    let mut per_pkt: Vec<Vec<(String, Option<packet_dsl::ast::Value>)>> = Vec::new();
+    for (i, pkt) in pkts.iter().enumerate() {
+        let used = collect_pkt_params(pkt).map_err(|e| {
             anyhow::anyhow!(
                 "{}",
                 t!(
                     "engine.recipe_collect_params_fail",
                     file = path.display(),
                     step = i + 1,
-                    total = recipe.steps.len(),
-                    pkt = step.pkg.display(),
+                    total = pkts.len(),
+                    pkt = pkt.display(),
                     err = e
                 )
             )
         })?;
-        per_step.push(used);
+        per_pkt.push(used);
     }
-    let params_agg = aggregate_pkt_params(&per_step);
+    let params_agg = aggregate_pkt_params(&per_pkt);
     if crate::stats::json() {
         let mut w = StandardStream::stdout(ColorChoice::Auto);
         return analyze_recipe_json(&mut w, path, &recipe, &params_agg);
@@ -824,12 +1094,19 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
     let mut w = StandardStream::stdout(ColorChoice::Auto);
     print_magenta(&mut w, "prping engine recipe")?;
     writeln!(&mut w)?;
+    // 顶层条目分类计数（handler 内步骤归属其 serve，不重复计入）
+    let top_steps = recipe
+        .items
+        .iter()
+        .filter(|it| matches!(it, RecipeItem::Step(_)))
+        .count();
     print_cyan(
         &mut w,
         format!(
-            "{} — {} step(s), {} global(s), {} param(s)",
+            "{} — {} step(s), {} serve(s), {} global(s), {} param(s)",
             path.display(),
-            recipe.steps.len(),
+            top_steps,
+            recipe.items.len() - top_steps,
             recipe.globals.len(),
             params_agg.len()
         ),
@@ -876,141 +1153,139 @@ pub fn analyze_recipe(path: &Path) -> anyhow::Result<()> {
         }
         writeln!(&mut w)?;
     }
-    // loop 块分组：块首步前打印 loop 头（次数 / until / 轮间延迟），块内步骤缩进
-    let mut last_loop: Option<usize> = None;
-    for (i, step) in recipe.steps.iter().enumerate() {
-        let loop_ind = if step.loop_ctx.is_some() { 2 } else { 1 };
-        if let Some(ctx) = &step.loop_ctx {
-            if last_loop != Some(ctx.id) {
-                let times = match ctx.count {
+    // 条目遍历：顶层步骤照旧打印；serve 阶段打印头（max/until/delay）后逐规则
+    // 展开（handler 内步骤与嵌套 on_recv 逐层缩进）。
+    for (i, item) in recipe.items.iter().enumerate() {
+        match item {
+            RecipeItem::Step(step) => print_step_overview(&mut w, step, i + 1, 0)?,
+            RecipeItem::Serve(serve) => {
+                // serve 头：max（None = 无限）+ 轮间延迟（沿用原 loop 头措辞）
+                let times = match serve.max {
                     Some(n) => format!("{n}x"),
                     None => "infinite".to_string(),
                 };
-                let mut head = format!("loop {}: {times}", ctx.id + 1);
-                if let Some(secs) = ctx.delay {
+                let mut head = format!("serve {}: {times}", i + 1);
+                if let Some(secs) = serve.delay {
                     head.push_str(&format!(" (delay {secs}s between rounds)"));
                 }
                 print_green(&mut w, head)?;
                 writeln!(&mut w)?;
-                if let Some(preds) = &ctx.until {
+                if let Some(preds) = &serve.until {
                     for p in preds {
                         print_dim(&mut w, format!("{}until: {p}", indent(1)))?;
                         writeln!(&mut w)?;
                     }
                 }
-                last_loop = Some(ctx.id);
+                for (k, rule) in serve.rules.iter().enumerate() {
+                    print_rule_overview(&mut w, rule, &format!("rule {}", k + 1), 1)?;
+                }
             }
-        } else {
-            last_loop = None;
         }
-        print_green(
-            &mut w,
-            format!(
-                "{}step {}: {}",
-                indent(if step.loop_ctx.is_some() { 1 } else { 0 }),
-                i + 1,
-                step.pkg.display()
-            ),
-        )?;
-        writeln!(&mut w)?;
-        if let Some(mode) = step.wait {
-            let desc = match mode {
-                crate::engine::pkg::WaitMode::Continuous => "infinite (-1)".to_string(),
-                crate::engine::pkg::WaitMode::OneShot(secs) => format!("{secs}s"),
-                crate::engine::pkg::WaitMode::Off => "off".to_string(),
-            };
-            print_dim(&mut w, format!("{}wait: {desc}", indent(loop_ind)))?;
-            writeln!(&mut w)?;
-        }
-        if let Some(ot) = &step.on_timeout {
-            let desc = match ot {
-                crate::engine::recipe::OnTimeout::Retry(n) => format!("retry {n}"),
-                crate::engine::recipe::OnTimeout::Packet(f) => f.display().to_string(),
-            };
-            print_dim(&mut w, format!("{}on_timeout: {desc}", indent(loop_ind)))?;
-            writeln!(&mut w)?;
-        }
-        if let Some(n) = step.count {
-            print_dim(&mut w, format!("{}count: {n}", indent(loop_ind)))?;
-            writeln!(&mut w)?;
-        }
-        if let Some(secs) = step.delay {
-            print_dim(&mut w, format!("{}delay: {secs}s", indent(loop_ind)))?;
-            writeln!(&mut w)?;
-        }
-        if let Some(raw) = &step.raw {
-            let desc = match raw {
-                crate::engine::recipe::StepRaw::On { iface } => match iface {
-                    Some(i) => format!("raw: {i}"),
-                    None => "raw: true".to_string(),
-                },
-                crate::engine::recipe::StepRaw::Off => "raw: false".to_string(),
-            };
-            print_dim(&mut w, format!("{}{desc}", indent(loop_ind)))?;
-            writeln!(&mut w)?;
-        }
-        if !step.params.is_empty() {
-            let ps: Vec<String> = step
-                .params
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect();
-            print_dim(
-                &mut w,
-                format!("{}params: {}", indent(loop_ind), ps.join(", ")),
-            )?;
-            writeln!(&mut w)?;
-        }
-        for e in &step.extract {
-            let as_name = match e.as_ {
-                ExtractAs::Int => "int",
-                ExtractAs::Hex => "hex",
-                ExtractAs::Str => "str",
-                ExtractAs::Bytes => "bytes",
-            };
-            let from_desc = match &e.from {
-                FromSpec::PeerField { field } => format!("reply.peer.{field}"),
-                FromSpec::Field { layer, field } => format!("reply.{layer}.{field}"),
-                FromSpec::SentField { layer, field } => format!("sent.{layer}.{field}"),
-                FromSpec::Expr(v) => value_display(v),
-            };
-            let as_desc = if e.as_given {
-                format!(" ({as_name})")
-            } else {
-                String::new()
-            };
-            print_dim(
-                &mut w,
-                format!(
-                    "{}extract: {} ← {from_desc}{as_desc}",
-                    indent(loop_ind),
-                    e.name
-                ),
-            )?;
-            writeln!(&mut w)?;
-        }
-        let on_error = match step.on_error {
-            OnError::Stop => "stop",
-            OnError::Continue => "continue",
-        };
-        print_dim(&mut w, format!("{}on_error: {on_error}", indent(loop_ind)))?;
-        writeln!(&mut w)?;
     }
     Ok(())
 }
 
+// ══════════════════════════════════════════════════════════════
+// 配方概览 JSON 构造（条目模型：step / serve 条目，规则内 handler 同构递归）
+// ══════════════════════════════════════════════════════════════
+
+/// `raw:` 覆盖 → JSON（`"true"` / `"false"` / 网卡名；未写 = null 由调用方处理）。
+fn step_raw_json(raw: &crate::engine::recipe::StepRaw) -> Value {
+    use crate::engine::recipe::StepRaw;
+
+    match raw {
+        StepRaw::On { iface } => match iface {
+            Some(i) => json!(i),
+            None => json!("true"),
+        },
+        StepRaw::Off => json!("false"),
+    }
+}
+
+/// 静态 params 列表 → JSON 对象（k=v；沿用原 `--json` 的对象形态）。
+fn params_map_json(params: &[(String, String)]) -> Map<String, Value> {
+    params
+        .iter()
+        .map(|(k, v)| (k.clone(), json!(v.clone())))
+        .collect()
+}
+
+/// extract 子句列表 → JSON 数组（from 展示文本 + 显式 as 形态名，缺省 = null）。
+fn extract_list_json(extract: &[crate::engine::recipe::Extract]) -> Vec<Value> {
+    extract
+        .iter()
+        .map(|e| {
+            json!({
+                "name": e.name,
+                "from": extract_from_text(&e.from),
+                "as": extract_as_name(e),
+            })
+        })
+        .collect()
+}
+
+/// 步骤条目 → JSON（顶层与 handler 内同构；`n` = 所在列表的 1 基序号）。
+fn recipe_step_json(s: &crate::engine::recipe::Step, n: usize) -> Value {
+    use crate::engine::recipe::{OnError, OnTimeout};
+
+    json!({
+        "type": "step",
+        "n": n,
+        "pkt": s.pkg.display().to_string(),
+        // wait：非负秒数（数值或 null；持续监听由 serve 阶段表达，不再有 "infinite"）
+        "wait": s.wait,
+        "on_timeout": match &s.on_timeout {
+            Some(OnTimeout::Retry(retries)) => json!({"retry": retries}),
+            Some(OnTimeout::Packet(f)) => json!({"packet": f.display().to_string()}),
+            None => json!(null),
+        },
+        "count": s.count,
+        "delay": s.delay,
+        "raw": s.raw.as_ref().map(step_raw_json),
+        "params": params_map_json(&s.params),
+        "extract": extract_list_json(&s.extract),
+        "on_error": match s.on_error { OnError::Stop => "stop", OnError::Continue => "continue" },
+    })
+}
+
+/// serve 规则 → JSON（规则表项与嵌套 on_recv 共用，`kind` 区分；handler 内
+/// 步骤 / 嵌套 on_recv 同构递归）。
+fn recipe_rule_json(rule: &crate::engine::recipe::ServeRule, kind: &str) -> Value {
+    use crate::engine::recipe::ServeItem;
+
+    let handler: Vec<Value> = rule
+        .handler
+        .iter()
+        .enumerate()
+        .map(|(j, item)| match item {
+            ServeItem::Step(s) => recipe_step_json(s, j + 1),
+            ServeItem::OnRecv(r) => recipe_rule_json(r, "on_recv"),
+        })
+        .collect();
+    json!({
+        "type": kind,
+        "pkt": rule.packet.display().to_string(),
+        "raw": rule.raw.as_ref().map(step_raw_json),
+        "params": params_map_json(&rule.params),
+        "extract": extract_list_json(&rule.extract),
+        "handler": handler,
+    })
+}
+
 /// `--json`：.pktl 配方概览的结构化输出（单个 JSON 文档）。
 ///
-/// 结构与文本概览对应：globals（含 init）、params（缺省值 / 必需）、steps（wait /
-/// delay / raw 覆盖 / 静态 params / extract 子句 / on_error）。校验（extract 层字段、
-/// 步骤参数）与文本路径完全一致，先校验后输出。
+/// 结构与文本概览对应：globals（含 init）、params（缺省值 / 必需）、items 条目
+/// 数组——`{"type":"step", …}`（wait 为数值或 null）或 `{"type":"serve",
+/// max/until/delay, rules:[…]}`（规则内 handler 同构递归：步骤条目与 on_recv
+/// 规则条目）。校验（extract 层字段、步骤参数）与文本路径完全一致，先校验后输出。
 fn analyze_recipe_json(
     w: &mut StandardStream,
     path: &Path,
     recipe: &crate::engine::recipe::Recipe,
     params_agg: &[(String, Vec<packet_dsl::ast::Value>, Vec<usize>)],
 ) -> anyhow::Result<()> {
-    use crate::engine::recipe::{ExtractAs, FromSpec, OnError, StepRaw};
+    use crate::engine::recipe::RecipeItem;
+
     let mut doc = Map::new();
     doc.insert("tool".into(), json!("prping"));
     doc.insert("cmd".into(), json!("engine"));
@@ -1030,84 +1305,31 @@ fn analyze_recipe_json(
         })
         .collect();
     doc.insert("params".into(), json!(params));
-    let steps: Vec<Value> = recipe
-        .steps
+    let items: Vec<Value> = recipe
+        .items
         .iter()
         .enumerate()
-        .map(|(i, s)| {
-            let raw = s.raw.as_ref().map(|r| match r {
-                StepRaw::On { iface } => match iface {
-                    Some(i) => json!(i),
-                    None => json!("true"),
-                },
-                StepRaw::Off => json!("false"),
-            });
-            let sp: Map<String, Value> = s
-                .params
-                .iter()
-                .map(|(k, v)| (k.clone(), json!(v.clone())))
-                .collect();
-            let extract: Vec<Value> = s
-                .extract
-                .iter()
-                .map(|e| {
-                    let from = match &e.from {
-                        FromSpec::PeerField { field } => format!("reply.peer.{field}"),
-                        FromSpec::Field { layer, field } => format!("reply.{layer}.{field}"),
-                        FromSpec::SentField { layer, field } => format!("sent.{layer}.{field}"),
-                        FromSpec::Expr(v) => value_display(v),
-                    };
-                    let as_name = if e.as_given {
-                        Some(match e.as_ {
-                            ExtractAs::Int => "int",
-                            ExtractAs::Hex => "hex",
-                            ExtractAs::Str => "str",
-                            ExtractAs::Bytes => "bytes",
-                        })
-                    } else {
-                        None
-                    };
-                    json!({ "name": e.name, "from": from, "as": as_name })
+        .map(|(i, item)| match item {
+            RecipeItem::Step(s) => recipe_step_json(s, i + 1),
+            RecipeItem::Serve(serve) => {
+                let rules: Vec<Value> = serve
+                    .rules
+                    .iter()
+                    .map(|r| recipe_rule_json(r, "rule"))
+                    .collect();
+                json!({
+                    "type": "serve",
+                    "n": i + 1,
+                    "max": serve.max,
+                    "until": serve.until,
+                    "delay": serve.delay,
+                    "on_mismatch": serve.on_mismatch.as_ref().map(|m| !m.is_empty()),
+                    "rules": rules,
                 })
-                .collect();
-            json!({
-                "n": i + 1,
-                "pkt": s.pkg.display().to_string(),
-                "wait": match s.wait {
-                    Some(crate::engine::pkg::WaitMode::Continuous) => json!("infinite"),
-                    Some(crate::engine::pkg::WaitMode::OneShot(secs)) => json!(secs),
-                    Some(crate::engine::pkg::WaitMode::Off) | None => json!(null),
-                },
-                "on_timeout": match &s.on_timeout {
-                    Some(crate::engine::recipe::OnTimeout::Retry(n)) => {
-                        json!({"retry": n})
-                    }
-                    Some(crate::engine::recipe::OnTimeout::Packet(f)) => {
-                        json!({"packet": f.display().to_string()})
-                    }
-                    None => json!(null),
-                },
-                "count": s.count,
-                "delay": s.delay,
-                "raw": raw,
-                "params": sp,
-                "extract": extract,
-                "on_error": match s.on_error { OnError::Stop => "stop", OnError::Continue => "continue" },
-                "loop": match &s.loop_ctx {
-                    Some(ctx) => json!({
-                        "id": ctx.id + 1,
-                        "count": ctx.count,
-                        "until": ctx.until,
-                        "delay": ctx.delay,
-                        "first": ctx.first,
-                        "last": ctx.last,
-                    }),
-                    None => json!(null),
-                },
-            })
+            }
         })
         .collect();
-    doc.insert("steps".into(), json!(steps));
+    doc.insert("items".into(), json!(items));
     serde_json::to_writer(&mut *w, &Value::Object(doc))?;
     writeln!(w)?;
     Ok(())

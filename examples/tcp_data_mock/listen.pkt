@@ -1,4 +1,4 @@
-# server 配方 · 步骤 1：链路层持续监听（wait: -1 + raw: true）——匹配「携带数据的 TCP 段」。
+# server 配方 · serve 规则监听源：链路层监听——匹配「携带数据的 TCP 段」。
 #
 # 监听方式选择：包体只有 ipv4（无 udp/tcp 传输层）→ 自动选**链路层监听**完整帧
 # （帧内 ipv4/tcp 字段齐全，sniffer 可直接匹配 tcp.* 字段；需 root/管理员抓包）。

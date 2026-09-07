@@ -3,8 +3,9 @@
 # 步骤 1：发 echo request（id=0x1234, seq=1）→ `wait: 2` 校验 server 配方的
 #         echo reply（sniffer 匹配 type=0 + id/seq，seq 带配方标记 1001）→
 #         extract reply.icmp.id 写 global.cid。
-# 步骤 2：`delay: 0.5` 给 server 配方留出重开下一轮抓包的时间（回环上 client
-#         全程 <1ms 就跑完，不加 delay 会在 server 下一轮监听就绪前就错过 req2，
+# 步骤 2：`delay: 0.5` 给 server 配方留出下一轮监听就绪的时间（serve 轮次串行：
+#         命中 → 回包 → 下一轮；回环上 client 全程 <1ms 就跑完，不加 delay 会在
+#         server 下一轮监听就绪前就错过 req2，
 #         导致只命中 3 条）。再发 echo request（seq=2，sniffer 期望 1002）→ `wait: 2` 校验。
 #
 # 为什么 seq 期望 1001/1002：回环上内核会替答 ICMP echo（macOS/Linux 都回 type=0

@@ -1,20 +1,24 @@
 # TCP+HTTP mock · 服务端配方（server.pktl）：一个 pktl 就是一个「TCP 握手 + HTTP
-# 静态页」服务端。配方显式列出**两组**监听+应答步骤（pktl 可含任意多包），
-# 每组对应 client.pktl 的一步：
+# 静态页」服务端。`serve:` 阶段（阻塞至收工）单条规则 + **嵌套 on_recv** 编排
+# 多步握手状态机，对应 client.pktl 的三步：
 #
-#   第 1 组（对应 client 步骤 1 发 SYN）：
-#     listen_syn.pkt —— wait: -1（= 持续监听）链路层匹配纯 SYN（flags="syn"），
-#                       命中后 extract 请求方端口/ISN/双向 IP 写 global；
-#     synack.pkt     —— 触发发包：SYN-ACK（ack=请求 seq+1，固定服务端 ISN 0x2000）。
-#   第 2 组（对应 client 步骤 3 发 GET；client 步骤 2 的纯 ACK 无应答、也无监听——
-#            第三次握手本来就无应答，两个配方对此的理解刻意一致）：
-#     listen_get.pkt —— 链路层匹配 http(method="GET")（dport=80 端口分派），
-#                       extract 客户端端口/GET 的 seq/ack/双向 IP 写 global；
-#     http_resp.pkt  —— 触发发包：200 OK（seq=GET 的 ack，ack=GET 的 seq+38）。
+#   规则（对应 client 步骤 1 发 SYN）：listen_syn.pkt——链路层监听匹配纯 SYN
+#     （flags="syn"），命中后 extract 请求方端口/ISN/双向 IP 写 global；
+#     handler 第一步 synack.pkt——触发发包：SYN-ACK（ack=请求 seq+1，固定服务端
+#     ISN 0x2000）。
+#   handler 第二步 `on_recv:` 嵌套（对应 client 步骤 3 发 GET；client 步骤 2 的
+#     纯 ACK 无应答、也无监听——第三次握手本来就无应答，两个配方对此的理解刻意
+#     一致）——SYN-ACK 发出后**等待下一个包**（单轮）：listen_get.pkt 链路层匹配
+#     http(method="GET")（dport=80 端口分派），extract 客户端端口/GET 的 seq/ack/
+#     双方 IP 写 global（r2_*），命中后执行嵌套 handler：http_resp.pkt——触发
+#     发包 200 OK（seq=GET 的 ack，ack=GET 的 seq+38）。
+#   `max: 1`：服务一轮完整握手即收工。要连续服务更多握手：调大 `max:`
+#   （`max: -1` = 无限，Ctrl+C 优雅收工）。
 #
-# 注意：client 步骤 2/3 带 delay: 0.5——本配方每组命中后都要重新打开下一轮抓包
-# （pcap 设备枚举 + BPF），回环上 client 全程亚毫秒，不加 delay 会错过第二个包
-# （经验来自 examples/icmp_mock/README「为什么 seq 是 1001/1002」一节）。
+# 注意：client 步骤 2/3 带 delay: 0.5——handler 各步之间监听要重新就绪（SYN 命中
+# 后回包，再等 GET；GET 的监听在 on_recv 里重新打开），回环上 client 全程亚毫秒，
+# 不加 delay 会错过第二个包（经验来自 examples/icmp_mock/README「为什么 seq 是
+# 1001/1002」一节）。
 #
 # 运行（需 root；Linux AF_PACKET 链路层抓包 + raw socket 发包）：
 #   sudo prping packet examples/tcp_http_mock/server.pktl
@@ -32,42 +36,46 @@ global:
 - r2_dst_ip
 
 recipe:
-# ── 第 1 组：监听纯 SYN → extract → 触发发包 SYN-ACK（client 步骤 1）──
-- packet: listen_syn.pkt
-  wait: -1
-  extract:
-  - name: r_sport
-    from: reply.tcp.sport
-    as: int
-  - name: r_seq
-    from: reply.tcp.seq
-    as: int
-  - name: r_src_ip
-    from: reply.ipv4.src
-    as: str
-  - name: r_dst_ip
-    from: reply.ipv4.dst
-    as: str
-- packet: synack.pkt
-  raw: true
-# ── 第 2 组：监听 http GET → extract → 触发发包 200 OK（client 步骤 3）──
-- packet: listen_get.pkt
-  wait: -1
-  extract:
-  - name: r2_sport
-    from: reply.tcp.sport
-    as: int
-  - name: r2_seq
-    from: reply.tcp.seq
-    as: int
-  - name: r2_ack
-    from: reply.tcp.ack
-    as: int
-  - name: r2_src_ip
-    from: reply.ipv4.src
-    as: str
-  - name: r2_dst_ip
-    from: reply.ipv4.dst
-    as: str
-- packet: http_resp.pkt
-  raw: true
+- serve:
+  max: 1
+  rules:
+  - packet: listen_syn.pkt
+    extract:
+    - name: r_sport
+      from: reply.tcp.sport
+      as: int
+    - name: r_seq
+      from: reply.tcp.seq
+      as: int
+    - name: r_src_ip
+      from: reply.ipv4.src
+      as: str
+    - name: r_dst_ip
+      from: reply.ipv4.dst
+      as: str
+    handler:
+    # ── 命中 SYN → 先回 SYN-ACK（client 步骤 1）──
+    - packet: synack.pkt
+      raw: true
+    # ── 再等下一个包（GET）→ extract → 触发发包 200 OK（client 步骤 3）──
+    - on_recv:
+        packet: listen_get.pkt
+        extract:
+        - name: r2_sport
+          from: reply.tcp.sport
+          as: int
+        - name: r2_seq
+          from: reply.tcp.seq
+          as: int
+        - name: r2_ack
+          from: reply.tcp.ack
+          as: int
+        - name: r2_src_ip
+          from: reply.ipv4.src
+          as: str
+        - name: r2_dst_ip
+          from: reply.ipv4.dst
+          as: str
+        handler:
+        - packet: http_resp.pkt
+          raw: true

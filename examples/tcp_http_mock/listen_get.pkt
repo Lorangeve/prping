@@ -1,4 +1,4 @@
-# server 配方 · 第 2 组步骤 1：链路层持续监听——匹配握手完成后的 HTTP GET 请求。
+# server 配方 · 嵌套 on_recv 规则监听源：链路层监听——匹配握手完成后的 HTTP GET 请求。
 #
 # 为什么 sniffer 能直接写 http(method="GET")——http 层反解分派（eng_lib/headers.pkt
 # #[proto(kind="http")] 的两条规则）：

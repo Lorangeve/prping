@@ -1,5 +1,5 @@
-# DHCP 流程步骤 2：DHCP Offer（服务端提供 IP）——dhcp_mock server 配方第 1 组
-# listen 命中后的触发发包步骤（由 server.pktl 编排，不单独跑）。
+# DHCP 流程步骤 2：DHCP Offer（服务端提供 IP）——dhcp_mock server 配方第 1 阶段
+# 命中后的 handler 发包步骤（由 server.pktl 编排，不单独跑）。
 #
 # DHCP Offer 是服务端对 Discover 的响应：
 #   - 包含分配给客户端的 IP 地址 (yiaddr)

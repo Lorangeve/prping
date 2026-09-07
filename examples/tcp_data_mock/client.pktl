@@ -5,8 +5,9 @@
 #         ack=0x102D=seq+45）→ extract reply.tcp.seq 写 global.sseq（服务端序号，
 #         步骤 2 的确认号推导用）。内核对未监听端口的 RST 不会误命中（flags 字节
 #         0x04≠0x10，见 tcp_data.pkt 注释）。
-# 步骤 2：delay: 0.5 给 server 配方留出重开下一轮抓包的时间（回环上 client 亚毫秒
-#         就跑完，不加 delay 会在 server 下一轮监听就绪前错过第二个数据段；经验见
+# 步骤 2：delay: 0.5 给 server 配方留出下一轮监听就绪的时间（serve 轮次串行，
+#         回环上 client 亚毫秒就跑完，不加 delay 会在 server 下一轮监听就绪前错过
+#         第二个数据段；经验见
 #         icmp_mock README「为什么 seq 是 1001/1002」）。再发数据段（seq=0x102D
 #         = 上一段 seq+45；ack=global("sseq")+1 = 步骤 1 提取的服务端 seq 推导）
 #         → wait: 2 校验第二轮 ACK（ack=0x105A=0x102D+45）。

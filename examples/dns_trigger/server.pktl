@@ -1,9 +1,13 @@
-# 服务端配方：wait 持续监听触发发包。
+# 服务端配方：serve 监听触发发包。
 #
-# 步骤 1：`wait: -1`（与 CLI 裸 `--wait` 同语义）= 持续监听——本步不发送，
-#   监听 UDP 55353，sniffer 匹配 DNS 查询；命中后 extract 匹配包字段写 global
-#   （tid=查询 id、cport=查询方端口），配方继续。
-# 步骤 2：触发发包——reply.pkt 用 global 构造 DNS 应答发回查询方。
+# `serve:` 阶段（阻塞至收工）：本规则 listen.pkt 有 udp 传输层 → 自动 **UDP
+#   数据报监听** :55353（绑定地址由包内 dport 推导），其 sniffer 匹配 DNS 查询；
+#   命中后 extract 匹配包字段写 global（tid=查询 id、cport=查询方端口）。
+#   `max: 1`：服务一轮即收工。`handler:` = 命中后步骤——reply.pkt 用 global
+#   构造 DNS 应答发回查询方。
+#
+# 要连续服务更多查询：调大 `max:`（如 `max: -1` = 无限服务），Ctrl+C 随时
+# 优雅收工（打印统计、退出码 0）。
 #
 # 运行（终端 1）：prping packet examples/dns_trigger/server.pktl
 # 客户端（终端 2）：prping packet --wait 2 examples/dns_trigger/client.pkt 127.0.0.1:55353
@@ -12,13 +16,16 @@ global:
 - cport
 
 recipe:
-- packet: listen.pkt
-  wait: -1
-  extract:
-  - name: tid
-    from: reply.dns.id
-    as: int
-  - name: cport
-    from: reply.peer.port
-    as: int
-- packet: reply.pkt
+- serve:
+  max: 1
+  rules:
+  - packet: listen.pkt
+    extract:
+    - name: tid
+      from: reply.dns.id
+      as: int
+    - name: cport
+      from: reply.peer.port
+      as: int
+    handler:
+    - packet: reply.pkt

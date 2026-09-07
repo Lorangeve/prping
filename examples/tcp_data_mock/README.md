@@ -7,10 +7,10 @@ icmp_mock 同构的 mock 服务端/客户端形态：
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（数据确认服务） | **显式两组** listen+reply：每组 = `wait: -1` 链路层监听匹配 PSH|ACK 数据段 → extract 端口/seq/双向 IP 写 global → 触发发包纯 ACK（ack = 本轮 r_seq + 45）。两组对应 client 两步；要服务更多次就多写几组 |
+| `server.pktl` | 服务端（数据确认服务） | `serve:` 阶段单条规则逐轮服务（`max: 2`）：链路层监听匹配 PSH|ACK 数据段 → extract 端口/seq/双向 IP 写 global → handler 触发发包纯 ACK（ack = 本轮 r_seq + 45）。两轮对应 client 两步；要服务更多次调大 `max:`（`-1` = 无限） |
 | `client.pktl` | 客户端（两步数据发送） | 1. 发数据段（seq=0x1000，载荷 45 字节）→ `wait: 2` 校验纯 ACK（ack=0x102D）→ extract reply.tcp.seq 写 global.sseq；2. `delay: 0.5` 后发第二个数据段（seq=0x102D，ack=sseq+1——**用第一轮 ACK 提取的服务端 seq 动态构造确认号**）→ `wait: 2` 校验（ack=0x105A） |
-| `listen.pkt` | server 步骤 1 | 链路层监听包体（仅 ipv4，无传输层）+ sniffer：`match tcp(flags=bor(psh(), ack()))` |
-| `tcp_ack.pkt` | server 步骤 2 | 纯 ACK 确认段（seq=0x2000，ack=global("r_seq") + 45，window=65535） |
+| `listen.pkt` | server 规则监听源 | 链路层监听包体（仅 ipv4，无传输层）+ sniffer：`match tcp(flags=bor(psh(), ack()))` |
+| `tcp_ack.pkt` | server handler 步骤 | 纯 ACK 确认段（seq=0x2000，ack=global("r_seq") + 45，window=65535） |
 | `tcp_data.pkt` | client 步骤 1 | 数据段 PSH|ACK（seq=0x1000，ack=0x2001）+ wait sniffer |
 | `tcp_data2.pkt` | client 步骤 2 | 数据段 PSH|ACK（seq=0x102D，ack=global("sseq") + 1）+ wait sniffer |
 
@@ -116,11 +116,11 @@ mock 的载荷是普通文本，多出一层 http 只会干扰教学（且易让
 `contains("HTTP/")` 对本 mock 的载荷也不命中（无 "HTTP/" 子串）。端口可注入
 覆盖（`-p port=`），但注意 sniffer 字面量同步（见上节）。
 
-## 为什么 client 第 2 步 delay: 0.5（回环抓包重开的经验）
+## 为什么 client 第 2 步 delay: 0.5（回环轮次间隙的经验）
 
-server 每命中一次都要重新打开下一轮抓包（pcap/AF_PACKET 设备枚举 + 过滤），回环
-上 client 全程亚毫秒就跑完两步，不加 delay 会在 server 下一轮监听就绪前就错过
-第二个数据段（表现为只命中 server 第 1 组）。经验来源：icmp_mock README
+serve 的轮次是串行的（命中 → handler 回包 → 下一轮监听就绪），回环上 client
+全程亚毫秒就跑完两步，不加 delay 会在 server 下一轮监听就绪前就错过第二个数据段
+（表现为 server 只命中第 1 轮）。经验来源：icmp_mock README
 「为什么 seq 是 1001/1002」——同样的配方结构，同样的处方。
 
 ## 固定值的说明（mock 的正常手段）
@@ -152,7 +152,7 @@ prping engine examples/tcp_data_mock/listen.pkt     # sniffer 规则解析
 prping engine examples/tcp_data_mock/tcp_ack.pkt    # 层栈 tcp|ipv4 + global 表达式
 prping engine examples/tcp_data_mock/tcp_data.pkt   # 载荷 45 字节核对（ipv4 len=85）
 prping engine examples/tcp_data_mock/tcp_data2.pkt  # seq/ack 表达式 + sniffer
-prping engine examples/tcp_data_mock/server.pktl    # 配方：两组 listen+reply
+prping engine examples/tcp_data_mock/server.pktl    # 配方：serve 阶段（单规则多轮）
 prping engine examples/tcp_data_mock/client.pktl    # 配方：两步 wait+extract
 ```
 

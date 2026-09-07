@@ -22,8 +22,8 @@
 #
 # 与 mock server 的交互：gratuitous ARP 的 op 也是 request，真实主机只在
 # tpa == 自己 IP 时才应答（192.168.81.1 不归它们，集体沉默）；本示例的 server
-# 配方只监听一轮（一组 listen+reply，服务 client 步骤 1），gratuitous ARP 到达时
-# server 已退出——同样无人应答。若给 server 加第二组 listen+reply，mock server
+# 配方只服务一轮（serve 单规则 max: 1，服务 client 步骤 1），gratuitous ARP 到达时
+# server 已退出——同样无人应答。若给 server 调大 max 让它继续服务，mock server
 # 会把所有 op="request" 都答一遍（教学简化：不检查 tpa 归属）；想更真实可练手给
 # listen.pkt 的 sniffer 追加 tpa 过滤（sniffer 规则只能写字面量，把"服务哪个 IP"
 # 写死成常量即可）。

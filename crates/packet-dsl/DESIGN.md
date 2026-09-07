@@ -141,6 +141,7 @@ use(a) |> tcp(dport=443) |> ipv4(src="1.1.1.1", dst="2.2.2.2") |> eth()
 | 值 | `bor`/`band`/`bxor`/`bnot`/`shl`/`shr` | 位运算（整数或同宽字节列表元素级；bor 变参）——协议标志位（TCP/IPv4 flags、ARP op）原为引擎原语 `tcpflags`/`ip4flags`/`arpop`，已下沉为 eng_lib/bytes.pkt 位常量值函数（`syn()`/`df()`/`request()`…）组合：`tcp(flags=bor(syn(), ack()))` |
 | 值 | `global("名"[, 默认])`（值位置特判） | 配方全局存储读取——`.pktl` 的 `global:` 段 / 步骤 `extract` / 宿主 `-g k=v`（--global）注入；与 `params` 对称但值为**类型化**字面量（Int/Hex/Str/字节列表原样返回，不经过字符串形状解析），可直接参与 `+`/`be16`/位运算（`tcp(ack=global("seq") + 1)`）；未设置时**延迟求值**默认值，两者都无则报错（同 `params`） |
 | 值 | `reply("层", "字段")` | 读取当前回包的反解字段——配方 `extract` 的 `from:` 表达式专用（求值期宿主注入回包访问器，其余上下文回退用户函数——eng_lib 的 ARP 位常量 `reply()` 撞名保持原语义）；`from: reply.<层>.<字段>` 直取形态在配方解析期改写为本调用。数值字段 → Int、地址/字符串字段 → Str（display）、payload/body/raw 字节 → 字节列表 |
+| 值 | `round()` / `hits()` | serve 阶段轮次原语——`serve:` 阶段的监听 matcher / `until:` / extract / 阶段内步骤表达式求值时宿主注入 `ServeCtx{round, hits}`（round 闸门放行后 1 起；hits 为已命中累计，命中后含本次，`on_mismatch` 段不计数）；其余上下文报错 |
 | 层标注 | `layer(kind, bytes, src?, dst?)` | 字节 → 对应层；`kind` 为闭集字面量，`src`/`dst` 仅 `ipv4`/`ipv6`（伪头部校验和） |
 
 > 自动行为（checksum / length / ethertype / 伪头部）留在 Rust 序列化层，见 §8。

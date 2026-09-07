@@ -9,10 +9,10 @@
 # 步骤 3  http_get.pkt delay: 0.5 后发 GET（PSH|ACK，seq=0x1001, ack=sseq+1）→
 #                      wait: 2 校验 200 OK（tcp 字段 + http version=整行状态行）。
 #
-# 为什么步骤 2/3 加 delay: 0.5：server.pktl 每命中一组都要重新打开下一轮抓包
-# （pcap 设备枚举 + BPF），回环上 client 全程亚毫秒，不 delay 会在 server 下一轮
-# 监听就绪前发包而错过。步骤 2 的纯 ACK 虽无应答，但 server 第 2 组监听要等第 1 组
-# 收尾后才就绪，统一 delay 保证 GET 一定落在就绪的监听窗口内（经验来自
+# 为什么步骤 2/3 加 delay: 0.5：server 的 handler 是串行的（SYN 命中 → 回 SYN-ACK
+# → on_recv 重新打开 GET 监听），回环上 client 全程亚毫秒，不 delay 会在下一个监听
+# 就绪前发包而错过。步骤 2 的纯 ACK 虽无应答，但 server 的 GET 监听（on_recv）要等
+# 第一步收尾后才就绪，统一 delay 保证 GET 一定落在就绪的监听窗口内（经验来自
 # examples/icmp_mock/README「为什么 seq 是 1001/1002」：不加 delay 表现为"少命中"）。
 #
 # 固定值声明：客户端 ISN=0x1000、sport=40000、目标端口 80、服务端 ISN=0x2000

@@ -1,7 +1,7 @@
 # icmp_echo_server：用 .pktl 配方实现一个 ICMP echo 服务端
 
-展示**配方服务端**：步骤 `wait: -1` 链路层监听完整帧，按 sniffer 统一谓词匹配
-ICMP echo request，命中后 `extract` 把请求字段写进 global，**触发后续步骤**构造
+展示**配方服务端**：`serve:` 阶段链路层监听完整帧，按 sniffer 统一谓词匹配
+ICMP echo request，命中后 `extract` 把请求字段写进 global，`handler` 步骤构造
 echo reply（`reply.pkt`）并发回——回应包的构造属编排，一律由配方完成。
 
 > 单文件 `packet --wait --raw` 的应答模板（`reply("层","字段")` 内联取值）已移除：
@@ -27,29 +27,32 @@ prping ping 127.0.0.1          # 或本机局域网 IP；-n 3 限制次数
 
 ```text
 recipe:
-- packet: listen.pkt     # 步骤 1：持续监听（不发送）
-  wait: -1                  # -1 = 持续监听直到命中（与 CLI 负数 --wait 同语义）
-  extract:               # 命中后从匹配帧取值写 global
-  - name: r_id
-    from: reply.icmp.id  # 请求的 icmp.id（回显用）
-  - name: r_seq
-    from: reply.icmp.seq
-  - name: r_payload
-    from: reply.icmp.payload
-  - name: r_src_ip       # 请求方 IP（帧内 ipv4.src）
-    from: reply.ipv4.src
-  - name: r_dst_ip       # 本机 IP（帧内 ipv4.dst）
-    from: reply.ipv4.dst
-- packet: reply.pkt      # 步骤 2：触发发包——用 global 构造 echo reply
-  raw: true              # 裸 IP 外层走内核 IP 栈路由（无需 MAC 解析）
+- serve:                 # serve 阶段：监听分派 + 命中处理，阻塞至收工
+  max: 1                 # 服务一轮即收工（调大 = 多轮；-1 = 无限）
+  rules:
+  - packet: listen.pkt   # 监听源：其 sniffer 即本规则的分派谓词
+    extract:             # 命中后从匹配帧取值写 global
+    - name: r_id
+      from: reply.icmp.id  # 请求的 icmp.id（回显用）
+    - name: r_seq
+      from: reply.icmp.seq
+    - name: r_payload
+      from: reply.icmp.payload
+    - name: r_src_ip     # 请求方 IP（帧内 ipv4.src）
+      from: reply.ipv4.src
+    - name: r_dst_ip     # 本机 IP（帧内 ipv4.dst）
+      from: reply.ipv4.dst
+    handler:             # 命中后步骤（每个命中包执行一次）
+    - packet: reply.pkt  # 用 global 构造 echo reply
+      raw: true          # 裸 IP 外层走内核 IP 栈路由（无需 MAC 解析）
 ```
 
 - `listen.pkt` 的 sniffer 即监听规则（`allow_sent: false`：用字面量，不能引用发包字段）；
   包内无 udp/tcp 传输层 → 自动选**链路层监听**（完整帧，icmp/ipv4 字段齐全）；
 - `reply.pkt` 全部字段来自 `global("...")`：type=0、id/seq/载荷回显、IP 互换，
   正好构成 echo reply（校验和由序列化器自动重算）；
-- 一个 `wait:` 步骤服务一个请求；连续服务就多写几组 listen+reply 步骤
-  （见 `examples/icmp_mock/server.pktl`）。
+- `serve:` 阶段阻塞至收工：`max: 1` 服务一轮；调大 `max:` 逐轮服务更多请求
+  （`max: -1` = 无限，Ctrl+C 优雅收工），`until:` 谓词命中亦可提前收工。
 
 ## 客户端配方（client.pktl）
 

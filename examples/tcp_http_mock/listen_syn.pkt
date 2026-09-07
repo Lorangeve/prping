@@ -1,4 +1,4 @@
-# server 配方 · 第 1 组步骤 1：链路层持续监听（wait: -1）——匹配 TCP 三次握手的纯 SYN。
+# server 配方 · serve 规则监听源：链路层监听——匹配 TCP 三次握手的纯 SYN。
 #
 # 包体只有 ipv4（无 udp/tcp 传输层）→ 引擎自动选**链路层监听**完整帧（Linux AF_PACKET /
 # macOS·Win libpcap，需 root；--iface 可指定网卡，缺省开全接口）。包定义仅用于选监听

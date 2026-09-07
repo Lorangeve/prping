@@ -1,5 +1,5 @@
-# server 配方 · 第 1 组步骤 2（触发发包）：构造 HTTP 200 OK 响应发回请求方。
-# 字段全部来自 listen_get 步骤的 extract（global，匹配帧即"请求"）：
+# server 配方 · 第 1 阶段 handler 步骤（触发发包）：构造 HTTP 200 OK 响应发回请求方。
+# 字段全部来自规则 extract（global，匹配帧即"请求"）：
 #   r_sport  = 请求 tcp.sport（客户端源端口 40000）→ 响应的 dport
 #   r_seq    = 请求 tcp.seq（客户端 ISN 0x1000）   → 响应 ack 的基准
 #   r_src_ip = 请求方 IP（reply.ipv4.src）         → 响应的 dst

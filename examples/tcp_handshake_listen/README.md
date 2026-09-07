@@ -1,7 +1,7 @@
 # tcp_handshake_listen：用 .pktl 配方模拟 TCP 三次握手
 
-服务端**配方**：`wait: -1` 链路层监听完整帧，按 sniffer 规则匹配纯 SYN，
-`extract` 取请求的端口/序列号/双向 IP 写 global，**触发后续步骤**构造 SYN-ACK
+服务端**配方**：`serve:` 阶段链路层监听完整帧，按 sniffer 规则匹配纯 SYN，
+`extract` 取请求的端口/序列号/双向 IP 写 global，`handler` 步骤构造 SYN-ACK
 （`ack = 请求 seq + 1`）发回；客户端配方（client.pktl）发 SYN、校验 SYN-ACK、
 再发最终 ACK——三个握手段齐全。
 
@@ -33,19 +33,22 @@ ack=0x1001 = 客户端 SYN seq+1，证明配方 extract → global → 触发发
 
 ```text
 recipe:
-- packet: listen.pkt        # 步骤 1：持续监听（不发送）
-  wait: -1                     # -1 = 持续监听直到命中（与 CLI 负数 --wait 同语义）
-  extract:
-  - name: r_sport
-    from: reply.tcp.sport   # 请求的客户端端口
-  - name: r_seq
-    from: reply.tcp.seq     # 请求的 seq（ack 推导用）
-  - name: r_src_ip
-    from: reply.ipv4.src    # 请求方 IP（回包 dst）
-  - name: r_dst_ip
-    from: reply.ipv4.dst    # 本机 IP（回包 src）
-- packet: synack.pkt        # 步骤 2：触发发包
-  raw: true                 # 有 tcp 传输层 → 必须显式 raw（否则走 TCP 载荷建连）
+- serve:                    # serve 阶段：监听分派 + 命中处理，阻塞至收工
+  max: 1                    # 服务一轮（一次握手）即收工（-1 = 无限）
+  rules:
+  - packet: listen.pkt      # 监听源：其 sniffer 即本规则的分派谓词
+    extract:
+    - name: r_sport
+      from: reply.tcp.sport   # 请求的客户端端口
+    - name: r_seq
+      from: reply.tcp.seq     # 请求的 seq（ack 推导用）
+    - name: r_src_ip
+      from: reply.ipv4.src    # 请求方 IP（回包 dst）
+    - name: r_dst_ip
+      from: reply.ipv4.dst    # 本机 IP（回包 src）
+    handler:                # 命中后步骤（每个命中包执行一次）
+    - packet: synack.pkt    # 触发发包
+      raw: true             # 有 tcp 传输层 → 必须显式 raw（否则走 TCP 载荷建连）
 ```
 
 - `listen.pkt` 只有 ipv4（无 udp/tcp 传输层）→ 自动选**链路层监听**完整帧；
@@ -54,7 +57,8 @@ recipe:
 - `synack.pkt`：`ack=global("r_seq") + 1`——确认号 = 请求 seq + 1（`+` 算术直接
   作用在 extract 出的整数值上）；端口/IP 全互换（**裸 IP 外层**，raw: true 走内核
   IP 栈路由注入，回环与局域网均无需 MAC 解析）；校验和由序列化器自动重算；
-- 一个 `wait:` 步骤服务一次握手；连续服务就多写几组 listen+synack 步骤。
+- `serve:` 阶段阻塞至收工：`max: 1` 服务一次握手；调大 `max:` 连续服务更多
+  握手（`max: -1` = 无限，Ctrl+C 优雅收工）。
 
 ## 客户端配方（client.pktl）
 

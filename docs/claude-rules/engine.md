@@ -149,8 +149,8 @@
     CLI `HOST:PORT`（或按包内最外层 udp/tcp dport 推导，IPv6 包 → `[::]`），
     循环接收 UDP 数据报，反解后按 .pkt 的 sniffer 规则匹配（`allow_sent:
     false`）；命中只打印 `✓ matched ... from peer` +
-    反解展示（**不发包回应**——回应包的构造属编排，由 .pktl 配方的 `wait: -1`
-    步骤 + extract + 触发发包完成），未命中忽略；Ctrl+C 优雅退出（读超时 200ms
+    反解展示（**不发包回应**——回应包的构造属编排，由 .pktl 配方的 `serve:`
+    阶段规则 + extract + handler 发包完成），未命中忽略；Ctrl+C 优雅退出（读超时 200ms
     轮询中断标志）并打印匹配统计（demo → `examples/sniffer_chat/README.md`）。
   - **`--wait --raw` 链路层纯监听**：`pkg/listen_raw.rs::listen_raw_packets`（同样发送段先行）
     ——持续接收**完整帧**（Linux 默认 AF_PACKET 单 socket 全接口/指定 `--iface`，
@@ -204,56 +204,77 @@
    与仓库根下 `prping engine examples/quic_initial` 都直接可用
    （`main.rs::resolve_pktl_arg`）；*_mock 系列是 server.pktl + client.pktl
    双配方（无同名 pktl），按路径运行 `prping packet examples/icmp_mock/server.pktl`。
-- **配方（.pktl = package list）**：`src/recipe.rs` 解析清单（`global:` 段声明跨步骤
-  共享变量 + `recipe:` 段按顺序列出步骤）；`pkg.rs::send_recipe` 执行——每步 = 一个
+- **配方（.pktl = package list）**：`engine/recipe.rs` 递归下降解析清单（`global:` 段
+  声明跨步骤共享变量 + `recipe:` 段按顺序列出条目——普通步骤或 serve 阶段，
+  `RecipeItem::Step|Serve`）；执行器 `pkg/serve`（或 `pkg/recipe.rs::send_recipe`
+  + `run_serve_stage`）——每步 = 一个
   `.pkt`（解析/求值注入当前 global 快照），步骤项键 `- packet: 文件`（旧键 `pkg:`
-  已改名，写 `pkg:` 报错提示改名），步骤选项 `wait:`（**与 CLI `--wait` 同语义**：
-  `wait: -1`（任意负数）= **无限等待**（持续监听，等价 CLI 裸 `--wait`/负数 `--wait`——
-  本步不发送，用 .pkt 的 sniffer 匹配外部到达的包，命中后配方继续（触发后续步骤
-  发包），匹配包供 `extract` 的 `reply.` 来源取值；**监听方式自动选择**：包内有
-  udp/tcp 传输层 → UDP 数据报监听（`pkg/listen.rs::listen_udp_once`，绑定 CLI
-  `HOST:PORT` 或包内 dport 推导），无（ICMP/ARP 等）→ 链路层监听
-  （`pkg/listen_raw.rs::listen_raw_once`）；`raw: true|网卡` 可显式覆盖）、
-  `wait: 秒数` = 发送后等一个匹配应答（覆盖 CLI `--wait SECS`）、
+  已改名，写 `pkg:` 报错提示改名），步骤选项 `wait:`（**非负秒数** = 发送后等一个
+  匹配应答（覆盖 CLI `--wait SECS`）；不写 = 纯发送；**负数/空值非法**——持续
+  监听已移入 `serve:` 阶段（见下 serve 条目），.pktl 配方同时拒绝 CLI 裸 `--wait`）、
   `on_timeout: retry [N]|文件`（**wait 超时处理**：超时未收到匹配应答 →
   `retry [N]` **重发当前步骤的包 N 次**（每次重新 wait，任一次等到回包即成功，
   默认 1；`recipe::OnTimeout::Retry`）或**发送备选 .pkt**（发其它包，步骤继续；
-  `pkg.rs::send_on_timeout_packet`））、
+  `pkg/recipe.rs::send_on_timeout_packet`））、
   `count: N`（**每个包重复发送 N 次**，覆盖 CLI `--count`；`send_module` 循环层
   实现，`--count`/`count:` 均按 `opts.count` 逐包 ×N 发送）/
   `raw:`（覆盖 `--raw`：`true` 开原始发送且网卡继承 CLI `--iface`、网卡名 = 开原始
-  发送并指定网卡、`false` 强制载荷发送；`pkg.rs::step_send_mode` 实现）/`delay:`
+  发送并指定网卡、`false` 强制载荷发送；`pkg/recipe.rs::step_send_mode` 实现）/`delay:`
   （步骤开始前等待）/`params:`（追加覆盖 `-p`/`--params`）/`extract:`（取值写
   global，`from:` 四种
   形态：`reply.<层>.<字段>` 直取**回包**反解字段复用 sniffer 字段机制
-  （需 `wait:`（OneShot 或 `wait: -1` 持续监听））、`sent.<层>.<字段>` 直取**本步发包**反解字段（**无需 wait**，
+  （需 `wait:`）、`sent.<层>.<字段>` 直取**本步发包**反解字段（**无需 wait**，
   经 `SendCtx.on_sent` 回调收集完整序列化包字节）、**`reply.peer.ip`/`reply.peer.port`**
-  （持续监听步骤 UDP 监听的**对端地址**——载荷无 udp 头，对端来自 socket peer，
-  供后续步骤回包；`FromSpec::PeerField`），`as: int|hex|str|bytes`，或
+  （serve 规则 UDP 数据报监听的**对端地址**——载荷无 udp 头，对端来自 socket peer，
+  供 handler 回包；链路层监听无 peer，从帧内 `reply.ipv4.src`/`reply.udp.sport` 取；
+  `FromSpec::PeerField`），`as: int|hex|str|bytes`，或
   **值表达式**（`reply.<层>.<字段>` 叶子改写为 `reply("层","字段")` 原语调用后按 DSL
   值表达式解析求值——可调函数/原语/`+`，可引用同步骤 .pkt 值函数/`params`/`global`，
   `as:` 可选，缺省 = 自然类型值；`reply` 原语仅在 extract 求值上下文生效，其余回退
   用户函数，eng_lib 的 ARP 位常量 `reply()` 撞名不受影响），多回包依次应用后写覆盖
   先写）/`on_error: stop|continue`（默认 stop，失败中止配方退出码 1）；
-  **loop 块**（`- loop: N`，N 为负数 = 无限（空值非法——字段要么不写、要么写值，无限写 `loop: -1`），
-  与 CLI 负数 `--wait` 同语义；`recipe::LoopCtx`）：
-  包裹嵌套步骤组（`steps:` 后缩进 `- ` 项；`until:` 谓词列表须在 `steps:` 前，
-  sniffer 同款语法、可 `global(...)`，`pkg.rs::build_until_matcher` 每轮重建），
-  每轮完整执行块内步骤；解析后**平铺**进 `Recipe.steps`（块内每步带同一 `LoopCtx`，
-  `first`/`last` 定位块边界），执行器 while 回跳（`pkg.rs::send_recipe`：块首迭代
-  闸门 = until 命中 / Ctrl+C 优雅收工（打印统计、退出码 0）/ 次数，先到先退；
-  `delay:` 轮间延迟第 2 轮起；`listen_*_once` 带 until 匹配器，until 命中非
-  sniffer 包 → 不回应整块立即收工）；
+  **serve 阶段**（`- serve:` 容器项无内联值；`recipe::Serve`/`ServeRule`/
+  `ServeItem`/`RecipeItem`）：**多规则监听分派 + 命中处理**，阻塞至收工——每轮由
+  一个命中包驱动：规则监听 → 命中包 extract 写 global → 该规则 handler 执行一次
+  → 下一轮（global 跨轮保留、每轮 extract 覆盖）。阶段选项：
+  `max: N`（最多服务轮数；负数 = 无限、不写 = 无限、空值非法）/
+  `until:`（sniffer 同款谓词列表，顶层多条 = 隐式 OR、可 `global(...)`；
+  `build_until_matcher` 每轮重建；收到的包命中任一谓词 → 本轮结束后收工，
+  命中**非 sniffer 包**（如停服包）→ 不回应直接收工）/
+  `delay: 秒`（轮间延迟，第 2 轮起，响应 Ctrl+C 提前收工）/
+  `on_mismatch:`（未命中处理段，条目写在后续 `- ` 行，语法与 handler 一致；
+  收到的包不匹配任何规则且不匹配 until 时执行——**不消耗服务轮次**，执行完
+  重新监听；段内步骤的 `reply.*`/`reply.peer.*` 取**触发未命中的包**与其对端
+  （extract 无需本步 wait）；空段/内联值/重复段非法）/
+  `rules:`（必需，至少一条；须写在 max/until/delay/on_mismatch 之后）。规则（`rules:` 下 `- packet: 监听源.pkt`）：其
+  `sniffer:` 段 = 本规则分派谓词；**监听方式自动选择**（包内有 udp/tcp 传输层 →
+  UDP 数据报监听 `pkg/listen.rs::listen_udp_once`，绑定 CLI `HOST:PORT` 或包内
+  最外层 dport 推导；无 → 链路层监听 `pkg/listen_raw.rs::listen_raw_once`）；
+  `raw: true|网卡` 显式覆盖——多规则/带 on_mismatch 的阶段 = **分派监听**：
+  单一 socket 按规则声明顺序逐个匹配全部规则 matcher，先命中先服务
+  （`listen_udp_dispatch`/`listen_raw_dispatch`；未命中包在带 on_mismatch 的
+  阶段以 Mismatch 返回执行未命中段后重新监听；阶段内各规则须全部数据报监听
+  或全部 raw 链路层监听——混用报错，且同阶段各规则推导地址必须一致）；`extract:` 命中取值（`reply.*` 取
+  命中包、`reply.peer.*` 取 socket 对端）；`handler:` = 命中后步骤列表（每个
+  命中包执行一次；可含嵌套 `- on_recv:` 项——`ServeItem::OnRecv`，handler 执行中
+  等待**下一个**匹配包（单轮）并执行其 handler，多步握手按嵌套深度编排；
+  嵌套深度上限 `MAX_ON_RECV_DEPTH = 8`（第 9 层解析报错））。
+  多规则 = 分派：不同 dport 天然分流，同一监听地址的规则按声明顺序逐个匹配。
+  阶段内 Ctrl+C 优雅收工（打印统计、退出码 0）；UDP 回包发送路径 ~1s 回读窗口内
+  到达的下一条请求被丢弃（客户端重试即可）；
   写入 global 的途径：`init` 初始值（global 项三形态：`- name: X` + 缩进 `init:` /
   裸 `- X` / `- X=v` 一行内联；值 = 字符串/十进制/0x/字节列表字面量）→ CLI
   `-g k=v`（`--global`，覆盖 init）→ 步骤 `extract`（覆盖前两者）；`.pkt` 侧读取用
-  packet-dsl 值原语 `global("名"[, 默认])`（类型化值）。`--out` 配方模式收集全部步骤
+  packet-dsl 值原语 `global("名"[, 默认])`（类型化值）+ serve 轮次原语
+  `round()`（当前轮次，闸门放行后 1 起）/ `hits()`（已命中累计，命中后含本次、
+  on_mismatch 不计）——serve 阶段的监听 matcher / until 谓词 / extract / 阶段内
+  步骤表达式求值时注入 `ServeCtx`，其余上下文报错。`--out` 配方模式收集全部步骤
   包合并写一个 pcap；`engine FILE.pktl` 展示结构概览并校验 extract 字段名
   （表达式形态遍历 `reply(...)` 叶子校验）。
-  `send_packets`/`send_recipe` 共用发送循环 `pkg.rs::send_module`（`SendCtx` 携带
+  `send_packets`/`send_recipe` 共用发送循环 `pkg/send.rs::send_module`（`SendCtx` 携带
   module/sources/params/globals + 回包回调 `on_reply` + 发包回调 `on_sent`，
   均 `ReplyCb`）。示例统一为 **mock server/client 形式**（形态标杆 `examples/icmp_mock/`：
-  server.pktl = `wait: -1` 监听 + extract + 触发发包，client.pktl = 发包 +
+  server.pktl = `serve:` 阶段规则监听 + extract + handler 触发发包，client.pktl = 发包 +
   `wait: N` + sniffer 校验 + extract 复用；完整清单见 `examples/README.md`）：
   `examples/icmp_mock/`（**ICMP mock**：链路层监听触发发包 + 两步 request，回包 seq
     偏移 +1000 作配方标记，排除回环内核替答）
@@ -269,11 +290,11 @@
     gratuitous ARP 演示）
   / `examples/udp_mock/`（**UDP mock**：同一服务端按端口分派 DNS 应答与 VNC 横幅）
   / `examples/dns_echo_listen/`（**DNS mock**：UDP :53 监听查询 → A 记录应答；客户端
-  / `examples/dns_loop_server/`（**循环监听服务**：`loop: -1` 无限包 listen+reply，
-    `until:` 停服包收工——loop 块样例）
+  / `examples/dns_loop_server/`（**循环监听服务**：`serve:` 阶段多规则/无限服务，
+    `until:` 停服包收工）
     两步 extract 复用 tid——原 dns_recipe 的 extract 教学点并入）
-  / `examples/dns_trigger/`（**配方监听触发最小样例**：`wait: -1` 步骤匹配 DNS 查询
-    → extract id/`reply.peer.port` 对端 → 触发步骤发包应答）
+  / `examples/dns_trigger/`（**配方监听触发最小样例**：serve 规则匹配 DNS 查询
+    → extract id/`reply.peer.port` 对端 → handler 发包应答）
   / `examples/icmp_echo_server/`（**配方服务端入门样板**：单组 listen+reply 的 ICMP
     echo 服务端）
   / `examples/tcp_handshake_listen/`（**TCP 握手 mock**：listen 纯 SYN → SYN-ACK

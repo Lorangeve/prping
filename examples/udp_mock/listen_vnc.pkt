@@ -1,8 +1,8 @@
-# server 配方 · 第 2 组步骤 1：监听 VNC 客户端的 RFB 版本横幅（:5900，VNC 注册端口；
-# RFB over TCP 是常态，这里用 UDP 承载做 mock 教学简化）。命中后配方继续（触发
-# 第 2 步回横幅）。
+# server 配方 · 第 2 阶段规则监听源：监听 VNC 客户端的 RFB 版本横幅（:5900，VNC
+# 注册端口；RFB over TCP 是常态，这里用 UDP 承载做 mock 教学简化）。命中后执行
+# handler（回横幅）。
 #
-# ── 为什么本组的监听要走链路层（server.pktl 里配 raw: true）──
+# ── 为什么本阶段的监听要走链路层（规则里配 raw: true）──
 # 裸 UDP 数据报监听只收到载荷（无 IP/UDP 头），反解引擎对裸载荷只尝试 dns/http
 # 两种声明（dissect_bare_app）——RFB 横幅是纯文本，两者都解析失败 → **一个层都
 # 产不出**，任何 sniffer 规则（包括 raw(...) 字节谓词）都无从匹配（实测：横幅

@@ -236,10 +236,18 @@ fn recipe_delays_from_timestamps() {
     )
     .expect("转换成功");
     let recipe = prping_core::parse_recipe(&report.recipe).expect("配方可解析");
-    assert_eq!(recipe.steps.len(), 3);
-    assert_eq!(recipe.steps[0].delay, None, "首步无 delay");
-    assert_eq!(recipe.steps[1].delay, Some(0.5));
-    assert_eq!(recipe.steps[2].delay, Some(1.75));
+    let steps: Vec<&prping_core::Step> = recipe
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            prping_core::RecipeItem::Step(s) => Some(s),
+            prping_core::RecipeItem::Serve(_) => None,
+        })
+        .collect();
+    assert_eq!(steps.len(), 3);
+    assert_eq!(steps[0].delay, None, "首步无 delay");
+    assert_eq!(steps[1].delay, Some(0.5));
+    assert_eq!(steps[2].delay, Some(1.75));
     let _ = std::fs::remove_dir_all(&out_dir);
     let _ = std::fs::remove_file(&pcap);
 }

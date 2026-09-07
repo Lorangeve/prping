@@ -1,20 +1,22 @@
 # ICMP mock · 服务端配方（server.pktl）：一个 pktl 就是一个 ICMP echo 服务端。
 #
-# 配方显式列出**多组**监听+应答步骤（pktl 可包含任意多包）：每组 = 一次
-# listen 命中（持续监听直到匹配 echo request）→ extract 写 global → 触发发包
-# echo reply。这里两组对应 client.pktl 的两步请求；要服务更多次就再写几组。
+# `serve:` 阶段（阻塞至收工）：单条规则逐轮服务——`max: 2` = 服务两轮（对应
+# client.pktl 的两步请求），每轮：命中 → extract 写 global → handler 触发发包
+# echo reply；global 跨轮保留、每轮 extract 覆盖。
 #
-# 每组步骤：
-#   步骤 1：`wait: -1`（= 持续监听）——**自动按包内有无 udp/tcp 选监听方式**：
-#           本包是 icmp/ipv4（无传输层）→ 链路层监听完整帧，匹配 ICMP echo request
-#           （type=8），命中后 extract 匹配帧字段写 global：id/载荷回显 + 请求方
-#           IP（reply.ipv4.src）/本机 IP（reply.ipv4.dst）。
-#   步骤 2：触发发包——reply.pkt 用 global 构造 ICMP echo reply 发回请求方，
-#           seq 偏移 +1000 作配方标记（回环上内核会替答 echo，纯回显无法分辨来源；
-#           见 reply.pkt / client.pktl 注释）。
+# 规则监听源 listen.pkt **自动按包内有无 udp/tcp 选监听方式**：本包是 icmp/ipv4
+# （无传输层）→ 链路层监听完整帧，匹配 ICMP echo request（type=8），命中后
+# extract 匹配帧字段写 global：id/载荷回显 + 请求方 IP（reply.ipv4.src）/本机
+# IP（reply.ipv4.dst）。handler 的 reply.pkt 用 global 构造 ICMP echo reply
+# 发回请求方，seq 偏移 +1000 作配方标记（回环上内核会替答 echo，纯回显无法分辨
+# 来源；见 reply.pkt / client.pktl 注释）。
 #
-# 注意：client 步骤 2 带 `delay: 0.5`，给本配方下一轮监听（重新打开抓包）留出
-# 时间——回环上 client 全程亚毫秒，不加 delay 会错过第二个请求（只命中 3 条）。
+# 注意：client 步骤 2 带 `delay: 0.5`——serve 的轮次是串行的（命中 → handler
+# 回包 → 下一轮监听就绪），回环上 client 全程亚毫秒，不加 delay 第二个请求可能
+# 落在下一轮就绪前的间隙里被错过。
+#
+# 要服务更多请求：调大 `max:`；`max: -1` = 无限服务，Ctrl+C 随时优雅收工
+# （打印统计、退出码 0）。
 #
 # 运行（需 root；Linux 回环 AF_PACKET / macOS 回环裸 IP 走内核栈）：
 #   sudo prping packet examples/icmp_mock/server.pktl
@@ -28,44 +30,26 @@ global:
 - r_dst_ip
 
 recipe:
-- packet: listen.pkt
-  wait: -1
-  extract:
-  - name: r_id
-    from: reply.icmp.id
-    as: int
-  - name: r_seq
-    from: reply.icmp.seq
-    as: int
-  - name: r_payload
-    from: reply.icmp.payload
-    as: bytes
-  - name: r_src_ip
-    from: reply.ipv4.src
-    as: str
-  - name: r_dst_ip
-    from: reply.ipv4.dst
-    as: str
-- packet: reply.pkt
-  raw: true
-# ── 第 2 轮：继续监听第 2 个请求 → extract → 触发发包（client 步骤 2）──
-- packet: listen.pkt
-  wait: -1
-  extract:
-  - name: r_id
-    from: reply.icmp.id
-    as: int
-  - name: r_seq
-    from: reply.icmp.seq
-    as: int
-  - name: r_payload
-    from: reply.icmp.payload
-    as: bytes
-  - name: r_src_ip
-    from: reply.ipv4.src
-    as: str
-  - name: r_dst_ip
-    from: reply.ipv4.dst
-    as: str
-- packet: reply.pkt
-  raw: true
+- serve:
+  max: 2
+  rules:
+  - packet: listen.pkt
+    extract:
+    - name: r_id
+      from: reply.icmp.id
+      as: int
+    - name: r_seq
+      from: reply.icmp.seq
+      as: int
+    - name: r_payload
+      from: reply.icmp.payload
+      as: bytes
+    - name: r_src_ip
+      from: reply.ipv4.src
+      as: str
+    - name: r_dst_ip
+      from: reply.ipv4.dst
+      as: str
+    handler:
+    - packet: reply.pkt
+      raw: true

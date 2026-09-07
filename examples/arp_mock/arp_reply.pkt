@@ -1,5 +1,5 @@
-# arp_mock · server 配方 · 步骤 2（触发发包）：构造 ARP 应答单播发回请求方。
-# 字段来自 listen 步骤的 extract（global），语义对照 RFC 826 的应答格式：
+# arp_mock · server 配方 · handler 步骤（触发发包）：构造 ARP 应答单播发回请求方。
+# 字段来自规则 extract（global），语义对照 RFC 826 的应答格式：
 #
 #   op=reply()            操作码 2——"告知"（对比请求的 request()=1）
 #   sha="66:77:88:99:aa:bb"  应答者硬件地址："我就是这个 MAC"

@@ -1,4 +1,4 @@
-# server 配方 · 步骤 2（触发发包）：用 wait 监听步骤 extract 的 global 构造 DNS
+# server 配方 · handler 步骤（触发发包）：用规则 extract 的 global 构造 DNS
 # 应答，发回查询方：
 #   global.tid   = 查询的 dns.id（reply.dns.id 来源）
 #   global.cip   = 查询方 IP（reply.peer.ip 来源——UDP 监听载荷里没有 udp 头，

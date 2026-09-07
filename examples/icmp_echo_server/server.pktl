@@ -1,14 +1,15 @@
-# ICMP echo 服务端配方（server.pktl）：监听触发 + extract 取值 + 触发发包。
+# ICMP echo 服务端配方（server.pktl）：serve 监听分派 + extract 取值 + 触发发包。
 #
-# 步骤 1：`wait: -1`（= 持续监听）——本包无 udp/tcp 传输层 → 自动链路层监听
-#         完整帧，匹配 ICMP echo request（type=8），命中后 extract 匹配帧字段写
-#         global：id/seq/载荷回显 + 请求方 IP（reply.ipv4.src）/本机 IP（reply.ipv4.dst）。
-# 步骤 2：触发发包——reply.pkt 用 global 构造 echo reply 发回请求方（raw: true，
-#         裸 IP 外层走内核 IP 栈路由）。
+# `serve:` 阶段（阻塞至收工）：rules 每条规则的监听源 .pkt 自带 sniffer 谓词。
+#   本规则 listen.pkt 无 udp/tcp 传输层 → 自动**链路层监听**完整帧，匹配 ICMP
+#   echo request（type=8），命中后 extract 匹配帧字段写 global：id/seq/载荷回显 +
+#   请求方 IP（reply.ipv4.src）/本机 IP（reply.ipv4.dst）。
+#   `max: 1`：服务一轮即收工。`handler:` = 命中后步骤（每个命中包执行一次）——
+#   reply.pkt 用 global 构造 echo reply 发回请求方（raw: true，裸 IP 外层走内核
+#   IP 栈路由）。
 #
-# 一个 wait 步骤服务一个请求：要连续服务更多请求，把 listen+reply 步骤包进
-# `loop:` 块（见 examples/dns_loop_server/ 的无限循环写法），或像
-# examples/icmp_mock/server.pktl 那样手写多组。
+# 要连续服务更多请求：调大 `max:`（如 `max: 10`）逐轮服务即可；`max: -1` =
+# 无限服务，Ctrl+C 随时优雅收工（打印统计、退出码 0）。
 #
 # 运行（需 root/管理员；Linux AF_PACKET / macOS·Windows libpcap·Npcap）：
 #   sudo prping packet examples/icmp_echo_server/server.pktl
@@ -22,23 +23,26 @@ global:
 - r_dst_ip
 
 recipe:
-- packet: listen.pkt
-  wait: -1
-  extract:
-  - name: r_id
-    from: reply.icmp.id
-    as: int
-  - name: r_seq
-    from: reply.icmp.seq
-    as: int
-  - name: r_payload
-    from: reply.icmp.payload
-    as: bytes
-  - name: r_src_ip
-    from: reply.ipv4.src
-    as: str
-  - name: r_dst_ip
-    from: reply.ipv4.dst
-    as: str
-- packet: reply.pkt
-  raw: true
+- serve:
+  max: 1
+  rules:
+  - packet: listen.pkt
+    extract:
+    - name: r_id
+      from: reply.icmp.id
+      as: int
+    - name: r_seq
+      from: reply.icmp.seq
+      as: int
+    - name: r_payload
+      from: reply.icmp.payload
+      as: bytes
+    - name: r_src_ip
+      from: reply.ipv4.src
+      as: str
+    - name: r_dst_ip
+      from: reply.ipv4.dst
+      as: str
+    handler:
+    - packet: reply.pkt
+      raw: true

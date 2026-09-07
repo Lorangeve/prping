@@ -2,13 +2,13 @@
 
 `examples/arp_mock/` 是 `examples/link_arp/` 的 **mock 同构改造版**。旧目录只是
 两步串发（request → reply，应答 MAC 靠 `-p tmac` 参数人工注入、无任何校验）；
-本目录改成 icmp_mock 的「`*_mock` server/client」形态：**服务端配方**持续监听
-ARP 请求并触发应答，**客户端配方**发包 + `wait` 校验 + `extract` 复用，
+本目录改成 icmp_mock 的「`*_mock` server/client」形态：**服务端配方** `serve:`
+阶段监听 ARP 请求并触发应答，**客户端配方**发包 + `wait` 校验 + `extract` 复用，
 真正走一遍「广播问 → 单播答」的问答闭环：
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（ARP 应答机，模拟「持有该 IP 的主机」） | **一组 listen+reply**：`wait: -1` 链路层监听匹配 ARP 请求（`op="request"`）→ extract 请求方 sha/spa/被询问的 tpa 写 global → 触发发包 `arp_reply.pkt`（**谁问的 IP 我来答**：spa=请求的 tpa、tha 回填请求方 MAC，单播发回）。要服务更多次就照 icmp_mock 再写几组 listen+reply |
+| `server.pktl` | 服务端（ARP 应答机，模拟「持有该 IP 的主机」） | `serve:` 阶段单条规则（`max: 1`）：链路层监听匹配 ARP 请求（`op="request"`）→ extract 请求方 sha/spa/被询问的 tpa 写 global → handler 触发发包 `arp_reply.pkt`（**谁问的 IP 我来答**：spa=请求的 tpa、tha 回填请求方 MAC，单播发回）。要服务更多次调大 `max:`（`-1` = 无限） |
 | `client.pktl` | 客户端（两步流程） | 1. 发 ARP 请求（广播，`tpa=params("ip","127.0.0.1")`）→ `wait: 2` 校验应答（sniffer 匹配 `op="reply"` + 服务端固定 MAC）→ extract `reply.arp.sha` 写 global.rmac（教学点：**从应答学习对方 MAC**——单步用不到，演示复用入口）；2. `delay: 0.5` 后发 gratuitous ARP（`free_arp.pkt`，纯发送无 wait） |
 
 支撑包：`listen.pkt`（服务端监听占位 + sniffer 规则）、`arp_reply.pkt`（应答
@@ -20,7 +20,7 @@ ARP 请求并触发应答，**客户端配方**发包 + `wait` 校验 + `extract
 ARP 把网络层地址（IPv4）解析成链路层地址（MAC）。报文是 28 字节定长头，
 字段含义与请求/应答两种取值：
 
-| 字段 | 宽度 | 含义 | 请求（client 步骤 1） | 应答（server 步骤 2） |
+| 字段 | 宽度 | 含义 | 请求（client 步骤 1） | 应答（server handler） |
 | --- | --- | --- | --- | --- |
 | `htype` | 2B | 硬件类型：1 = 以太网 | 1 | 1 |
 | `ptype` | 2B | 协议类型：0x0800 = IPv4 | 0x0800 | 0x0800 |
@@ -102,7 +102,7 @@ mock 的正常手段，也是排除干扰的标记（真实场景应答者 MAC �
 ## 运行（需 root；链路层 AF_PACKET 收发）
 
 ```bash
-# 终端 1 —— 服务端配方（持续监听 ARP 请求并应答）
+# 终端 1 —— 服务端配方（serve 监听 ARP 请求，命中即应答）
 sudo prping packet examples/arp_mock/server.pktl
 
 # 终端 2 —— 客户端配方（两步：请求+wait 校验 → delay 0.5 → gratuitous ARP）
@@ -112,9 +112,9 @@ sudo prping packet examples/arp_mock/client.pktl
 - 链路层监听/发送需要 raw socket 权限（Linux AF_PACKET 需 root 或
   `cap_net_raw`；macOS/Windows 走 libpcap/Npcap 路径）；
 - 缺省在 lo 上闭环（内核不抢答，见上）；`-p ip=` 换询问目标、`--iface` 换网卡；
-- server 每命中一次要重开下一轮抓包，client 步骤 2 的 `delay: 0.5` 就是给它
-  留就绪时间——icmp_mock「为什么 seq 是 1001/1002」一节同一经验，删 delay 的
-  话回环上可能在 server 未就绪时发包、错过服务。
+- client 步骤 2 的 `delay: 0.5` 与服务端处理节奏解耦——回环上 client 亚毫秒
+  跑完，给 server 的 serve 阶段留出命中处理与收尾的时间（同款回环经验见
+  icmp_mock「为什么 seq 是 1001/1002」一节）。
 
 ## 验证（解析级，不依赖 root/网络）
 

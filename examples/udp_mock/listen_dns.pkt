@@ -1,6 +1,5 @@
-# server 配方 · 第 1 组步骤 1：持续监听（wait: -1）——本包有 udp 传输层 → 自动选
-# **UDP 数据报监听**（绑定 :5533，载荷反解后按 sniffer 匹配），命中后配方继续
-# （触发第 2 步发 DNS 应答）。
+# server 配方 · 第 1 阶段规则监听源——本包有 udp 传输层 → 自动选 **UDP 数据报
+# 监听**（绑定 :5533，载荷反解后按 sniffer 匹配），命中后执行 handler（发 DNS 应答）。
 #
 # 为什么绑 :5533 而不是 :53：
 #   DNS 的 proto 分派规则是 udp(dport=53)/tcp(dport=53)（eng_lib/headers.pkt），

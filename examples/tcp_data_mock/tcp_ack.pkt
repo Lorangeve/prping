@@ -1,5 +1,5 @@
-# server 配方 · 步骤 2（触发发包）：构造「数据确认段」发回请求方——纯 ACK、无载荷。
-# 字段全部来自 listen 步骤的 extract（global）：
+# server 配方 · handler 步骤（触发发包）：构造「数据确认段」发回请求方——纯 ACK、无载荷。
+# 字段全部来自规则 extract（global）：
 #   r_sport =请求的 tcp.sport → ACK 的 dport（发回请求方端口）；
 #   r_seq   =请求的 tcp.seq   → ack = r_seq + 45（确认号 = 期望接收的下一个字节
 #             序号；+45 = 数据段载荷字节数，逐字计算见下）；

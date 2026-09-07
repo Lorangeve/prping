@@ -1,14 +1,16 @@
-# 循环监听服务端配方（loop 块）：连续服务多个请求，直到停服包到达。
+# 无限服务端配方（serve 阶段 + until 收工）：连续服务多个请求，直到停服包到达。
 #
-# `loop: -1`（负数）= 无限循环（也可写 `loop: 10` 限次，与 CLI 负数 --wait
-# 同语义；空值非法——字段要么不写、要么写值）；每轮完整执行块内步骤
-# （监听 → extract → 回应），global 跨轮保留、每轮 extract 覆盖。
+# `serve:` 阶段（阻塞至收工）：不写 `max:` = 无限服务（也可写 `max: 10`
+# 限轮数，负数 = 无限的显式写法；字段空值非法——要么不写、要么写值）。单条规则
+# 逐轮服务：命中 DNS 查询 → extract 写 global（tid=查询 id、cport=查询方端口）
+# → handler 回应，global 跨轮保留、每轮 extract 覆盖。
 #
-# `until:` 谓词（sniffer 同款语法，可 and/or/not）——收到任何匹配包即收工：
+# `until:` 谓词（sniffer 同款语法，可 and/or/not）——收到的包命中任一谓词，
+# 本轮结束后收工：
 #   - match dns(flags=0x8180)
 # 停服包不是查询（sniffer flags=0x0100 不匹配），所以它只会触发 until——
-# 循环立即收工、不回应（客户端发完停服包即看到服务端退出、退出码 0）。
-# 块内 Ctrl+C 同样优雅收工（打印统计、退出码 0）。
+# 本轮结束即收工、不回应（客户端发完停服包即看到服务端退出、退出码 0）。
+# 阶段内 Ctrl+C 同样优雅收工（打印统计、退出码 0）。
 #
 # 注意：每轮回包走 UDP 载荷发送，发送路径有 ~1s 回读窗口——窗口内到达的下一条
 # 查询会被丢弃（客户端按常规 DNS 重试即可命中下一轮监听）。
@@ -24,12 +26,11 @@ global:
 - cport
 
 recipe:
-- loop: -1
+- serve:
   until:
   - match dns(flags=0x8180)
-  steps:
+  rules:
   - packet: listen.pkt
-    wait: -1
     extract:
     - name: tid
       from: reply.dns.id
@@ -37,4 +38,5 @@ recipe:
     - name: cport
       from: reply.peer.port
       as: int
-  - packet: reply.pkt
+    handler:
+    - packet: reply.pkt

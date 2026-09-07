@@ -1,4 +1,4 @@
-# 客户端配方：与服务端配方 server.pktl（wait: -1监听触发 + extract + 触发回显）
+# 客户端配方：与服务端配方 server.pktl（serve 监听分派 + extract + handler 触发回显）
 # 模拟一次「查询-回显」对话。
 #
 # 运行（两个终端）：

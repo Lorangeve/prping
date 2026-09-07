@@ -5,8 +5,8 @@
 
 1. **从发包提取值**——配方 `extract: from: sent.<层>.<字段>` 取本步**发出的包**
    的字段值（无需等回包）；
-2. **监听触发**——服务端配方 `wait: -1` 按 `.pkt` 的 `sniffer:` 规则匹配
-   收到的 UDP 数据报，命中后 `extract` 取值写 global，**触发后续步骤**把查询
+2. **监听触发**——服务端配方 `serve:` 阶段按规则监听源 `.pkt` 的 `sniffer:`
+   匹配收到的 UDP 数据报，命中后 `extract` 取值写 global，`handler` 步骤把查询
    重建后发回查询方（服务端 = 一个配方，见 `server.pktl`）；
 3. **按规则校验回包**——客户端的 `wait: 2` + `sniffer:` 声明匹配服务端回显，
    从回包提取值（`from: reply.<层>.<字段>`）。
@@ -18,9 +18,9 @@
 
 | 文件 | 角色 |
 | --- | --- |
-| `server.pktl` | 服务端配方：**两组** listen 步骤（`wait: -1`）→ extract → echo 步骤回显（对应 client 两步查询——每步发包用独立 socket，只有一组的话第二步的查询无人应答） |
-| `listen.pkt` | 服务端步骤 1：`sniffer:` 即监听规则（`and`/`not` 组合 + 字段等式） |
-| `echo.pkt` | 服务端步骤 2：用 global 重建查询（同 id）发回查询方 |
+| `server.pktl` | 服务端配方：`serve:` 阶段单条规则逐轮服务（`max: 2`）→ 每轮 extract 取当轮对端地址 → handler echo 步骤回显（对应 client 两步查询——client 每步发包用独立 socket，每轮 extract 各取各的对端，多轮共用一条规则即可） |
+| `listen.pkt` | 服务端监听源：`sniffer:` 即规则分派谓词（`and`/`not` 组合 + 字段等式） |
+| `echo.pkt` | 服务端 handler 步骤：用 global 重建查询（同 id）发回查询方 |
 | `step1.pkt` | 客户端步骤 1：发固定 id 的 DNS 查询（sent extract 的取值来源） |
 | `step2.pkt` | 客户端步骤 2：复用 tid 发查询 + `sniffer:` 校验回显 |
 | `client.pktl` | 客户端配方：两步对话（sent extract → 再发 → 校验回包 → reply extract） |
@@ -38,16 +38,16 @@ prping packet examples/sniffer_chat/client.pktl 127.0.0.1:55353
 
 ## 发生了什么（逐行拆解）
 
-**终端 1（服务端配方）**：
+**终端 1（服务端配方，serve 阶段逐轮：监听 → 命中 → handler，输出示意）**：
 
 ```
-step 1/2  listen.pkt
+serve round 1/2  listen.pkt
     listening on 0.0.0.0:55353 — 规则: and(match dns(flags=0x0100), not(match dns(flags=0x8180)))
   ✓ matched 29 B from 127.0.0.1:xxxxx
     flags=256
     datagram:
     [0] dns  id=0x4242 flags=0x0100 q=example.com(A)
-step 2/2  echo.pkt
+handler  echo.pkt
   UDP → 127.0.0.1:xxxxx sent 29 B
 ```
 
@@ -62,8 +62,8 @@ step 2/2  echo.pkt
   `not(match dns(flags=0x8180))` 不是应答（flags=0x8180 是响应标志）——
   演示了统一谓词的组合能力；
 - 命中 → `extract` 取 `reply.dns.id` / `reply.peer.ip` / `reply.peer.port` 写 global
-  （UDP 监听载荷没有 udp 头，对端地址来自 socket peer）→ 触发 `echo.pkt` 重建
-  查询（同 id 同 flags）发回查询方。
+  （UDP 监听载荷没有 udp 头，对端地址来自 socket peer）→ handler 执行 `echo.pkt`
+  重建查询（同 id 同 flags）发回查询方。
 
 **终端 2（客户端配方）**：
 
@@ -107,11 +107,11 @@ step 2/2  examples/sniffer_chat/step2.pkt
 | 机制 | 语法/命令 | 作用 |
 | --- | --- | --- |
 | `export:` | .pkt 的导出段 | 声明要**发出**的包 |
-| `sniffer:` | .pkt 的匹配声明 | 客户端：`wait:` 校验回包；服务端：listen 步骤的监听规则 |
+| `sniffer:` | .pkt 的匹配声明 | 客户端：`wait:` 校验回包；服务端：serve 规则监听源的分派谓词 |
 | `sent.<层>.<字段>` | 配方 `extract from:` | 取**发包**反解字段（无需 wait） |
 | `reply.<层>.<字段>` | 配方 `extract from:` | 取**回包/匹配包**反解字段（需 wait） |
-| `reply.peer.ip/port` | 配方 `extract from:` | UDP 监听步骤的**对端地址**（来自 socket） |
-| 配方 `wait: -1` | `.pktl` 步骤选项 | 服务端：监听触发（命中后配方继续） |
+| `reply.peer.ip/port` | 配方 `extract from:` | serve 规则命中包的**对端地址**（来自 socket） |
+| 配方 `serve:` | `.pktl` 阶段项 | 服务端：监听分派 + handler 命中处理（阻塞至收工） |
 
 ## 谓词速查（统一谓词引擎）
 

@@ -1,5 +1,5 @@
-# server 配方 · 步骤 1：持续监听（wait: -1）——有 udp 传输层 → 自动选 UDP
-# 数据报监听（绑定 :55353，载荷反解后按 sniffer 匹配），命中后配方继续。
+# server 配方 · serve 规则监听源——有 udp 传输层 → 自动选 UDP 数据报监听
+# （绑定 :55353，载荷反解后按 sniffer 匹配），命中后执行 handler。
 #
 # 注意：sniffer 字段集只含 proto 实际解析的字段（dns: id/flags——opcode 不
 # 在线格式中独立解析，用 flags 位即可）。

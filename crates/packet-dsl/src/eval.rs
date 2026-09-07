@@ -28,6 +28,18 @@ pub type Globals = HashMap<String, Value>;
 /// 宿主注入——回包反解报告 + 字段提取都在宿主侧）。层/字段名 → 类型化值。
 pub type ReplyAccess<'a> = &'a dyn Fn(&str, &str) -> Option<Value>;
 
+/// serve 配方轮次上下文（`round()` / `hits()` 值原语取值源；宿主在构建监听
+/// matcher 与求值 extract/阶段内步骤表达式时注入）。
+///
+/// - `round`：当前 serve 轮次（闸门放行后 1 起；非 serve 上下文不注入）。
+/// - `hits`：本阶段已命中次数（监听 matcher 构建时 = 之前轮次累计；命中后
+///   extract/handler 求值时 = 含本次命中；`on_mismatch` 不计数）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServeCtx {
+    pub round: usize,
+    pub hits: usize,
+}
+
 /// 求值入口：默认导出 + 全部命名导出的包（export 顺序，默认导出在前），无运行时参数。
 pub fn resolve(module: &Module) -> PktResult<BuildResult> {
     resolve_with_params(module, &Params::new())
@@ -408,7 +420,7 @@ pub fn resolve_sources_with_globals(
     params: &Params,
     globals: &Globals,
 ) -> PktResult<Vec<(PacketSource, Vec<PacketSpec>)>> {
-    resolve_sources_ctx(module, params, globals, None)
+    resolve_sources_ctx(module, params, globals, None, None)
 }
 
 /// 按来源分组求值（带运行时参数 + 全局存储 + **回包访问器**）：`reply("层","字段")`
@@ -420,7 +432,19 @@ pub fn resolve_sources_with_reply<'a>(
     globals: &Globals,
     reply: ReplyAccess<'a>,
 ) -> PktResult<Vec<(PacketSource, Vec<PacketSpec>)>> {
-    resolve_sources_ctx(module, params, globals, Some(reply))
+    resolve_sources_ctx(module, params, globals, Some(reply), None)
+}
+
+/// 按来源分组求值（带运行时参数 + 全局存储 + **serve 轮次上下文**）：
+/// `round()`/`hits()` 值原语取宿主注入的 serve 轮次（serve 阶段内步骤发包
+/// 求值专用；配方执行器按当前轮次构建）。
+pub fn resolve_sources_with_serve(
+    module: &Module,
+    params: &Params,
+    globals: &Globals,
+    serve: ServeCtx,
+) -> PktResult<Vec<(PacketSource, Vec<PacketSpec>)>> {
+    resolve_sources_ctx(module, params, globals, None, Some(serve))
 }
 
 /// 求值上下文共用体：`reply: Option` 控制 `reply("层","字段")` 是否可用。
@@ -429,6 +453,7 @@ fn resolve_sources_ctx(
     params: &Params,
     globals: &Globals,
     reply: Option<ReplyAccess<'_>>,
+    serve: Option<ServeCtx>,
 ) -> PktResult<Vec<(PacketSource, Vec<PacketSpec>)>> {
     let entry = entry_index(module)?;
     let mut ctx = EvalCtx {
@@ -437,6 +462,7 @@ fn resolve_sources_ctx(
         params,
         globals,
         reply,
+        serve,
         env_stack: vec![FnEnv::new()],
         value_depth: 0,
     };
@@ -479,6 +505,18 @@ pub fn eval_sniffer_value_with_globals(
     globals: &Globals,
     v: &Value,
 ) -> PktResult<Vec<u8>> {
+    eval_sniffer_value_ctx(module, params, globals, None, v)
+}
+
+/// 同 [`eval_sniffer_value_with_globals`]，并注入 serve 轮次上下文
+/// （`round()`/`hits()` 值原语在 serve 阶段的匹配值表达式中可用）。
+pub fn eval_sniffer_value_ctx(
+    module: Option<&Module>,
+    params: &Params,
+    globals: &Globals,
+    serve: Option<ServeCtx>,
+    v: &Value,
+) -> PktResult<Vec<u8>> {
     let module = match module {
         Some(m) => m,
         None => &builtin_only_module(),
@@ -490,6 +528,7 @@ pub fn eval_sniffer_value_with_globals(
         params,
         globals,
         reply: None,
+        serve,
         env_stack: vec![FnEnv::new()],
         value_depth: 0,
     };
@@ -508,6 +547,19 @@ pub fn eval_extract_value(
     reply: ReplyAccess<'_>,
     v: &Value,
 ) -> PktResult<Value> {
+    eval_extract_value_ctx(module, params, globals, reply, None, v)
+}
+
+/// 同 [`eval_extract_value`]，并注入 serve 轮次上下文（serve 阶段 extract 的
+/// `round()`/`hits()` 值原语取当前轮次/已命中次数）。
+pub fn eval_extract_value_ctx(
+    module: Option<&Module>,
+    params: &Params,
+    globals: &Globals,
+    reply: ReplyAccess<'_>,
+    serve: Option<ServeCtx>,
+    v: &Value,
+) -> PktResult<Value> {
     let module = match module {
         Some(m) => m,
         None => &builtin_only_module(),
@@ -519,6 +571,7 @@ pub fn eval_extract_value(
         params,
         globals,
         reply: Some(reply),
+        serve,
         env_stack: vec![FnEnv::new()],
         value_depth: 0,
     };
@@ -580,6 +633,9 @@ struct EvalCtx<'a> {
     /// 回包字段访问器（`reply("层","字段")` 值原语；配方 extract 的 from 表达式
     /// 求值时由宿主注入——回包反解报告 + 字段提取都在宿主侧）。
     reply: Option<ReplyAccess<'a>>,
+    /// serve 轮次上下文（`round()`/`hits()` 值原语；配方 serve 阶段监听 matcher
+    /// 构建与 extract/阶段内步骤表达式求值时由宿主注入，其余上下文为 None）。
+    serve: Option<ServeCtx>,
     /// 函数参数环境栈（内层函数在最上）。
     env_stack: Vec<FnEnv>,
     /// 用户值函数当前调用深度（`eval_user_value_func` 入口 +1、出口 -1）。
@@ -1648,6 +1704,35 @@ impl EvalCtx<'_> {
         _name_span: crate::ast::Span,
     ) -> PktResult<Value> {
         match name {
+            // `round()` / `hits()`：serve 阶段轮次原语（宿主注入当前轮次上下文）。
+            // 仅配方 serve 阶段的 matcher/until/extract/阶段内步骤表达式求值可用；
+            // 其余上下文按 0 参调用给出可操作报错（与 reply 同策略：用户函数
+            // 撞名时非 0 参调用仍走用户函数分支）。
+            "round" | "hits" => {
+                if let Some(sc) = self.serve {
+                    if !args.is_empty() {
+                        return Err(Diagnostic::at(
+                            format!("`{name}` 不接受参数（serve 轮次原语无参调用）"),
+                            span,
+                        ));
+                    }
+                    return Ok(Value::Int(if name == "round" {
+                        sc.round as i64
+                    } else {
+                        sc.hits as i64
+                    }));
+                }
+                if args.is_empty() {
+                    return Err(Diagnostic {
+                        kind: crate::diag::DiagnosticKind::ReplyOutsideRecipe,
+                        ..Diagnostic::at(
+                            "`round()`/`hits()` 只能在配方 serve 阶段的 matcher/until/extract/阶段内步骤表达式中使用（本上下文没有 serve 轮次）".to_string(),
+                            span,
+                        )
+                    });
+                }
+                self.eval_user_value_func(module, name, args, span)
+            }
             // `reply("层", "字段")`：读取当前回包的反解字段（配方 extract 的
             // `from:` 表达式专用，宿主注入访问器）。仅在注入回包访问器（extract
             // 求值上下文）时按内置处理；其余上下文回退用户函数——eng_lib/bytes.pkt

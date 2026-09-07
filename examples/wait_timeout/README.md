@@ -35,8 +35,8 @@ recipe:
   params: qport=58888,fport=59999
 ```
 
-- `on_timeout` 仅对 `wait: 秒数`（有限等待）生效；`wait: -1` / 负数（无限等待）
-  没有超时概念；
+- `on_timeout` 仅对 `wait: 秒数`（有限等待）生效；`serve:` 阶段（持续监听）
+  没有超时概念（步骤 `wait:` 只接受非负秒数，负数已非法）；
 - 超时判定：发送成功但 `wait: 秒数` 内未收到匹配应答（replies 为空）；
 - 备选包注入当前 global/params（可用 `global("...")` / `params("...")` 构造）；
 - 备选包发送失败 → 走 `on_error` 处理；超时后步骤若有 `extract` 的 `reply.` 来源
@@ -52,6 +52,6 @@ recipe:
 
 | pktl | CLI | 语义 |
 | --- | --- | --- |
-| `wait: -1` 或负数 | `--wait`（无值）或负数（如 `--wait=-2`） | 无限等待（无值 = 持续监听，命中后配方继续） |
+| `serve:` 阶段 | `--wait`（无值）纯监听 | 持续监听 + 命中处理（步骤 `wait:` 负数已非法，持续监听由 `serve:` 接管） |
 | `wait: 秒数` | `--wait SECS` | 发送后等一个匹配应答（超时触发 `on_timeout`） |
 | 不写 | 无 | 纯发送 |

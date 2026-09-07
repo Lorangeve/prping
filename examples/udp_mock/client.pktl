@@ -2,10 +2,10 @@
 #
 # 步骤 1：发 DNS 查询（id=0x1234, "example.com"）→ `wait: 2` 校验服务端配方
 #         的 DNS 应答（sniffer 匹配 id 一致 + flags=0x8180 应答位）。
-# 步骤 2：`delay: 1.0` 给 server 配方留出「关 DNS 组监听 → 开 VNC 组监听」的
+# 步骤 2：`delay: 1.0` 给 server 配方留出「DNS 阶段收工 → VNC 阶段开监听」的
 #         时间（回环上 client 全程 <1ms 就跑完，不加 delay 会在 server 的
-#         :5900 监听就绪前就发出横幅，导致第 2 组等不到包——只命中 2 条；
-#         0.5 在 AF_PACKET 重开下够用，pcap 构建重开抓包更慢，取 1.0 稳妥）。
+#         :5900 监听就绪前就发出横幅，导致第 2 阶段等不到包——只命中 2 条；
+#         两个 serve 阶段切换在 AF_PACKET 下够快，pcap 构建切换抓包更慢，取 1.0 稳妥）。
 #         再发 VNC 横幅 → `wait: 2` 等回横幅（**无 sniffer**：横幅是裸文本
 #         数据报，反解不出可匹配的层，引擎按「第一个数据报即应答」核验，
 #         详见 udp_vnc.pkt 注释）。
@@ -23,4 +23,4 @@ recipe:
 - packet: udp_vnc.pkt
   wait: 2
   delay: 1.0
-  on_timeout: retry 2   # 服务端重开下一组监听可能需 1-2s（pcap 构建），超时自动重发
+  on_timeout: retry 2   # 服务端切换到 VNC 阶段监听可能需 1-2s（pcap 构建），超时自动重发

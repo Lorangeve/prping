@@ -2247,3 +2247,58 @@ use(payload) |> icmp(type=0, id=reply(\"icmp\",\"id\"), seq=reply(\"icmp\",\"seq
     let err = packet_dsl::resolve_sources(&m).unwrap_err().to_string();
     assert!(err.contains("reply") || err.contains("未知"), "{err}");
 }
+
+/// round()/hits()：serve 轮次上下文注入 → 值原语在匹配值/extract 表达式中求值；
+/// 无上下文时给出可操作报错（不是未知函数）。
+#[test]
+fn round_hits_serve_ctx() {
+    use packet_dsl::ast::Value;
+    let serve = packet_dsl::ServeCtx { round: 2, hits: 5 };
+    // 匹配值表达式位置：be16(round()) / be16(hits()) → 字节
+    let v = packet_dsl::parser::parse_value_expr("be16(round())").unwrap();
+    let bytes = packet_dsl::eval_sniffer_value_ctx(
+        None,
+        &packet_dsl::Params::new(),
+        &packet_dsl::Globals::new(),
+        Some(serve),
+        &v,
+    )
+    .unwrap();
+    assert_eq!(bytes, vec![0, 2]);
+
+    let v = packet_dsl::parser::parse_value_expr("be16(hits())").unwrap();
+    let bytes = packet_dsl::eval_sniffer_value_ctx(
+        None,
+        &packet_dsl::Params::new(),
+        &packet_dsl::Globals::new(),
+        Some(serve),
+        &v,
+    )
+    .unwrap();
+    assert_eq!(bytes, vec![0, 5]);
+
+    // extract 表达式位置：类型化 Int（可参与运算）
+    let v = packet_dsl::parser::parse_value_expr("hits() + 1").unwrap();
+    let val = packet_dsl::eval_extract_value_ctx(
+        None,
+        &packet_dsl::Params::new(),
+        &packet_dsl::Globals::new(),
+        &|_, _| None,
+        Some(packet_dsl::ServeCtx { round: 1, hits: 3 }),
+        &v,
+    )
+    .unwrap();
+    assert_eq!(val, Value::Int(4));
+
+    // 无 serve 上下文：0 参调用报可操作错误（带 serve 字样；非「未知函数」）
+    let v = packet_dsl::parser::parse_value_expr("round()").unwrap();
+    let err = packet_dsl::eval_sniffer_value_ctx(
+        None,
+        &packet_dsl::Params::new(),
+        &packet_dsl::Globals::new(),
+        None,
+        &v,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("serve"), "{err}");
+}

@@ -1,26 +1,25 @@
 # DHCP mock · 服务端配方（server.pktl）：一个 pktl 就是一个 DHCP 服务器（DORA
-# 的服务端两步）。配方显式列出**两组**监听+应答步骤（pktl 可包含任意多包）：
-# 每组 = 一次 listen 命中（持续监听直到匹配 BOOTREQUEST）→ extract 写 global →
-# 触发发包应答。两组对应 client.pktl 的两步请求（Discover→Offer、Request→Ack）；
-# 要服务更多次就再写几组。
+# 的服务端两步）。这里**两个 serve 阶段**顺序排列（各 `max: 1`），对应
+# client.pktl 的两步请求（Discover→Offer、Request→Ack）：为什么不分派？同端口
+# :67 的 Discover/Request 共用同一条 sniffer 规则（op=1 即 BOOTREQUEST，谓词
+# 区分不了两者——option 53 字节模式表达不了，见 listen.pkt 注释的验证结论），
+# 即便分派监听（同地址多规则按序匹配）也无法区分两条规则的谓词，故保持顺序
+# 两阶段：第 1 阶段命中的是 Discover、第 2 阶段是 Request。
 #
-# 每组步骤：
-#   步骤 1：listen.pkt + raw: true（**必须显式**——包内有 udp，不写 raw 会自动
-#           选 UDP 数据报监听，而裸 DHCP 载荷反解不出任何层，永远匹配不到；
-#           论证与实测见 listen.pkt 头注）→ wait: -1（= 持续监听）链路层抓帧
-#           匹配 BOOTREQUEST，命中后 extract 匹配帧字段写 global：
-#           cip=reply.ipv4.src（客户端 IP）、cport=reply.udp.sport（客户端端口）、
-#           sip=reply.ipv4.dst（本机 IP——客户端把包发给了谁）。
-#   步骤 2：触发发包——Offer/Ack 数组 + global 封装单播回客户端（真实 DHCP 是
-#           广播，mock 单播简化，见 dhcp_offer.pkt 说明）。
+# 每阶段：
+#   规则监听 listen.pkt + raw: true（**必须显式**——包内有 udp，不写 raw 会自动
+#   选 UDP 数据报监听，而裸 DHCP 载荷反解不出任何层，永远匹配不到；论证与实测
+#   见 listen.pkt 头注）→ 链路层抓帧匹配 BOOTREQUEST，命中后 extract 匹配帧
+#   字段写 global：cip=reply.ipv4.src（客户端 IP）、cport=reply.udp.sport
+#   （客户端端口）、sip=reply.ipv4.dst（本机 IP——客户端把包发给了谁）。
+#   handler 触发发包——Offer/Ack 数组 + global 封装单播回客户端（真实 DHCP 是
+#   广播，mock 单播简化，见 dhcp_offer.pkt 说明）。
 #
-# 两组 listen 用同一条 sniffer 规则（op=1 即 BOOTREQUEST），按组配对：第 1 组
-# 命中的是 Discover、第 2 组是 Request。为什么谓词区分不了 Discover/Request
-#（option 53 字节模式表达不了），见 listen.pkt 注释的验证结论。
+# 注意：client 步骤 2 带 delay: 0.5，给本配方「第 1 阶段收工 → 第 2 阶段监听
+# 就绪」留出时间——回环上 client 全程亚毫秒，不加 delay 会错过第二个请求
+# （经验同 icmp_mock「为什么 seq 是 1001/1002」一节）。
 #
-# 注意：client 步骤 2 带 delay: 0.5，给本配方重开下一轮抓包（重新打开
-# AF_PACKET socket）留出时间——回环上 client 全程亚毫秒，不加 delay 会错过
-# 第二个请求（经验同 icmp_mock「为什么 seq 是 1001/1002」一节）。
+# 本 mock 服务一轮 DORA（对应 client 的两步请求）；Ctrl+C 随时优雅收工。
 #
 # 运行（需 root：链路层监听走 AF_PACKET；回环 lo 即可，无需真实网卡）：
 #   sudo prping packet examples/dhcp_mock/server.pktl
@@ -32,35 +31,41 @@ global:
 - cport
 
 recipe:
-# ── 第 1 组：监听 Discover → extract → 触发发包 Offer（对应 client 步骤 1）──
-- packet: listen.pkt
-  raw: true
-  wait: -1
-  extract:
-  - name: cip
-    from: reply.ipv4.src
-    as: str
-  - name: sip
-    from: reply.ipv4.dst
-    as: str
-  - name: cport
-    from: reply.udp.sport
-    as: int
-- packet: dhcp_offer.pkt
-  raw: true
-# ── 第 2 组：监听 Request → extract → 触发发包 Ack（对应 client 步骤 2）──
-- packet: listen.pkt
-  raw: true
-  wait: -1
-  extract:
-  - name: cip
-    from: reply.ipv4.src
-    as: str
-  - name: sip
-    from: reply.ipv4.dst
-    as: str
-  - name: cport
-    from: reply.udp.sport
-    as: int
-- packet: dhcp_ack.pkt
-  raw: true
+# ── 第 1 阶段：监听 Discover → extract → 触发发包 Offer（对应 client 步骤 1）──
+- serve:
+  max: 1
+  rules:
+  - packet: listen.pkt
+    raw: true
+    extract:
+    - name: cip
+      from: reply.ipv4.src
+      as: str
+    - name: sip
+      from: reply.ipv4.dst
+      as: str
+    - name: cport
+      from: reply.udp.sport
+      as: int
+    handler:
+    - packet: dhcp_offer.pkt
+      raw: true
+# ── 第 2 阶段：监听 Request → extract → 触发发包 Ack（对应 client 步骤 2）──
+- serve:
+  max: 1
+  rules:
+  - packet: listen.pkt
+    raw: true
+    extract:
+    - name: cip
+      from: reply.ipv4.src
+      as: str
+    - name: sip
+      from: reply.ipv4.dst
+      as: str
+    - name: cport
+      from: reply.udp.sport
+      as: int
+    handler:
+    - packet: dhcp_ack.pkt
+      raw: true

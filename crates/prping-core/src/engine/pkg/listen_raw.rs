@@ -326,6 +326,232 @@ pub(crate) fn listen_raw_once(
     }
 }
 
+/// 分派监听（多规则/带 on_mismatch 的 serve 阶段，链路层）单次收帧结果。
+#[derive(Clone)]
+pub(crate) enum RawDispatch {
+    /// 规则 k 命中帧（按规则表顺序匹配，先到先得）；`until_matched` 同
+    /// [`RawListen::Hit`]。
+    Hit {
+        rule: usize,
+        data: Vec<u8>,
+        until_matched: bool,
+    },
+    /// 仅 until 命中（无规则命中）：阶段立即收工。
+    Until,
+    /// 无任何命中（仅带 on_mismatch 的阶段返回）：执行器跑 on_mismatch 段后
+    /// 重新监听，不消耗轮次。
+    Mismatch { data: Vec<u8> },
+}
+
+/// serve 分派监听（raw 链路层）：单一抓包循环按序匹配全部规则 matcher，
+/// 第一个命中的规则获胜；`on_mismatch` = true 时未命中帧以
+/// [`RawDispatch::Mismatch`] 返回。返回 `None` = Ctrl+C 中断。
+pub(crate) fn listen_raw_dispatch(
+    matchers: Vec<Arc<packet_dsl::Matcher>>,
+    until: Option<Arc<packet_dsl::Matcher>>,
+    iface: Option<&str>,
+    timeout: Option<Duration>,
+    on_mismatch: bool,
+) -> anyhow::Result<Option<RawDispatch>> {
+    let deadline = timeout.map(|d| std::time::Instant::now() + d);
+    let expired = |deadline: Option<std::time::Instant>| {
+        deadline.is_some_and(|dl| std::time::Instant::now() >= dl)
+    };
+    #[cfg(all(target_os = "linux", not(feature = "pcap")))]
+    {
+        let ifindex = match iface {
+            Some(name) => {
+                let c = std::ffi::CString::new(name).map_err(|_| {
+                    anyhow::anyhow!(t!("engine.listen_raw_bad_iface", iface = name))
+                })?;
+                let idx = unsafe { libc::if_nametoindex(c.as_ptr()) };
+                if idx == 0 {
+                    anyhow::bail!(t!("engine.listen_raw_unknown_iface", iface = name));
+                }
+                idx as libc::c_int
+            }
+            None => 0, // 全接口
+        };
+        let fd = crate::util::socket::open_af_packet(ifindex)?;
+        let _ = crate::util::socket::af_packet_promisc_all(fd);
+        let mut buf = vec![0u8; crate::util::RECV_BUF_SIZE];
+        let hit = loop {
+            if crate::util::interrupted() || expired(deadline) {
+                break None;
+            }
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let rc = unsafe { libc::poll(&mut pfd, 1, 200) };
+            if rc <= 0 {
+                continue;
+            }
+            let n = unsafe {
+                libc::recvfrom(
+                    fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if n <= 0 {
+                continue;
+            }
+            let frame = buf[..n as usize].to_vec();
+            let mut outcome: Option<RawDispatch> = None;
+            for (k, m) in matchers.iter().enumerate() {
+                if m.matches(&frame, None).is_some() {
+                    let until_matched = until
+                        .as_ref()
+                        .is_some_and(|u| u.matches(&frame, None).is_some());
+                    outcome = Some(RawDispatch::Hit {
+                        rule: k,
+                        data: frame.clone(),
+                        until_matched,
+                    });
+                    break;
+                }
+            }
+            if outcome.is_none()
+                && let Some(u) = until.as_ref()
+                && u.matches(&frame, None).is_some()
+            {
+                outcome = Some(RawDispatch::Until);
+            }
+            if outcome.is_none() && on_mismatch {
+                outcome = Some(RawDispatch::Mismatch {
+                    data: frame.clone(),
+                });
+            }
+            if let Some(o) = outcome {
+                break Some(o);
+            }
+        };
+        unsafe { libc::close(fd) };
+        Ok(hit)
+    }
+    #[cfg(any(windows, target_os = "macos", feature = "pcap"))]
+    {
+        let devs = crate::engine::rawpcap::list_devices()?;
+        let wanted: Vec<usize> = match iface {
+            Some(pat) => devs
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| {
+                    d.name.eq_ignore_ascii_case(pat)
+                        || d.desc
+                            .as_deref()
+                            .is_some_and(|s| s.to_lowercase().contains(&pat.to_lowercase()))
+                })
+                .map(|(i, _)| i)
+                .collect(),
+            None => (0..devs.len()).collect(),
+        };
+        if wanted.is_empty() {
+            anyhow::bail!(t!(
+                "engine.listen_raw_unknown_iface",
+                iface = iface.unwrap_or("")
+            ));
+        }
+        let captured: Arc<Mutex<Option<RawDispatch>>> = Arc::new(Mutex::new(None));
+        let matchers = Arc::new(matchers);
+        let mut handles = Vec::new();
+        for idx in wanted {
+            let dev = devs[idx].name.clone();
+            if let Ok(mut cap) = crate::engine::rawpcap::open_capture_listen(&dev) {
+                let dlt = cap.get_datalink();
+                let matchers = Arc::clone(&matchers);
+                let until = until.clone();
+                let captured = Arc::clone(&captured);
+                handles.push(std::thread::spawn(move || {
+                    loop {
+                        if crate::util::interrupted()
+                            || captured.lock().expect("captured lock").is_some()
+                        {
+                            break;
+                        }
+                        match cap.next_packet() {
+                            Ok(p) => {
+                                let data =
+                                    if dlt == pcap::Linktype::NULL || dlt == pcap::Linktype::LOOP {
+                                        match crate::serve::strip_null(p.data) {
+                                            Some(ip) => ip,
+                                            None => continue,
+                                        }
+                                    } else {
+                                        p.data
+                                    };
+                                let mut outcome: Option<RawDispatch> = None;
+                                for (k, m) in matchers.iter().enumerate() {
+                                    if m.matches(data, None).is_some() {
+                                        let until_matched = until
+                                            .as_ref()
+                                            .is_some_and(|u| u.matches(data, None).is_some());
+                                        outcome = Some(RawDispatch::Hit {
+                                            rule: k,
+                                            data: data.to_vec(),
+                                            until_matched,
+                                        });
+                                        break;
+                                    }
+                                }
+                                if outcome.is_none()
+                                    && let Some(u) = until.as_ref()
+                                    && u.matches(data, None).is_some()
+                                {
+                                    outcome = Some(RawDispatch::Until);
+                                }
+                                if outcome.is_none() && on_mismatch {
+                                    outcome = Some(RawDispatch::Mismatch {
+                                        data: data.to_vec(),
+                                    });
+                                }
+                                if let Some(o) = outcome {
+                                    *captured.lock().expect("captured lock") = Some(o);
+                                    break;
+                                }
+                            }
+                            Err(pcap::Error::TimeoutExpired) => continue,
+                            Err(_) => break,
+                        }
+                    }
+                }));
+            }
+        }
+        if handles.is_empty() {
+            anyhow::bail!(t!("engine.listen_raw_no_devices"));
+        }
+        let hit = loop {
+            if let Some(f) = captured.lock().expect("captured lock").clone() {
+                break Some(f);
+            }
+            if crate::util::interrupted() || expired(deadline) {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        for h in handles {
+            let _ = h.join();
+        }
+        Ok(hit)
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", not(feature = "pcap")),
+        windows,
+        target_os = "macos",
+        feature = "pcap"
+    )))]
+    {
+        Err(anyhow::anyhow!(
+            "raw 链路层监听暂不支持当前平台（需要 Linux AF_PACKET 或 libpcap/Npcap）"
+        ))
+    }
+}
+
 // ── Linux（默认）：AF_PACKET 单 socket ────────────────────────────────────
 
 #[cfg(all(target_os = "linux", not(feature = "pcap")))]

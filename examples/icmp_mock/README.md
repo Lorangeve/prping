@@ -5,7 +5,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（ICMP echo 服务） | **显式多组** listen+reply（pktl 可含任意多包）：每组 = `wait: -1` 链路层监听匹配 echo request → extract id/载荷/双向 IP 写 global → 触发发包 echo reply（**seq 偏移 +1000 作配方标记**，见下）。两组对应 client 两步；要服务更多次就多写几组 |
+| `server.pktl` | 服务端（ICMP echo 服务） | `serve:` 阶段单条规则逐轮服务（`max: 2`）：链路层监听匹配 echo request → extract id/载荷/双向 IP 写 global → handler 触发发包 echo reply（**seq 偏移 +1000 作配方标记**，见下）。两轮对应 client 两步；要服务更多次调大 `max:`（`-1` = 无限） |
 | `client.pktl` | 客户端（多包流程） | 1. 发 echo request（id=0x1234, seq=1）→ `wait: 2` 校验 echo reply（sniffer 期望 seq=1001）→ extract 回包 icmp.id 写 global.cid；2. `delay: 0.5` 后**复用** cid 再发一个 request（seq=2，期望 1002）→ `wait: 2` 校验 |
 
 发包用**裸 IP 外层**（无 eth 层）：ICMP 发送走**内核 IP 栈 raw socket**——
@@ -37,19 +37,19 @@ sudo prping packet examples/icmp_mock/client.pktl
 - `reply.pkt` 把回包 `seq` 偏移为 `请求 seq + 1000`（配方标记）；
 - client 的 sniffer 只匹配 `seq=1001` / `seq=1002`——内核替答永远回显原 seq，
   匹配不到，命中的必然是配方回包；
-- client 步骤 2 带 `delay: 0.5`：server 每命中一次都要重新打开下一轮抓包（pcap
-  设备枚举 + BPF），回环上 client 全程 <1ms 就跑完，不加 delay 会错过第二个请求
-  （表现为只命中 3 条：server 1 次 + client 2 次）。
+- client 步骤 2 带 `delay: 0.5`：serve 的轮次是串行的（命中 → handler 回包 →
+  下一轮监听就绪），回环上 client 全程 <1ms 就跑完，不加 delay 第二个请求可能落进
+  轮次间隙被错过（表现为只命中 3 条：server 1 次 + client 2 次）。
 
 > 换 `en0 + 本机局域网 IP` 也躲不开内核替答——目标仍是本机地址。要彻底绕开，
 > 目标得是另一台机器；或改用非 ICMP 的 mock（如 DNS/UDP，内核不会替答）。
 
 ## 配方引擎已覆盖的能力（即"全部功能都支持"）
 
-- **监听触发**：`wait: -1`（= CLI 裸 `--wait`）= 持续监听，sniffer 匹配外部包，
-  命中后配方继续（触发后续步骤发包）；
-- **链路层监听**：`raw: true` 让监听步骤走完整帧匹配（`icmp` 层字段齐全，无需
-  `reply.peer.*`——帧内 ipv4 src/dst 直接可取）；
+- **监听触发**：`serve:` 阶段阻塞监听（`max:` 控制服务轮数，负数 = 无限），
+  sniffer 匹配外部包，命中后执行 `handler` 步骤（触发发包）；
+- **链路层监听**：listen 包无 udp/tcp 传输层 → 自动走完整帧匹配（`icmp` 层字段
+  齐全，无需 `reply.peer.*`——帧内 ipv4 src/dst 直接可取）；
 - **extract 跨步骤**：匹配帧字段 → global（`reply.icmp.id` / `reply.icmp.payload` /
   `reply.ipv4.src|dst`），`as: int|bytes|str`；后续步骤用 `global("...")` 构造发包；
 - **多包流程**：客户端两个 request 步骤，步骤 2 复用步骤 1 从回包提取的 `cid`；
@@ -60,6 +60,6 @@ sudo prping packet examples/icmp_mock/client.pktl
 ## 验证（字节级，不依赖 root/网络）
 
 `recipe.rs::icmp_mock_recipe_simulation`：读真实 demo 文件——构造 echo request →
-server 配方 extract → reply.pkt 用 global 构造 echo reply → 断言 type=0/id/payload
+server 规则 extract → reply.pkt 用 global 构造 echo reply → 断言 type=0/id/payload
 回显、seq=请求 seq+1000（配方标记）、IP 互换 → client 配方 sniffer 校验（1001）+
-extract cid → req2 复用 cid → server 二次回包（seq=1002）→ client req2 sniffer 校验。
+extract cid → req2 复用 cid → server 第二轮回包（seq=1002）→ client req2 sniffer 校验。

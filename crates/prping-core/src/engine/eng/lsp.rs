@@ -308,11 +308,12 @@ impl LspServer {
             }
         }
 
-        // loop 块上下文：最近的列 0 配方项是否 `- loop:`（其后无其他列 0 项），
-        // 以及当前处于 until 谓词列表还是 steps: 嵌套步骤
-        let mut in_loop_item = false;
+        // serve 阶段上下文：最近的列 0 配方项是否 `- serve:`（其后无其他列 0 项），
+        // 以及当前处于 until 谓词 / rules 规则表 / handler 条目的哪个层级
+        let mut in_serve = false;
         let mut in_until_list = false;
-        let mut in_loop_steps = false;
+        let mut in_rules = false;
+        let mut in_handler = false;
         for i in (0..line_no).rev() {
             let raw = lines.get(i).copied().unwrap_or("");
             let t = raw.trim();
@@ -321,40 +322,55 @@ impl LspServer {
             }
             let indent_i = raw.len() - raw.trim_start().len();
             if indent_i == 0 {
-                if t.starts_with("- loop:") {
-                    in_loop_item = true;
+                if t.starts_with("- serve:") {
+                    in_serve = true;
                 }
                 break;
             }
+            // 取最近的层级键（嵌套 on_recv 的 handler: 会覆盖外层 rules:）
             if t == "until:" {
                 in_until_list = true;
+                in_rules = false;
+                in_handler = false;
             }
-            if t == "steps:" {
-                in_loop_steps = true;
+            if t == "rules:" {
+                in_rules = true;
+                in_until_list = false;
+                in_handler = false;
+            }
+            if t.starts_with("handler:") {
+                in_handler = true;
+                in_until_list = false;
+                in_rules = false;
             }
         }
 
-        // 项形态（`- ` 起头）：提取子项 → name:；配方顶层步骤 → packet:；global 项 → name:
+        // 项形态（`- ` 起头）：提取子项 → name:；配方顶层步骤 → packet:/serve:；global 项 → name:
         if let Some(item) = trimmed.strip_prefix("- ") {
             let _ = item;
             if in_extract {
                 return str_items(&["name: "], "提取项（from: 取回包字段）");
             }
             if section == "recipe" && indent == 0 {
-                return str_items(&["packet: ", "loop: "], "步骤 .pkt 文件 / loop 块");
+                return str_items(&["packet: ", "serve: "], "步骤 .pkt 文件 / serve 阶段");
             }
-            // loop 项内的 `- ` 行：until 谓词 / 嵌套步骤
-            if in_loop_item && indent > 0 {
+            // serve 项内的 `- ` 行：until 谓词 / 规则 / handler 条目
+            if in_serve && indent > 0 {
                 if in_until_list {
                     return str_items(
                         &["match "],
                         "until 谓词（sniffer 同款：match 层(条件, ...)）",
                     );
                 }
-                if in_loop_steps {
-                    return str_items(&["packet: "], "loop 嵌套步骤 .pkt 文件");
+                if in_rules && !in_handler {
+                    return str_items(&["packet: "], "serve 规则（监听源 .pkt）");
                 }
-                return str_items(&["until:", "steps:"], "loop 项选项");
+                if in_handler {
+                    return str_items(
+                        &["packet: ", "on_recv:"],
+                        "handler 条目（命中后步骤 / 嵌套等下一包）",
+                    );
+                }
             }
             if section == "global" {
                 return str_items(&["name: "], "全局变量（init: 可选初始化）");
@@ -362,7 +378,7 @@ impl LspServer {
             return str_items(&["packet: ", "name: "], "项");
         }
 
-        // 缩进行：选项键（提取续行 from:/as:，global 的 init:，步骤选项组）
+        // 缩进行：选项键（提取续行 from:/as:，global 的 init:，步骤/serve 选项组）
         if indent > 0 {
             if in_extract {
                 return str_items(&["from: ", "as: "], "提取键");
@@ -371,10 +387,21 @@ impl LspServer {
                 return str_items(&["init: "], "global 选项");
             }
             if section == "recipe" {
-                // loop 项内、steps: 之前 → loop 项选项；其余（含嵌套步骤内）为常规步骤选项
-                if in_loop_item && !in_loop_steps {
-                    return str_items(&["until:", "steps:", "delay: "], "loop 项选项");
+                // serve 阶段选项（rules: 之前）
+                if in_serve && !in_rules && !in_handler {
+                    return str_items(
+                        &["max: ", "until:", "delay: ", "on_mismatch:", "rules:"],
+                        "serve 阶段选项",
+                    );
                 }
+                // serve 规则选项（rules: 内、handler: 之前）
+                if in_serve && in_rules && !in_handler {
+                    return str_items(
+                        &["raw: ", "params: ", "extract:", "handler:"],
+                        "serve 规则选项",
+                    );
+                }
+                // 其余（含 handler 内步骤）为常规步骤选项
                 return str_items(
                     &[
                         "wait: ",
@@ -3130,10 +3157,10 @@ mod tests {
         );
         // global 项 → name:
         assert_eq!(ask(1, 2), vec!["name: ".to_string()]);
-        // 步骤项 → packet: / loop:
+        // 步骤项 → packet: / serve:
         assert_eq!(
             ask(4, 2),
-            vec!["packet: ".to_string(), "loop: ".to_string()]
+            vec!["packet: ".to_string(), "serve: ".to_string()]
         );
         // 提取子项 → name:；提取续行 → from:/as:
         assert_eq!(ask(7, 4), vec!["name: ".to_string()]);
@@ -4162,9 +4189,17 @@ mod tests {
         let pktl = root.join("examples/bad_network/bad_network.pktl");
         let text = std::fs::read_to_string(&pktl).expect("读取 bad_network.pktl");
         let recipe = crate::engine::recipe::parse_text(&text, &pktl).expect("配方解析应成功");
-        assert!(!recipe.steps.is_empty(), "bad_network 配方应有步骤");
+        let steps: Vec<&crate::engine::recipe::Step> = recipe
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                crate::engine::recipe::RecipeItem::Step(s) => Some(s),
+                crate::engine::recipe::RecipeItem::Serve(_) => None,
+            })
+            .collect();
+        assert!(!steps.is_empty(), "bad_network 配方应有步骤");
         let dir = pktl.parent().unwrap();
-        for step in &recipe.steps {
+        for step in &steps {
             let target = dir.join(&step.pkg);
             assert!(target.is_file(), "步骤 .pkt 应存在: {}", target.display());
         }

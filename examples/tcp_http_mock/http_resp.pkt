@@ -1,4 +1,4 @@
-# server 配方 · 第 2 组步骤 2（触发发包）：构造 HTTP/1.1 200 OK 响应发回请求方。
+# server 配方 · 嵌套 on_recv handler 步骤（触发发包）：构造 HTTP/1.1 200 OK 响应发回请求方。
 #
 # seq/ack 推导（本目录最核心的动态链，对照 README 时序表逐项对账）：
 #   r2_seq = 客户端 GET 的 tcp.seq = 0x1001（GET 载荷 38 字节，占 seq 0x1001..0x1026）

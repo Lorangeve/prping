@@ -596,97 +596,45 @@ async fn dispatch(
 }
 
 /// .pktl 配方概览 JSON（前端 Recipe/Globals 面板数据）：globals、steps（含
-/// extract 与 params）、扁平化的 params 键值表。
+/// serve 阶段与 handler 内步骤的扁平数组）、扁平化的 params 键值表。
+///
+/// 键名保持 "steps"（前端兼容），条目按深度优先展开：
+/// - 顶层步骤 → 原步骤字段；
+/// - serve 阶段 → `{"type":"serve", idx/max/until/line}` 一条；
+/// - 其 rules/handler 内的每个步骤 → 原步骤字段 + `"serve": {"id": N}`（所属
+///   serve 条目的 idx）+ `"depth"`（嵌套深度：规则 handler = 1，on_recv 递归 +1）。
 fn recipe_overview(r: &crate::engine::recipe::Recipe) -> Value {
     use crate::engine::eng::value_display;
-    use crate::engine::pkg::WaitMode;
-    use crate::engine::recipe::{FromSpec, OnError, OnTimeout, StepRaw};
+    use crate::engine::recipe::RecipeItem;
 
     let mut params: Vec<Value> = Vec::new();
-    // 步骤级 params: 的键集合（同名运行参数会被步骤覆盖——decl 行标注用）
+    // 步骤/规则级 params: 的键集合（同名运行参数会被覆盖——decl 行标注用）
     let mut overridden: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let steps: Vec<Value> = r
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(idx, s)| {
-            for (k, v) in &s.params {
-                params.push(json!({ "key": k, "value": v, "step": idx + 1 }));
-                overridden.insert(k.clone());
+
+    // 条目深度优先展开成扁平 steps 数组（键名兼容前端）
+    let mut steps: Vec<Value> = Vec::new();
+    for item in &r.items {
+        match item {
+            RecipeItem::Step(s) => {
+                push_step_entry(&mut steps, &mut params, &mut overridden, s, None);
             }
-            let wait = match s.wait {
-                None | Some(WaitMode::Off) => Value::Null,
-                Some(WaitMode::OneShot(secs)) => json!(format!("{secs}s")),
-                Some(WaitMode::Continuous) => json!("∞"),
-            };
-            let on_timeout = match &s.on_timeout {
-                None => Value::Null,
-                Some(OnTimeout::Retry(n)) => json!(format!("retry×{n}")),
-                Some(OnTimeout::Packet(p)) => {
-                    json!(
-                        p.file_name()
-                            .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_else(|| p.display().to_string())
-                    )
+            RecipeItem::Serve(serve) => {
+                // serve 阶段条目（max None = 无限；until 谓词文本列表）
+                let idx = steps.len() + 1;
+                steps.push(json!({
+                    "type": "serve",
+                    "idx": idx,
+                    "max": serve.max,
+                    "until": serve.until,
+                    "on_mismatch": serve.on_mismatch.as_ref().map(|m| !m.is_empty()),
+                    "line": serve.line,
+                }));
+                for rule in &serve.rules {
+                    push_rule_entries(&mut steps, &mut params, &mut overridden, rule, idx, 1);
                 }
-            };
-            let raw = match &s.raw {
-                None => Value::Null,
-                Some(StepRaw::On { iface }) => match iface {
-                    Some(name) => json!(name),
-                    None => json!("true"),
-                },
-                Some(StepRaw::Off) => json!("false"),
-            };
-            let extract: Vec<Value> = s
-                .extract
-                .iter()
-                .map(|e| {
-                    let from = match &e.from {
-                        FromSpec::Field { layer, field } => format!("reply.{layer}.{field}"),
-                        FromSpec::SentField { layer, field } => format!("sent.{layer}.{field}"),
-                        FromSpec::PeerField { field } => format!("reply.peer.{field}"),
-                        FromSpec::Expr(v) => value_display(v),
-                    };
-                    json!({
-                        "name": e.name,
-                        "from": from,
-                        "as": format!("{:?}", e.as_).to_lowercase(),
-                    })
-                })
-                .collect();
-            json!({
-                "idx": idx + 1,
-                "pkg": s
-                    .pkg
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_else(|| s.pkg.display().to_string()),
-                // 解析后的完整路径：前端 Recipe 面板点包名跳转用（pkg 只是展示名）
-                "pkgPath": s.pkg.display().to_string(),
-                "line": s.line,
-                "wait": wait,
-                "onTimeout": on_timeout,
-                "raw": raw,
-                "onError": match s.on_error {
-                    OnError::Stop => "stop",
-                    OnError::Continue => "continue",
-                },
-                "extract": extract,
-                // loop 块上下文（扁平步骤：块内每步携带同一 LoopCtx）
-                "loop": match &s.loop_ctx {
-                    Some(ctx) => json!({
-                        "id": ctx.id + 1,
-                        "count": ctx.count,
-                        "until": ctx.until,
-                        "first": ctx.first,
-                        "last": ctx.last,
-                    }),
-                    None => Value::Null,
-                },
-            })
-        })
-        .collect();
+            }
+        }
+    }
     let globals: Vec<Value> = r
         .globals
         .iter()
@@ -698,14 +646,15 @@ fn recipe_overview(r: &crate::engine::recipe::Recipe) -> Value {
             })
         })
         .collect();
-    // 聚合运行参数声明：遍历步骤 .pkt 的 params("名", 默认)（词法收集，容错读不到
-    // 的步骤文件——未保存/刚删的文档不能拖垮概览）。跨文件同名：任一声明无默认值
-    // = 必填（缺默认值的那份会构建失败，UI 按「必填」提示更诚实）。
+    // 聚合运行参数声明：遍历全部 packet（顶层步骤 + serve 规则 + handler/on_recv
+    // 递归，recipe_pkt_paths）的 params("名", 默认)（词法收集，容错读不到的文件
+    // ——未保存/刚删的文档不能拖垮概览）。跨文件同名：任一声明无默认值 = 必填
+    // （缺默认值的那份会构建失败，UI 按「必填」提示更诚实）。
     let mut decl_names: Vec<String> = Vec::new();
     let mut decl_defs: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
-    for s in &r.steps {
-        let Ok(decl) = crate::engine::eng::collect_pkt_params(&s.pkg) else {
+    for pkt in crate::engine::eng::recipe_pkt_paths(r) {
+        let Ok(decl) = crate::engine::eng::collect_pkt_params(&pkt) else {
             continue;
         };
         for (name, default) in decl {
@@ -733,6 +682,119 @@ fn recipe_overview(r: &crate::engine::recipe::Recipe) -> Value {
         })
         .collect();
     json!({ "globals": globals, "params": params, "steps": steps, "decl": decl })
+}
+
+/// 单个步骤 → 面板条目（原字段）；`serve` 归属标记（所属 serve 条目 idx + 嵌套
+/// 深度）仅 handler 内条目携带，顶层步骤为 None。步骤级静态 params 记入面板
+/// params 表（step = 本条目在扁平数组中的 idx）。
+fn push_step_entry(
+    steps: &mut Vec<Value>,
+    params: &mut Vec<Value>,
+    overridden: &mut std::collections::HashSet<String>,
+    s: &crate::engine::recipe::Step,
+    serve: Option<(usize, usize)>,
+) {
+    use crate::engine::eng::value_display;
+    use crate::engine::recipe::{FromSpec, OnError, OnTimeout, StepRaw};
+
+    let idx = steps.len() + 1;
+    for (k, v) in &s.params {
+        params.push(json!({ "key": k, "value": v, "step": idx }));
+        overridden.insert(k.clone());
+    }
+    // wait：非负秒数（None = 纯发送；持续监听已由 serve 阶段接管）
+    let wait = match s.wait {
+        None => Value::Null,
+        Some(secs) => json!(format!("{secs}s")),
+    };
+    let on_timeout = match &s.on_timeout {
+        None => Value::Null,
+        Some(OnTimeout::Retry(n)) => json!(format!("retry×{n}")),
+        Some(OnTimeout::Packet(p)) => {
+            json!(
+                p.file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.display().to_string())
+            )
+        }
+    };
+    let raw = match &s.raw {
+        None => Value::Null,
+        Some(StepRaw::On { iface }) => match iface {
+            Some(name) => json!(name),
+            None => json!("true"),
+        },
+        Some(StepRaw::Off) => json!("false"),
+    };
+    let extract: Vec<Value> = s
+        .extract
+        .iter()
+        .map(|e| {
+            let from = match &e.from {
+                FromSpec::Field { layer, field } => format!("reply.{layer}.{field}"),
+                FromSpec::SentField { layer, field } => format!("sent.{layer}.{field}"),
+                FromSpec::PeerField { field } => format!("reply.peer.{field}"),
+                FromSpec::Expr(v) => value_display(v),
+            };
+            json!({
+                "name": e.name,
+                "from": from,
+                "as": format!("{:?}", e.as_).to_lowercase(),
+            })
+        })
+        .collect();
+    let mut entry = json!({
+        "idx": idx,
+        "pkg": s
+            .pkg
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| s.pkg.display().to_string()),
+        // 解析后的完整路径：前端 Recipe 面板点包名跳转用（pkg 只是展示名）
+        "pkgPath": s.pkg.display().to_string(),
+        "line": s.line,
+        "wait": wait,
+        "onTimeout": on_timeout,
+        "raw": raw,
+        "onError": match s.on_error {
+            OnError::Stop => "stop",
+            OnError::Continue => "continue",
+        },
+        "extract": extract,
+    });
+    if let Some((serve_idx, depth)) = serve {
+        entry["serve"] = json!({ "id": serve_idx });
+        entry["depth"] = json!(depth);
+    }
+    steps.push(entry);
+}
+
+/// 一条 serve 规则的展开：规则级静态 params（归属该 serve 条目）+ handler 内
+/// 步骤逐条加入，嵌套 `on_recv` 深度 +1 递归。
+fn push_rule_entries(
+    steps: &mut Vec<Value>,
+    params: &mut Vec<Value>,
+    overridden: &mut std::collections::HashSet<String>,
+    rule: &crate::engine::recipe::ServeRule,
+    serve_idx: usize,
+    depth: usize,
+) {
+    use crate::engine::recipe::ServeItem;
+
+    for (k, v) in &rule.params {
+        params.push(json!({ "key": k, "value": v, "step": serve_idx }));
+        overridden.insert(k.clone());
+    }
+    for item in &rule.handler {
+        match item {
+            ServeItem::Step(s) => {
+                push_step_entry(steps, params, overridden, s, Some((serve_idx, depth)));
+            }
+            ServeItem::OnRecv(r) => {
+                push_rule_entries(steps, params, overridden, r, serve_idx, depth + 1);
+            }
+        }
+    }
 }
 
 /// `params` 对象 → (k, v) 列表（非对象 → 空）。

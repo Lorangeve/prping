@@ -2,9 +2,9 @@
 #
 # 步骤 1：发 DNS 查询（id=0x4242）→ wait: 2 校验服务端配方应答（id 与发包一致 +
 #         应答位 flags=0x8180）→ extract reply.dns.id 写 global.tid（hex 形式）。
-# 步骤 2：delay: 1.0 给服务端配方留出重开下一轮监听的时间（回环上客户端全程亚毫秒，
-#         不加 delay 会错过第二个查询——见 ../icmp_mock/README.md 的同类说明；
-#         0.5 在 pcap 构建重开较慢时会赶不上，取 1.0 稳妥）。
+# 步骤 2：delay: 1.0 给服务端配方留出下一轮监听就绪的时间（serve 轮次串行；
+#         回环上客户端全程亚毫秒，不加 delay 会错过第二个查询——见
+#         ../icmp_mock/README.md 的同类说明；取 1.0 稳妥）。
 #         用 global("tid") 复用提取的事务 ID 再发查询（原 dns_recipe 的核心教学点：
 #         global 三种 init 形态 + extract 覆盖 + 跨步骤复用），wait: 2 校验。
 #
@@ -23,7 +23,7 @@ recipe:
 - packet: client_reuse.pkt
   wait: 2
   delay: 1.0
-  on_timeout: retry 2   # 服务端重开下一轮监听可能需 1-2s，超时自动重发
+  on_timeout: retry 2   # 服务端下一轮监听就绪可能需 1-2s，超时自动重发
   extract:
   - name: tid2
     from: reply.dns.id

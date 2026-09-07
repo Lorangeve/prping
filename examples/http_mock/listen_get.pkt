@@ -1,8 +1,8 @@
-# server 配方 · 第 1 组步骤 1：链路层持续监听（wait: -1），匹配 HTTP GET 请求帧。
+# server 配方 · 第 1 阶段规则监听源：链路层监听，匹配 HTTP GET 请求帧。
 #
 # 监听方式**自动选择**：本包不含 udp/tcp 传输层（p = raw 占位 + ipv4/eth 外壳）→
 # 引擎选**链路层监听**完整帧（listen_raw_once，AF_PACKET/Npcap，需 root——
-# 抓包权限）；命中后配方继续（触发 resp_get.pkt 发包）。
+# 抓包权限）；命中后执行 handler（触发 resp_get.pkt 发包）。
 # ⚠ 包定义里千万不要加 tcp 层：监听方式按"包内有无 udp/tcp"自动判定，
 #   加了会被当成 UDP 数据报监听（载荷反解）——链路层监听拿不到完整帧的 tcp/http 层。
 # 包体仅用于占位/文档（实际匹配完全由 sniffer 规则决定，同 icmp_mock/listen.pkt）。

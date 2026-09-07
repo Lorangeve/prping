@@ -11,7 +11,7 @@
 # 传输：udp(sport=12345, dport=5533)。sport 只是包头字节（教学示意）——
 #   payload 模式实发走普通 UDP socket，内核临时分配源端口，应答按 socket
 #   实际五元组送达（见 listen_dns.pkt 对 reply.peer.port 的说明）；
-#   dport=5533 决定发送目标端口（与 server 第 1 组监听端口一致）。
+#   dport=5533 决定发送目标端口（与 server 第 1 阶段监听端口一致）。
 # 目标地址可注入：-p ip=127.0.0.1（默认本机回环，可指向别的机器实验）。
 q = dns(id=0x1234, questions=["example.com"])
 full = use(q) |> udp(sport=12345, dport=5533)

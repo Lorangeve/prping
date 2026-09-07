@@ -1,4 +1,4 @@
-# server 配方 · 第 1 组步骤 2（触发发包）：用 listen_dns.pkt 命中后 extract 的
+# server 配方 · 第 1 阶段 handler 步骤（触发发包）：用 listen_dns.pkt 命中后 extract 的
 # global 构造**带 A 记录的 DNS 应答**，发回查询方：
 #   global.tid   = 查询的 dns.id（reply.dns.id 来源）——应答必须回显同一 id，
 #                  客户端靠 id 配对请求/应答（RFC 1035 §4.1.1）；

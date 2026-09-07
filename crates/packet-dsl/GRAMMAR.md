@@ -401,6 +401,8 @@ atom 的解析顺序（决定二义性消解）：
 | `params` | 值位置特判 `params("名"[, 默认])` | 运行时参数注入（`--params k=v`） |
 | `global` | 值位置特判 `global("名"[, 默认])` | 配方全局存储读取（`.pktl` `global:` 段 / 步骤 `extract` / `-g k=v`（--global）注入）；与 `params` 对称但值为**类型化**字面量（Int/Hex/Str/字节列表原样返回，不经过字符串形状解析），可直接参与 `+`/`be16`/位运算；未设置时延迟求值默认值，两者都无则报错 |
 | `reply` | 值调用 `reply("层", "字段")` | 读取当前回包的反解字段（配方 `extract` 的 `from:` 表达式专用；求值期注入回包，其余上下文回退用户函数——eng_lib 的 ARP 位常量 `reply()` 撞名保持原语义）——`from: reply.icmp.id` 直取形态经构建期改写为本调用；数值字段 → Int、地址/字符串字段 → Str、payload/body/raw 字节 → 字节列表 |
+| `round` | 值调用 `round()` | serve 阶段当前轮次（闸门放行后 1 起）——仅配方 `serve:` 阶段的监听 matcher / `until:` 谓词 / `extract` / 阶段内步骤表达式求值时按内置处理（宿主注入当前轮次），其余上下文报错（用户函数撞名时非 0 参调用仍走用户函数） |
+| `hits` | 值调用 `hits()` | serve 阶段已命中次数（监听 matcher 构建时 = 之前轮次累计；命中后 extract/handler 求值时含本次；`on_mismatch` 不计数）——上下文约束同 `round` |
 
 ### 4.7 tpl 模板子语法（EBNF）
 

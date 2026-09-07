@@ -482,9 +482,22 @@ impl Matcher {
         globals: &Globals,
         allow_sent: bool,
     ) -> PktResult<Self> {
+        Self::build_ctx(spec, module, params, globals, allow_sent, None)
+    }
+
+    /// 同 [`Matcher::build`]，并注入 serve 轮次上下文（serve 阶段监听 matcher
+    /// 构建：`round()`/`hits()` 值原语在匹配值表达式中取当前轮次/已命中次数）。
+    pub fn build_ctx(
+        spec: &SnifferSpec,
+        module: Option<&Module>,
+        params: &Params,
+        globals: &Globals,
+        allow_sent: bool,
+        serve: Option<crate::eval::ServeCtx>,
+    ) -> PktResult<Self> {
         let mut preds = Vec::new();
         for p in &spec.clauses {
-            preds.push(build_pred(p, module, params, globals, allow_sent)?);
+            preds.push(build_pred(p, module, params, globals, allow_sent, serve)?);
         }
         Ok(Matcher { preds })
     }
@@ -509,39 +522,43 @@ impl Matcher {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_pred(
     p: &SnifferPred,
     module: Option<&Module>,
     params: &Params,
     globals: &Globals,
     allow_sent: bool,
+    serve: Option<crate::eval::ServeCtx>,
 ) -> PktResult<PredMatcher> {
     match p {
         SnifferPred::Clause(c) => Ok(PredMatcher::Clause(build_clause(
-            c, module, params, globals, allow_sent,
+            c, module, params, globals, allow_sent, serve,
         )?)),
         SnifferPred::And(ps) => Ok(PredMatcher::And(
             ps.iter()
-                .map(|p| build_pred(p, module, params, globals, allow_sent))
+                .map(|p| build_pred(p, module, params, globals, allow_sent, serve))
                 .collect::<PktResult<_>>()?,
         )),
         SnifferPred::Or(ps) => Ok(PredMatcher::Or(
             ps.iter()
-                .map(|p| build_pred(p, module, params, globals, allow_sent))
+                .map(|p| build_pred(p, module, params, globals, allow_sent, serve))
                 .collect::<PktResult<_>>()?,
         )),
         SnifferPred::Not(p) => Ok(PredMatcher::Not(Box::new(build_pred(
-            p, module, params, globals, allow_sent,
+            p, module, params, globals, allow_sent, serve,
         )?))),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_clause(
     c: &SnifferClause,
     module: Option<&Module>,
     params: &Params,
     globals: &Globals,
     allow_sent: bool,
+    serve: Option<crate::eval::ServeCtx>,
 ) -> PktResult<ClauseMatcher> {
     if field_names(&c.layer).is_none() {
         return Err(Diagnostic::new(format!(
@@ -554,11 +571,15 @@ fn build_clause(
         items.push(match item {
             SnifferItem::FieldEq { name, val } => ItemMatcher::FieldEq {
                 name: name.clone(),
-                val: build_value(&c.layer, name, val, module, params, globals, allow_sent)?,
+                val: build_value(
+                    &c.layer, name, val, module, params, globals, allow_sent, serve,
+                )?,
             },
             SnifferItem::FieldNe { name, val } => ItemMatcher::FieldNe {
                 name: name.clone(),
-                val: build_value(&c.layer, name, val, module, params, globals, allow_sent)?,
+                val: build_value(
+                    &c.layer, name, val, module, params, globals, allow_sent, serve,
+                )?,
             },
             SnifferItem::Mask(v) => ItemMatcher::Mask(coerce_mask(v)?),
             // 空模式：starts_with/ends_with 恒真（无意义），contains 空串在
@@ -590,6 +611,7 @@ fn build_clause(
 }
 
 /// 构建字段等式/不等式的匹配值（字段名校验 + 字面量类型强转 + 值表达式求值）。
+#[allow(clippy::too_many_arguments)]
 fn build_value(
     layer: &str,
     name: &str,
@@ -598,6 +620,7 @@ fn build_value(
     params: &Params,
     globals: &Globals,
     allow_sent: bool,
+    serve: Option<crate::eval::ServeCtx>,
 ) -> PktResult<MatchVal> {
     if !field_names(layer)
         .expect("层已校验存在")
@@ -619,8 +642,9 @@ fn build_value(
         }
         SnifferValue::Literal(lit) => Ok(MatchVal::Literal(coerce_literal(layer, name, lit)?)),
         SnifferValue::Expr(expr) => {
-            let bytes = crate::eval::eval_sniffer_value_with_globals(module, params, globals, expr)
-                .map_err(|d| Diagnostic::new(format!("sniffer: 匹配值表达式求值失败：{d}")))?;
+            let bytes =
+                crate::eval::eval_sniffer_value_ctx(module, params, globals, serve, expr)
+                    .map_err(|d| Diagnostic::new(format!("sniffer: 匹配值表达式求值失败：{d}")))?;
             Ok(MatchVal::Expr(bytes))
         }
     }

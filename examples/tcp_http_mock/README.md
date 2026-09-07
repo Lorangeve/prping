@@ -6,7 +6,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（TCP :80 + HTTP 静态页） | **显式两组** listen+reply：第 1 组 `wait: -1` 链路层监听匹配纯 SYN → extract 端口/seq/双向 IP → 触发发包 SYN-ACK（`ack=请求 seq+1`，固定服务端 ISN=0x2000）；第 2 组监听 `http(method="GET")` → extract GET 的 seq/ack → 触发发包 200 OK（`seq=GET 的 ack`，`ack=GET 的 seq+38`） |
+| `server.pktl` | 服务端（TCP :80 + HTTP 静态页） | `serve:` 单规则 + **嵌套 on_recv**：规则链路层监听匹配纯 SYN → extract 端口/seq/双向 IP → handler 先发 SYN-ACK（`ack=请求 seq+1`，固定服务端 ISN=0x2000），再 `on_recv:` 等 GET → extract GET 的 seq/ack → 嵌套 handler 发包 200 OK（`seq=GET 的 ack`，`ack=GET 的 seq+38`） |
 | `client.pktl` | 客户端（三步流程） | 1. 发 SYN（seq=0x1000）→ `wait: 2` 校验 SYN-ACK → **extract 服务端 ISN**（`reply.tcp.seq` 写 `global.sseq`，真实握手核心动作）；2. `delay: 0.5` 发第三次握手 ACK（`wait: 0` 无应答）；3. `delay: 0.5` 发 HTTP GET（PSH\|ACK）→ `wait: 2` 校验 200 OK（tcp 字段 + http 状态行） |
 
 发包用**裸 IP 外层**（无 eth 层）+ `raw: true`：有 tcp 传输层的发送必须显式 raw
@@ -35,15 +35,15 @@ sudo prping packet examples/tcp_http_mock/client.pktl 127.0.0.1
 | 段 | 方向 | seq | ack | flags | 载荷 | 来源 |
 | --- | --- | --- | --- | --- | --- | --- |
 | ① SYN | C→S | 0x1000 | — | `syn` | — | client 步骤 1 `syn.pkt` |
-| ② SYN-ACK | S→C | 0x2000（固定 ISN） | **0x1001 = ①.seq+1**（extract `r_seq+1`） | `syn,ack` | — | server 第 1 组 `synack.pkt` |
+| ② SYN-ACK | S→C | 0x2000（固定 ISN） | **0x1001 = ①.seq+1**（extract `r_seq+1`） | `syn,ack` | — | server 规则 handler `synack.pkt` |
 | ③ ACK | C→S | 0x1001 = cseq+1 | **0x2001 = ②.seq+1**（sseq 动态提取后 +1） | `ack` | — | client 步骤 2 `tcp_ack.pkt`（`wait: 0`） |
 | ④ GET | C→S | 0x1001（③ 无载荷不占号） | 0x2001（服务端无新数据，不变） | `psh,ack` | 38 B：`GET / HTTP/1.1\r\n`(16)+`Host: mock.example\r\n`(20)+空行(2) | client 步骤 3 `http_get.pkt` |
-| ⑤ 200 OK | S→C | **0x2001 = ④.ack**（extract `r2_ack`） | **0x1027 = ④.seq+38**（extract `r2_seq+38`） | `psh,ack` | 89 B：状态行(17)+两头部(26+20)+空行(2)+body(24) | server 第 2 组 `http_resp.pkt` |
+| ⑤ 200 OK | S→C | **0x2001 = ④.ack**（extract `r2_ack`） | **0x1027 = ④.seq+38**（extract `r2_seq+38`） | `psh,ack` | 89 B：状态行(17)+两头部(26+20)+空行(2)+body(24) | server 嵌套 on_recv handler `http_resp.pkt` |
 
 三条**动态链**（旧目录做不到/做不全的部分）：
 
 - **server 侧**：`ack = r_seq + 1`（SYN-ACK）、`seq = r2_ack`、`ack = r2_seq + 38`
-  ——全部来自 listen 步骤 extract 的匹配帧字段，服务端对客户端 ISN/端口一无所知也能应答；
+  ——全部来自 serve 规则/嵌套 on_recv extract 的匹配帧字段，服务端对客户端 ISN/端口一无所知也能应答；
 - **client 侧**：`ack = sseq + 1`（③⑤）——`sseq` 是从 SYN-ACK **动态提取**的服务端
   ISN。对比 `examples/tcp_handshake/`：那边 cseq/sseq 双双 init 硬编码（0x1000/0x2000），
   只能对着已知 ISN 的对端演；本目录把"提取对端 ISN 再构造 ACK"这一真实握手核心动作补齐；
@@ -118,9 +118,10 @@ raw 注入的包**同样会被内核 TCP 栈看到**，而 mock 的连接对内�
 
 ## 为什么 client 步骤 2/3 要 delay: 0.5
 
-server.pktl 每命中一组都要重新打开下一轮抓包（pcap 设备枚举 + BPF 编译），回环上
-client 全程亚毫秒——不 delay 会在 server 下一轮监听就绪前发包而错过（表现为监听侧
-"少命中一条"）。经验来自 `examples/icmp_mock/README`「为什么 seq 是 1001/1002」一节。
+server 的 handler 是串行的：SYN 命中 → 回 SYN-ACK → `on_recv:` 重新打开 GET 监听
+（pcap 设备枚举 + BPF 编译），回环上 client 全程亚毫秒——不 delay 会在下一个监听
+就绪前发包而错过（表现为监听侧"少命中一条"）。经验来自
+`examples/icmp_mock/README`「为什么 seq 是 1001/1002」一节。
 
 ## 验证（不依赖 root/网络的部分）
 

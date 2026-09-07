@@ -1,5 +1,5 @@
-# DHCP 流程步骤 4：DHCP Ack（服务端确认分配）——dhcp_mock server 配方第 2 组
-# listen 命中（Request）后的触发发包步骤（由 server.pktl 编排，不单独跑）。
+# DHCP 流程步骤 4：DHCP Ack（服务端确认分配）——dhcp_mock server 配方第 2 阶段
+# 命中（Request）后的 handler 发包步骤（由 server.pktl 编排，不单独跑）。
 #
 # DHCP Ack 是服务端对 Request 的最终确认：
 #   - 确认 IP 地址分配（yiaddr 与 Offer 一致）
@@ -10,7 +10,7 @@
 # yiaddr 等预置在数组里；单播回包替代真实广播；载荷假地址（192.168.1.x）
 # 与外层回环封装（global 提取）各自独立。
 #
-# 字段来源（server.pktl 第 2 组 listen 步骤的 extract，与第 1 组相同）：
+# 字段来源（server.pktl 第 2 阶段规则的 extract，与第 1 阶段相同）：
 #   global.cip   = reply.ipv4.src  —— 客户端 IP
 #   global.cport = reply.udp.sport —— 客户端端口（:68）
 #   global.sip   = reply.ipv4.dst  —— 本机 IP

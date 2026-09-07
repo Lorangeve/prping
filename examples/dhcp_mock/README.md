@@ -6,7 +6,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（DHCP 服务器） | **显式两组** listen+reply：每组 = `wait: -1` 链路层监听匹配 BOOTREQUEST → extract 客户端 IP/端口、本机 IP 写 global → 触发发包应答（第 1 组回 Offer、第 2 组回 Ack）。两组对应 client 两步；要服务更多次就多写几组 |
+| `server.pktl` | 服务端（DHCP 服务器） | **两个 serve 阶段**顺序排列（各 `max: 1`）：链路层监听匹配 BOOTREQUEST → extract 客户端 IP/端口、本机 IP 写 global → handler 触发发包应答（第 1 阶段回 Offer、第 2 阶段回 Ack）。两阶段对应 client 两步；同端口 :67 的 Discover/Request 谓词区分不了（见下），v1 也未实现同监听地址多规则按序配对，故顺序两阶段 |
 | `client.pktl` | 客户端（两步发包流程） | 1. 发 Discover → `wait: 2` 校验 Offer（sniffer）→ extract 服务端 IP 写 `global.sip`；2. `delay: 0.5` 后发 Request（dst 复用 `global.sip`）→ `wait: 2` 校验 Ack |
 | `listen.pkt` | 服务端监听规则 | 三重跨层 AND：`ipv4(proto=17)` + `udp(68→67)` + `raw 首字节 mask(0x01)`（op=1） |
 | `dhcp_discover.pkt` / `dhcp_request.pkt` | 客户端两个请求包 | 旧 `dhcp_flow/` 的裸字节数组逐字段注释全保留，封装改单播回环；各带 wait 校验用的 sniffer |
@@ -15,7 +15,7 @@
 ## 运行（需 root；链路层抓帧 AF_PACKET / raw 发送 IPPROTO_RAW）
 
 ```bash
-# 终端 1 —— 服务端配方（两组监听+应答，Ctrl+C 结束）
+# 终端 1 —— 服务端配方（两个 serve 阶段顺序服务，Ctrl+C 结束）
 sudo prping packet examples/dhcp_mock/server.pktl
 
 # 终端 2 —— 客户端配方（两步发包 + wait 校验 + extract 复用）
@@ -42,11 +42,13 @@ sudo prping packet examples/dhcp_mock/client.pktl
   原包，无 udp/raw 层，这里按 proto 再挡一次兼作教学）；② `udp(68→67)` 锁
   BOOTREQUEST 的端口方向；③ `raw 首字节 mask(0x01)`——mask 语义是
   `(首字节 & mask) == mask`（matchpred.rs），0x01 命中 op=1、排除 op=2。
-- **为什么两组监听用同一规则、按组配对**（不区分 Discover/Request）：两者
+- **为什么两个 serve 阶段用同一规则、按阶段配对**（不区分 Discover/Request）：两者
   op 都是 1，严格区分要匹配 option 53 字节模式 `35 01 01`/`35 01 03`，但
   sniffer 字节谓词 `startswith/contains` 只接受**字符串**参数，而 DSL 字符串
   转义只有 `\n \r \t \\ \"`（无 `\xNN`），表达不了控制字节——现有谓词无法
-  表达。同款位置配对思路见 icmp_mock 两组 listen 共用一条规则。
+  表达。谓词同形的场景（回显型应答、仅按次数区分轮次）可像 icmp_mock 那样合并成
+  单规则多轮（`max: N`）；本目录两个请求要不同的 handler（Offer/Ack），故保持
+  顺序两阶段。
 - **为什么 xid/chaddr/yiaddr 全是固定值**：引擎没有 dhcp proto 层（反解时
   DHCP 载荷只能整体落在 raw 层），配方 extract 取不到 xid 等字段，没法像
   icmp_mock 提取回显。固定值便于教学对照（四个报文逐字节看差异）；真实场景
@@ -59,9 +61,9 @@ sudo prping packet examples/dhcp_mock/client.pktl
   0.0.0.0；raw 发送前引擎补本机地址并只重算 **IP 头**校验和，UDP 校验和仍是
   按 0.0.0.0 伪头部算的——Wireshark 会标红。可接受：服务端走 AF_PACKET 抓帧，
   不经过内核 UDP socket，无人校验（服务端回包源地址来自 extract，校验和正确）。
-- **为什么 client 步骤 2 带 `delay: 0.5`**：server 每命中一次都要重开下一轮
-  抓包，回环上 client 全程 <1ms，不加 delay 会错过第二个请求（经验同
-  icmp_mock「为什么 seq 是 1001/1002」）。
+- **为什么 client 步骤 2 带 `delay: 0.5`**：两个 serve 阶段串行推进（第 1 阶段
+  命中 → handler 回包 → 阶段收工 → 第 2 阶段监听就绪），回环上 client 全程
+  <1ms，不加 delay 会错过第二个请求（经验同 icmp_mock「为什么 seq 是 1001/1002」）。
 
 ## 学习材料：DHCP 报文结构与选项（承自旧 examples/dhcp_flow/）
 

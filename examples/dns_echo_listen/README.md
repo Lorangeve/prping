@@ -1,7 +1,7 @@
 # dns_echo_listen：用 .pktl 配方模拟 DNS 发包/回包
 
-客户端发 DNS 查询，服务端**配方** `wait:` 持续监听（UDP 数据报）匹配查询，
-`extract` 取查询 id 与对端地址写 global，**触发后续步骤**构造**带 A 记录的 DNS
+客户端发 DNS 查询，服务端**配方** `serve:` 阶段（UDP 数据报监听）匹配查询，
+`extract` 取查询 id 与对端地址写 global，`handler` 步骤构造**带 A 记录的 DNS
 应答**发回；客户端 `--wait` 校验应答——一次完整的 DNS 请求/响应模拟。
 
 > 单文件 `--wait --raw` 应答模板（`reply("层","字段")` 内联取值）已移除；
@@ -25,16 +25,19 @@ id=0x4242（与查询一致）、flags=0x8180（应答位）。
 
 ```text
 recipe:
-- packet: listen.pkt      # 步骤 1：持续监听（不发送）
-  wait: -1                   # -1 = 持续监听直到命中（与 CLI 负数 --wait 同语义）
-  extract:                # 命中后从匹配包取值写 global
-  - name: tid
-    from: reply.dns.id    # 查询的 dns.id
-  - name: cip
-    from: reply.peer.ip   # 查询方 IP（对端地址来自 socket）
-  - name: cport
-    from: reply.peer.port # 查询方 UDP 源端口
-- packet: reply.pkt       # 步骤 2：触发发包——用 global 构造应答发回查询方
+- serve:                  # serve 阶段：监听分派 + 命中处理，阻塞至收工
+  max: 2                  # 逐轮服务两个查询（对应 client 两步；-1 = 无限）
+  rules:
+  - packet: listen.pkt    # 监听源：其 sniffer 即本规则的分派谓词（不发送）
+    extract:              # 命中后从匹配包取值写 global
+    - name: tid
+      from: reply.dns.id    # 查询的 dns.id
+    - name: cip
+      from: reply.peer.ip   # 查询方 IP（对端地址来自 socket）
+    - name: cport
+      from: reply.peer.port # 查询方 UDP 源端口
+    handler:              # 命中后步骤——用 global 构造应答发回查询方
+    - packet: reply.pkt
 ```
 
 - `listen.pkt` 有 udp 传输层 → 自动选 **UDP 数据报监听**（无需 root 抓包，
@@ -60,7 +63,7 @@ recipe:
     as: hex            # 提取应答 dns.id → global.tid
 - packet: client_reuse.pkt   # 复用 global("tid") 再发查询（第二步校验同款）
   wait: 2
-  delay: 0.5           # 给服务端配方重开下一轮监听留时间（回环客户端太快会错过）
+  delay: 0.5           # 给服务端下一轮监听就绪留时间（回环客户端太快会错过）
 ```
 
 payload 模式（UDP 载荷经内核送达，无需 root）；`id=id` 是发包字段引用（SentField），
@@ -69,9 +72,9 @@ payload 模式（UDP 载荷经内核送达，无需 root）；`id=id` 是发包�
 
 ## 验证（字节级，不依赖 root/网络）
 
-`recipe_listen_triggers_next_step`（`pkg/recipe.rs` 测试）：UDP 回环——配方线程
-`wait:` 持续监听匹配 DNS 查询 → extract `reply.dns.id`/`reply.peer.port` → 后续
-步骤构造应答发回客户端 → 客户端收到应答。
+`recipe_listen_triggers_next_step`（`pkg/recipe.rs` 测试）：UDP 回环——配方
+`serve:` 阶段监听匹配 DNS 查询 → extract `reply.dns.id`/`reply.peer.port` →
+handler 构造应答发回客户端 → 客户端收到应答。
 
 ## 与其它服务端写法的对照
 

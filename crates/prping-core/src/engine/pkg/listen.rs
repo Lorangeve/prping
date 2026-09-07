@@ -207,6 +207,96 @@ pub(crate) fn listen_udp_once(
     }
 }
 
+/// 分派监听（多规则/带 on_mismatch 的 serve 阶段）单次收包结果。
+pub(crate) enum UdpDispatch {
+    /// 规则 k 的 sniffer 命中（按规则表顺序匹配，先到先得）；`until_matched` =
+    /// 同时满足阶段 `until:` 谓词（本轮结束后收工）。
+    Hit {
+        rule: usize,
+        data: Vec<u8>,
+        fields: Vec<(String, String)>,
+        peer: SocketAddr,
+        until_matched: bool,
+    },
+    /// 仅 until 命中（无规则命中）：阶段立即收工。
+    Until,
+    /// 无任何命中（仅带 on_mismatch 的阶段返回）：执行器跑 on_mismatch 段后
+    /// 重新监听，不消耗轮次。
+    Mismatch { data: Vec<u8>, peer: SocketAddr },
+}
+
+/// serve 分派监听（UDP）：单一 socket 绑定**首条规则**推导的地址（其余规则的
+/// 推导地址必须一致，否则报错），收到数据报后按规则表顺序匹配，第一个命中的
+/// 规则获胜。`on_mismatch` = true 时未命中包以 [`UdpDispatch::Mismatch`] 返回。
+/// 返回 `None` = Ctrl+C 中断。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn listen_udp_dispatch(
+    globals: &packet_dsl::Globals,
+    modules: &[packet_dsl::Module],
+    matchers: &[packet_dsl::Matcher],
+    params: &[packet_dsl::Params],
+    opts: &PkgOptions,
+    timeout: Option<Duration>,
+    until: Option<&packet_dsl::Matcher>,
+    on_mismatch: bool,
+) -> anyhow::Result<Option<UdpDispatch>> {
+    let addr = listen_addr(&modules[0], &params[0], globals, opts)?;
+    for (idx, (m, p)) in modules.iter().zip(params.iter()).enumerate().skip(1) {
+        let other = listen_addr(m, p, globals, opts)?;
+        if other != addr {
+            anyhow::bail!(
+                "{}",
+                t!(
+                    "engine.serve_dispatch_addr",
+                    first = addr.to_string(),
+                    other = other.to_string(),
+                    rule = idx + 1,
+                ),
+            );
+        }
+    }
+    let sock = UdpSocket::bind(addr)
+        .map_err(|e| anyhow::anyhow!(t!("engine.listen_bind_fail", addr = addr, err = e)))?;
+    sock.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let deadline = timeout.map(|d| std::time::Instant::now() + d);
+    let mut buf = [0u8; 65535];
+    loop {
+        if crate::util::interrupted() || deadline.is_some_and(|dl| std::time::Instant::now() >= dl)
+        {
+            return Ok(None);
+        }
+        match sock.recv_from(&mut buf) {
+            Ok((n, peer)) => {
+                let data = buf[..n].to_vec();
+                for (k, m) in matchers.iter().enumerate() {
+                    if let Some(fields) = m.matches(&data, None) {
+                        let until_matched = until.is_some_and(|u| u.matches(&data, None).is_some());
+                        return Ok(Some(UdpDispatch::Hit {
+                            rule: k,
+                            data,
+                            fields,
+                            peer,
+                            until_matched,
+                        }));
+                    }
+                }
+                if let Some(u) = until
+                    && u.matches(&data, None).is_some()
+                {
+                    return Ok(Some(UdpDispatch::Until));
+                }
+                if on_mismatch {
+                    return Ok(Some(UdpDispatch::Mismatch { data, peer }));
+                }
+            }
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 /// 监听地址：CLI 显式 HOST:PORT 优先；否则按包内最外层 udp/tcp dport 推导
 /// （IPv6 包 → `[::]:port`，其余 → `0.0.0.0:port`）。配方监听简报也用。
 pub(crate) fn listen_addr(

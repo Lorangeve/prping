@@ -1702,17 +1702,16 @@ fn all_exports_raw_only(path: &std::path::Path, a: &PacketArgs) -> bool {
     let globals: packet_dsl::Globals = parse_globals(&a.global).unwrap_or_default();
 
     if is_recipe(path) {
-        // 配方：解析 recipe，逐步骤检查每个 .pkt 文件
+        // 配方：解析 recipe，递归收集全部 .pkt 路径（顶层步骤 + serve 规则 +
+        // handler/on_recv 内步骤）
         let recipe = match prping_core::parse_recipe(path) {
             Ok(r) => r,
             Err(_) => return false,
         };
-        if recipe.steps.is_empty() {
+        let pkt_files: Vec<std::path::PathBuf> = prping_core::recipe_pkt_paths(&recipe);
+        if pkt_files.is_empty() {
             return false;
         }
-        // 收集所有步骤的 .pkt 文件路径
-        let pkt_files: Vec<std::path::PathBuf> =
-            recipe.steps.iter().map(|s| s.pkg.clone()).collect();
         // 逐个检查：只要有一步的包需要 TCP/UDP payload 模式，就返回 false
         for pkt_file in &pkt_files {
             let module = match packet_dsl::parse_file_with_libs(pkt_file, &libs) {
