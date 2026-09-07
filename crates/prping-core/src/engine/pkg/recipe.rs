@@ -264,7 +264,14 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
         {
             let sel = loop_runs.get(&ctx.id).and_then(|r| r.selected);
             if sel != Some(want) {
-                i += 1;
+                // 被跳过的段末步（ctx.last）仍须回跳块首——跳过路径不走
+                // 循环底的回跳检查，否则块循环断裂：选中段不是最后一段时，
+                // 阶段在首轮后静默结束
+                if ctx.last {
+                    i = loop_bounds[&ctx.id].0;
+                } else {
+                    i += 1;
+                }
                 continue;
             }
         }
@@ -362,6 +369,10 @@ pub fn send_recipe(file: &Path, opts: &PkgOptions) -> anyhow::Result<()> {
                     // 步骤显式 wait 秒数覆盖 CLI；CLI `--wait SECS` 作步骤默认
                     (Some(secs), _) => crate::engine::pkg::WaitMode::OneShot(secs),
                     (None, Some(s)) => crate::engine::pkg::WaitMode::OneShot(s),
+                    // serve 阶段内步骤未声明 wait = 纯发送（OneShot(0)：不读
+                    // 2s 回显——回显读取把轮次重绑推迟 ~2s，下一轮请求落在
+                    // 窗口内被丢弃，until/多轮 mock 的时序全部被拖垮）
+                    _ if step.loop_ctx.is_some() => crate::engine::pkg::WaitMode::OneShot(0.0),
                     _ => crate::engine::pkg::WaitMode::Off,
                 }
             },

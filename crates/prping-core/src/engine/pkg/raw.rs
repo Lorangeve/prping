@@ -86,18 +86,34 @@ pub(crate) fn send_raw_bytes(
         // local_bh_enable 的进程上下文同步执行：icmp 回显 → 回包生成 → 再次投递），
         // 回包先于 socket 存在即被内核丢弃——发送后才开 socket 永远等不到
         // （与 rawpcap/Npcap 侧「先开抓包句柄再发送」同理）。
+        // 非 ICMP 的 raw 包（ARP/TCP/UDP 完整帧）的应答只能经链路层抓包收到（ICMP
+        // socket 收不到非 ICMP 帧——ARP/TCP mock 客户端因此永远等不到应答）：先开 AF_PACKET
+        // 抓包句柄再发送（与 rawpcap/Npcap 侧同理）。IP 层帧仍走下方 ICMP socket
+        // （回环上内核在 send() 内同步完成 echo 往返，见 wait_icmp_reply 注释）。
         #[cfg(target_os = "linux")]
-        let reply_fd = if wait.is_some() && (sniffer.is_some() || icmp_echo_ids(pkt).is_some()) {
+        let (reply_fd, capture_fd) = if wait.is_some() && sniffer.is_some() && !has_icmp_layer(pkt)
+        {
+            let iface = iface.unwrap_or("lo");
+            let c_iface = std::ffi::CString::new(iface)
+                .map_err(|_| anyhow::anyhow!("接口名含 NUL：`{iface}`"))?;
+            let ifindex = unsafe { libc::if_nametoindex(c_iface.as_ptr()) };
+            if ifindex == 0 {
+                anyhow::bail!("找不到网络接口 `{iface}`");
+            }
+            let fd = crate::util::socket::open_af_packet(ifindex as libc::c_int)?;
+            let _ = crate::util::socket::af_packet_promisc_all(fd);
+            (None, Some(fd))
+        } else if wait.is_some() && (sniffer.is_some() || icmp_echo_ids(pkt).is_some()) {
             // 按发包 IP 版本选回包 socket：v6（或 eth 内含 v6）→ AF_INET6 +
             // IPPROTO_ICMPV6（此前恒开 v4 ICMP socket，v6 echo 回包永远收不到、
             // 静默等满超时）；v4 → 原路径
             if reply_is_v6(pkt) {
-                Some(open_raw_icmp6()?)
+                (Some(open_raw_icmp6()?), None)
             } else {
-                Some(open_raw_icmp4()?)
+                (Some(open_raw_icmp4()?), None)
             }
         } else {
-            None
+            (None, None)
         };
         #[cfg(not(target_os = "linux"))]
         let reply_fd: Option<libc::c_int> = None;
@@ -119,20 +135,24 @@ pub(crate) fn send_raw_bytes(
                 }
                 _ => anyhow::bail!("raw 发送需要最外层为 eth / ipv4 / ipv6 层"),
             };
-            let reply = match reply_fd {
-                Some(fd) => {
-                    let secs = wait.expect("reply_fd 仅在 --wait 时打开");
-                    #[cfg(target_os = "linux")]
-                    {
-                        wait_icmp_reply(fd, pkt, secs, sniffer, sent_report)?
+            let reply = if let Some(fd) = capture_fd {
+                wait_frame_reply(fd, pkt, bytes, wait.unwrap_or(0.0), sniffer, sent_report)?
+            } else {
+                match reply_fd {
+                    Some(fd) => {
+                        let secs = wait.expect("reply_fd 仅在 --wait 时打开");
+                        #[cfg(target_os = "linux")]
+                        {
+                            wait_icmp_reply(fd, pkt, secs, sniffer, sent_report)?
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let _ = (fd, pkt, secs, sniffer, sent_report);
+                            None
+                        }
                     }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        let _ = (fd, pkt, secs, sniffer, sent_report);
-                        None
-                    }
+                    None => None,
                 }
-                None => None,
             };
             Ok(SendOutcome {
                 proto,
@@ -143,6 +163,10 @@ pub(crate) fn send_raw_bytes(
         })();
         #[cfg(target_os = "linux")]
         if let Some(fd) = reply_fd {
+            unsafe { libc::close(fd) };
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = capture_fd {
             unsafe { libc::close(fd) };
         }
         result
@@ -162,6 +186,14 @@ fn reply_is_v6(pkt: &PacketSpec) -> bool {
             _ => None,
         })
         .unwrap_or(false)
+}
+
+/// 包内是否含 ICMP 层（决定 raw --wait 的回包 socket：ICMP 走内核 ICMP socket（回环
+/// 上内核在 send() 内同步替答/回包往返），其余（TCP/UDP/ARP 等完整帧）走
+/// AF_PACKET 链路层抓包——ICMP socket 收不到非 ICMP 帧）。
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+fn has_icmp_layer(pkt: &PacketSpec) -> bool {
+    pkt.layers.iter().any(|l| matches!(l, Layer::Icmp(_)))
 }
 
 /// raw 模式应答等待：sniffer 存在时按 sniffer 匹配；否则包是 ICMP echo → 等 echo reply
@@ -268,6 +300,65 @@ fn wait_icmp_reply(
                 rtt,
                 bytes: data.to_vec(),
                 matched: None,
+            }));
+        }
+    }
+}
+
+/// 在已打开的 AF_PACKET 抓包 socket 上等待链路层应答帧（eth 帧 raw `--wait`）。
+/// 跳过自身发出的帧——lo 会把本机出向帧回投给同机抓包 socket（请求帧自身
+/// 不应被当作应答匹配）；匹配由 `match_reply` 完成（完整帧反解，
+/// eth→arp/ipv4/... 层栈齐全）。调用方必须**先开抓包句柄再发送**（同
+/// `wait_icmp_reply` 注释的回环同步往返语义）。
+#[cfg(all(target_os = "linux", not(feature = "pcap")))]
+fn wait_frame_reply(
+    fd: libc::c_int,
+    pkt: &PacketSpec,
+    own_frame: &[u8],
+    secs: f64,
+    sniffer: Option<&SnifferMatcher>,
+    sent_report: Option<&packet_dsl::DissectReport>,
+) -> anyhow::Result<Option<Reply>> {
+    let t0 = std::time::Instant::now();
+    let mut buf = [0u8; 65535];
+    let deadline = Duration::from_secs_f64(secs);
+    let mut rfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let remaining = deadline.saturating_sub(t0.elapsed());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        let rc = unsafe { libc::poll(&mut rfd, 1, remaining.as_millis() as libc::c_int) };
+        if rc <= 0 {
+            return Ok(None);
+        }
+        let n = unsafe {
+            libc::recvfrom(
+                fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if n <= 0 {
+            continue;
+        }
+        let data = &buf[..n as usize];
+        if data == own_frame {
+            continue; // 自帧（出向回投）跳过
+        }
+        let rtt = t0.elapsed().as_secs_f64() * 1000.0;
+        if let Some((bytes, matched)) = match_reply(data, pkt, sniffer, sent_report)? {
+            return Ok(Some(Reply {
+                rtt,
+                bytes,
+                matched,
             }));
         }
     }

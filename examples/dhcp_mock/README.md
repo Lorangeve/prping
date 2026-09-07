@@ -6,7 +6,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（DHCP 服务器） | **两个 serve 阶段**顺序排列（各 `max: 1`）：链路层监听匹配 BOOTREQUEST → extract 客户端 IP/端口、本机 IP 写 global → handler 触发发包应答（第 1 阶段回 Offer、第 2 阶段回 Ack）。两阶段对应 client 两步；同端口 :67 的 Discover/Request 谓词区分不了（见下），v1 也未实现同监听地址多规则按序配对，故顺序两阶段 |
+| `server.pktl` | 服务端（DHCP 服务器） | **两个 serve 阶段**顺序排列（各 `max: 1`）：链路层监听匹配 BOOTREQUEST → extract 客户端 IP/端口、本机 IP 写 global → handler 触发发包应答（第 1 阶段回 Offer、第 2 阶段回 Ack）。两阶段对应 client 两步；同端口 :67 的 Discover/Request 谓词区分不了（见下）——分派监听也无法区分两条规则的谓词，故顺序两阶段 |
 | `client.pktl` | 客户端（两步发包流程） | 1. 发 Discover → `wait: 2` 校验 Offer（sniffer）→ extract 服务端 IP 写 `global.sip`；2. `delay: 0.5` 后发 Request（dst 复用 `global.sip`）→ `wait: 2` 校验 Ack |
 | `listen.pkt` | 服务端监听规则 | 三重跨层 AND：`ipv4(proto=17)` + `udp(68→67)` + `raw 首字节 mask(0x01)`（op=1） |
 | `dhcp_discover.pkt` / `dhcp_request.pkt` | 客户端两个请求包 | 旧 `dhcp_flow/` 的裸字节数组逐字段注释全保留，封装改单播回环；各带 wait 校验用的 sniffer |
@@ -42,7 +42,7 @@ sudo prping packet examples/dhcp_mock/client.pktl
   原包，无 udp/raw 层，这里按 proto 再挡一次兼作教学）；② `udp(68→67)` 锁
   BOOTREQUEST 的端口方向；③ `raw 首字节 mask(0x01)`——mask 语义是
   `(首字节 & mask) == mask`（matchpred.rs），0x01 命中 op=1、排除 op=2。
-- **为什么两个 serve 阶段用同一规则、按阶段配对**（不区分 Discover/Request）：两者
+- **为什么两个 serve 阶段用同一规则、按阶段配对**（不区分 Discover/Request；分派监听已支持同地址多规则，但这里两条规则谓词相同，无法按规则区分请求类型）：两者
   op 都是 1，严格区分要匹配 option 53 字节模式 `35 01 01`/`35 01 03`，但
   sniffer 字节谓词 `startswith/contains` 只接受**字符串**参数，而 DSL 字符串
   转义只有 `\n \r \t \\ \"`（无 `\xNN`），表达不了控制字节——现有谓词无法

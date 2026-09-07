@@ -23,4 +23,4 @@ recipe:
 - packet: udp_vnc.pkt
   wait: 2
   delay: 1.0
-  on_timeout: retry 2   # 服务端切换到 VNC 阶段监听可能需 1-2s（pcap 构建），超时自动重发
+  on_timeout: retry 2   # 服务端切换到 VNC 阶段监听有重绑间隙，超时自动重发

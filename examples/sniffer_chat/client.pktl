@@ -22,6 +22,7 @@ recipe:
 - packet: step2.pkt
   wait: 2
   delay: 0.5
+  on_timeout: retry 3   # 服务端 handler 回显读回显期间轮次未重绑（~1s 窗口），超时自动重发
   extract:
   - name: echoed_id
     from: reply.dns.id

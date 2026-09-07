@@ -7,7 +7,7 @@
 
 | 文件 | 角色 | 配方步骤 |
 | --- | --- | --- |
-| `server.pktl` | 服务端（按端口分派） | **两个 serve 阶段**顺序排列（各 `max: 1`）：第 1 阶段 **UDP 数据报监听** :5533 匹配 DNS 查询（flags=0x0100）→ extract id/对端地址写 global → handler 触发发包 A 记录应答；第 2 阶段 `raw: true` **链路层监听** 匹配 RFB 横幅（跨层 AND：udp dport=5900 + raw 前缀）→ extract 帧内对端 → handler 回横幅。不分派成一条多规则 serve 是因为 v1 多规则要求所有规则都是 UDP 数据报监听，第 2 条是链路层，故顺序两阶段 |
+| `server.pktl` | 服务端（按端口分派） | **两个 serve 阶段**顺序排列（各 `max: 1`）：第 1 阶段 **UDP 数据报监听** :5533 匹配 DNS 查询（flags=0x0100）→ extract id/对端地址写 global → handler 触发发包 A 记录应答；第 2 阶段 `raw: true` **链路层监听** 匹配 RFB 横幅（跨层 AND：udp dport=5900 + raw 前缀）→ extract 帧内对端 → handler 回横幅。不分派成一条多规则 serve 是因为两条规则监听方式不同（数据报 vs 链路层，同阶段混用报错）且端口不同（单 socket 无法同时绑定），故顺序两阶段 |
 | `client.pktl` | 客户端（多包流程） | 1. 发 DNS 查询（id=0x1234）→ `wait: 2` sniffer 校验应答（id 一致 + flags=0x8180）；2. `delay: 0.5` 后发 RFB 横幅 → `wait: 2` 等回横幅（无 sniffer，见下） |
 
 ## 运行（服务端需 root；客户端全程免 root）
