@@ -293,8 +293,10 @@ pub(crate) fn stop(slot: &RunSlot, id: Option<&str>) -> usize {
 }
 
 /// spawn 自身二进制的 `packet` 子命令（stdin 管道化作为生命线——写端由服务端
-/// 持有，服务端死亡即 EOF，子进程据此自行退出；stdout/stderr 管道化——管道下
-/// termcolor ColorChoice::Auto 自动去色，页面得到纯文本行）。
+/// 持有，服务端死亡即 EOF，子进程据此自行退出；stdout/stderr 管道化——注意
+/// termcolor ColorChoice::Auto 只看 TERM/NO_COLOR、**不查 tty**，管道下去色并不
+/// 自动发生，因此显式注入 NO_COLOR=1（termcolor 两平台分支都认），保证页面得到
+/// 纯文本行；前端对非 JSON 回退行另有 ANSI 剥离兜底）。
 fn spawn_child(spec: &RunSpec) -> anyhow::Result<Child> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!(t!("web.run_spawn_failed", err = e.to_string())))?;
@@ -302,6 +304,7 @@ fn spawn_child(spec: &RunSpec) -> anyhow::Result<Child> {
         .args(build_args(spec))
         .current_dir(&spec.cwd)
         .env("PRPING_WEB_RUN", "1")
+        .env("NO_COLOR", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

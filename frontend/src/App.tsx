@@ -48,6 +48,7 @@ import {
   RunPanel,
   TaskManager,
   parseRunLine,
+  stripAnsiEscapes,
   type OutlineSym,
   type RecipeDoc,
 } from "./panels";
@@ -232,7 +233,10 @@ export function App() {
       const byRun = new Map<string, RunLine[]>();
       for (const b of batch) {
         const arr = byRun.get(b.run) ?? [];
-        arr.push({ stream: b.stream, text: b.text, view: parseRunLine(b.text, wsRoot()) });
+        const view = parseRunLine(b.text, wsRoot());
+        // 非 JSON 行原样回退，但剥 ANSI 转义兜底（服务端已注入 NO_COLOR，此为
+        // 二道防线）；JSON 行的 text 保留原始载荷（转义可能是包数据的一部分）
+        arr.push({ stream: b.stream, text: view ? b.text : stripAnsiEscapes(b.text), view });
         byRun.set(b.run, arr);
       }
       let touched = false;

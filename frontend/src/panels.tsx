@@ -549,6 +549,14 @@ export function PanelTabs(props: {
   );
 }
 
+/** 剥 ANSI 转义序列（CSI 'ESC[…m' 类 + 其它 ESC-Fs 单字节终止符）：仅用于
+ *  非 JSON 回退行——服务端应已注入 NO_COLOR，这里兜底防终端控制码污染控制台；
+ *  JSON 行的转义属于载荷数据（如 payload 里的 0x1B），不在剥除范围。 */
+const ANSI_RE = /\u001b(?:\\[[0-?]*[ -/]*[@-~]|[@-Z\\\\-_])/g;
+export function stripAnsiEscapes(s: string): string {
+  return s.replace(ANSI_RE, "");
+}
+
 /** JSONL 行 → 渲染视图（ingestion 时调用一次，控制台不再逐帧整表重解析）。
  *  非 JSON 行返回 null（原样文本）。stripRoot 给出工作区根时，step 行的包路径
  *  若带该绝对前缀则剥掉（服务端会逐步 relativize，这里做渲染端兜底）。 */
